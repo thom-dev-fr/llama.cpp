@@ -95,6 +95,8 @@ struct ContentView: View {
 
                     Toggle("Flash attention", isOn: $vm.flashAttention)
                         .disabled(vm.engineState != .unloaded)
+
+                    Toggle("Enable tools (get_current_time, calculator)", isOn: $vm.enableTools)
                 }
                 .padding(.top, 4)
             }
@@ -158,7 +160,8 @@ struct ContentView: View {
     /// champ.
     private var scrollSignal: Int {
         guard let last = vm.messages.last else { return 0 }
-        return last.content.count &+ last.reasoning.count
+        let toolArgs = last.toolCalls.reduce(0) { $0 &+ $1.arguments.count &+ $1.name.count }
+        return last.content.count &+ last.reasoning.count &+ toolArgs &+ vm.messages.count
     }
 
     private var stateColor: Color {
@@ -181,38 +184,37 @@ private struct MessageBubble: View {
             if message.role == .user { Spacer(minLength: 40) }
 
             VStack(alignment: .leading, spacing: 4) {
-                Text(message.role.rawValue.uppercased())
+                Text(roleLabel)
                     .font(.caption2)
                     .foregroundStyle(.secondary)
 
-                if message.hasReasoning {
-                    reasoningView
-                }
-
-                if !message.content.isEmpty || !message.hasReasoning {
-                    Text(placeholderOrContent)
-                        .textSelection(.enabled)
-                        .padding(10)
-                        .background(background)
-                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                if message.role == .tool {
+                    toolResultView
+                } else {
+                    if message.hasReasoning {
+                        reasoningView
+                    }
+                    if message.hasToolCalls {
+                        toolCallsView
+                    }
+                    if shouldShowContentBubble {
+                        Text(placeholderOrContent)
+                            .textSelection(.enabled)
+                            .padding(10)
+                            .background(background)
+                            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    }
                 }
             }
 
             if message.role != .user { Spacer(minLength: 40) }
         }
         .onChange(of: message.content) { newValue in
-            // Replie automatiquement le bloc « thinking » dès que la réponse
-            // finale commence à arriver, pour laisser la lecture au contenu.
             if !newValue.isEmpty { reasoningExpanded = false }
         }
     }
 
-    private var placeholderOrContent: String {
-        if message.content.isEmpty && message.isStreaming {
-            return message.hasReasoning ? "…" : "…"
-        }
-        return message.content
-    }
+    // MARK: - Sub-views
 
     private var reasoningView: some View {
         DisclosureGroup(isExpanded: $reasoningExpanded) {
@@ -236,11 +238,80 @@ private struct MessageBubble: View {
         .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
     }
 
+    private var toolCallsView: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            ForEach(message.toolCalls) { call in
+                HStack(alignment: .top, spacing: 8) {
+                    Image(systemName: "wrench.and.screwdriver")
+                        .foregroundStyle(.orange)
+                        .padding(.top, 2)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Call \(call.name)")
+                            .font(.caption)
+                            .fontWeight(.semibold)
+                        Text(call.arguments.isEmpty ? "{}" : call.arguments)
+                            .font(.system(.caption, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                            .textSelection(.enabled)
+                    }
+                }
+            }
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.orange.opacity(0.10))
+        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+    }
+
+    private var toolResultView: some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: "checkmark.seal")
+                .foregroundStyle(.green)
+                .padding(.top, 2)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Result of \(message.toolName ?? "tool")")
+                    .font(.caption)
+                    .fontWeight(.semibold)
+                Text(message.content)
+                    .font(.system(.caption, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+            }
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.green.opacity(0.08))
+        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+    }
+
+    // MARK: - Derived
+
+    private var roleLabel: String {
+        switch message.role {
+        case .tool: return "TOOL · \(message.toolName ?? "")"
+        default:    return message.role.rawValue.uppercased()
+        }
+    }
+
+    /// N'affiche une bulle "content" que si on a réellement du texte OU aucun
+    /// autre bloc (reasoning/tool_calls) capable de remplir la zone.
+    private var shouldShowContentBubble: Bool {
+        if !message.content.isEmpty { return true }
+        if message.isStreaming && !message.hasReasoning && !message.hasToolCalls { return true }
+        return false
+    }
+
+    private var placeholderOrContent: String {
+        if message.content.isEmpty && message.isStreaming { return "…" }
+        return message.content
+    }
+
     private var background: Color {
         switch message.role {
         case .user:      return Color.accentColor.opacity(0.18)
         case .assistant: return Color.gray.opacity(0.15)
         case .system:    return Color.yellow.opacity(0.15)
+        case .tool:      return Color.green.opacity(0.08)
         }
     }
 }

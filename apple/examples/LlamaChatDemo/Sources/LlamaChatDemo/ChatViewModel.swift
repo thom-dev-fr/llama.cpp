@@ -6,8 +6,8 @@ final class ChatViewModel: ObservableObject {
 
     // MARK: - Published UI state
 
-    @Published var modelPath: String = "~/Downloads/Qwen3.5-0.8B-Q4_K_M.gguf"
-    @Published var systemPrompt: String = "You are a helpful assistant."
+    @Published var modelPath: String = ""
+    @Published var systemPrompt: String = "You are a helpful assistant. When the user asks for the current time or a calculation, call the appropriate tool."
     @Published var messages: [ChatMessage] = []
     @Published var draft: String = ""
 
@@ -15,6 +15,9 @@ final class ChatViewModel: ObservableObject {
     @Published var contextSize: Int = 4096
     @Published var gpuLayers: Int = -1
     @Published var flashAttention: Bool = true
+
+    /// Expose les fonctions déclarées dans `ToolRegistry` au modèle.
+    @Published var enableTools: Bool = true
 
     @Published private(set) var engineState: EngineState = .unloaded
     @Published private(set) var isBusy: Bool = false
@@ -25,6 +28,10 @@ final class ChatViewModel: ObservableObject {
     private let engine = LlamaEngine()
     private var streamTask: Task<Void, Never>?
 
+    /// Garde-fou contre une boucle infinie de tool calls (modèle qui
+    /// rappellerait sans cesse les mêmes tools).
+    private let maxToolHops = 4
+
     init() {
         LlamaEngine.setLogLevel(.info)
     }
@@ -32,15 +39,21 @@ final class ChatViewModel: ObservableObject {
     // MARK: - Derived
 
     var canSend: Bool {
-        engineState == .ready && !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && streamTask == nil
+        engineState == .ready
+            && !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && streamTask == nil
     }
 
     var canLoad: Bool {
-        engineState == .unloaded && !modelPath.trimmingCharacters(in: .whitespaces).isEmpty && !isBusy
+        engineState == .unloaded
+            && !modelPath.trimmingCharacters(in: .whitespaces).isEmpty
+            && !isBusy
     }
 
     var canUnload: Bool {
-        (engineState == .ready || engineState == .sleeping) && streamTask == nil && !isBusy
+        (engineState == .ready || engineState == .sleeping)
+            && streamTask == nil
+            && !isBusy
     }
 
     // MARK: - Lifecycle
@@ -95,21 +108,30 @@ final class ChatViewModel: ObservableObject {
 
     func send() {
         let prompt = draft.trimmingCharacters(in: .whitespacesAndNewlines)
-        print("[LlamaChatDemo] send() called — state=\(engineState), streamTask==nil: \(streamTask == nil), promptLen=\(prompt.count)")
-        guard !prompt.isEmpty, streamTask == nil else {
-            print("[LlamaChatDemo] send() guarded out")
-            return
-        }
+        guard !prompt.isEmpty, streamTask == nil else { return }
 
         messages.append(ChatMessage(role: .user, content: prompt))
         draft = ""
 
+        launchCompletion(hopsRemaining: maxToolHops)
+    }
+
+    func cancelStream() {
+        streamTask?.cancel()
+        streamTask = nil
+    }
+
+    // MARK: - Completion loop (supports multi-hop tool calls)
+
+    /// Crée une nouvelle bulle assistant puis lance un stream vers le moteur.
+    /// Si le modèle répond par des tool calls, ceux-ci sont exécutés et la
+    /// fonction se rappelle récursivement avec `hopsRemaining - 1`.
+    private func launchCompletion(hopsRemaining: Int) {
         let assistant = ChatMessage(role: .assistant, content: "", isStreaming: true)
         let assistantID = assistant.id
         messages.append(assistant)
 
         let requestJSON = buildRequestJSON(stream: true)
-        print("[LlamaChatDemo] send() request JSON:", requestJSON)
 
         streamTask = Task { [engine] in
             defer {
@@ -121,31 +143,56 @@ final class ChatViewModel: ObservableObject {
                 }
             }
 
+            var toolCallAccumulators: [Int: ChatMessage.ToolCall] = [:]
+            var finishReason: String? = nil
+
             do {
                 let stream = engine.chatCompletionStream(requestJSON: requestJSON)
                 var chunkCount = 0
                 for try await chunk in stream {
                     chunkCount += 1
-                    let delta = Self.extractDelta(from: chunk)
-                    if delta.isEmpty { continue }
+                    let parsed = Self.parseChunk(chunk)
+
+                    if let reason = parsed.finishReason {
+                        finishReason = reason
+                    }
+
+                    for tcDelta in parsed.toolCallDeltas {
+                        var acc = toolCallAccumulators[tcDelta.index]
+                            ?? ChatMessage.ToolCall(id: "", name: "", arguments: "")
+                        if let id = tcDelta.id,   !id.isEmpty   { acc.id = id }
+                        if let n  = tcDelta.name, !n.isEmpty    { acc.name = n }
+                        acc.arguments += tcDelta.argumentsDelta
+                        toolCallAccumulators[tcDelta.index] = acc
+                    }
+
+                    if parsed.content.isEmpty && parsed.reasoning.isEmpty && parsed.toolCallDeltas.isEmpty {
+                        continue
+                    }
+
                     await MainActor.run {
-                        if let idx = self.messages.firstIndex(where: { $0.id == assistantID }) {
-                            if !delta.reasoning.isEmpty {
-                                self.messages[idx].reasoning.append(delta.reasoning)
-                            }
-                            if !delta.content.isEmpty {
-                                self.messages[idx].content.append(delta.content)
-                            }
+                        guard let idx = self.messages.firstIndex(where: { $0.id == assistantID }) else { return }
+                        if !parsed.reasoning.isEmpty {
+                            self.messages[idx].reasoning.append(parsed.reasoning)
                         }
+                        if !parsed.content.isEmpty {
+                            self.messages[idx].content.append(parsed.content)
+                        }
+                        // Mirror de l'état courant des tool calls dans le message
+                        // pour que l'UI puisse les afficher dès l'ouverture.
+                        let sorted = toolCallAccumulators.keys.sorted().compactMap { toolCallAccumulators[$0] }
+                        self.messages[idx].toolCalls = sorted
                     }
                 }
-                print("[LlamaChatDemo] stream ended, \(chunkCount) chunks")
+                print("[LlamaChatDemo] stream ended, \(chunkCount) chunks, finish=\(finishReason ?? "nil"), toolCalls=\(toolCallAccumulators.count)")
+
                 if chunkCount == 0 {
                     await MainActor.run {
                         if let idx = self.messages.firstIndex(where: { $0.id == assistantID }) {
                             self.messages[idx].content = "[no chunks received — check console]"
                         }
                     }
+                    return
                 }
             } catch is CancellationError {
                 await MainActor.run {
@@ -157,6 +204,7 @@ final class ChatViewModel: ObservableObject {
                         }
                     }
                 }
+                return
             } catch {
                 print("[LlamaChatDemo] stream error:", error)
                 await MainActor.run {
@@ -165,40 +213,100 @@ final class ChatViewModel: ObservableObject {
                         self.messages[idx].content = "[error: \(error)]"
                     }
                 }
+                return
+            }
+
+            // Stream terminé. S'il y a des tool calls à exécuter, on le fait
+            // sur le MainActor puis on relance une complétion.
+            let collected = toolCallAccumulators.keys.sorted().compactMap { toolCallAccumulators[$0] }
+            if !collected.isEmpty {
+                await MainActor.run {
+                    self.handleToolCalls(collected, hopsRemaining: hopsRemaining)
+                }
             }
         }
     }
 
-    func cancelStream() {
-        streamTask?.cancel()
-        streamTask = nil
+    private func handleToolCalls(_ calls: [ChatMessage.ToolCall], hopsRemaining: Int) {
+        guard hopsRemaining > 0 else {
+            lastError = "Tool-call loop limit reached (\(maxToolHops) hops)."
+            return
+        }
+
+        for call in calls {
+            let result: String
+            if let tool = ToolRegistry.find(call.name) {
+                print("[LlamaChatDemo] executing tool \(call.name)(\(call.arguments))")
+                result = tool.execute(call.arguments)
+            } else {
+                result = "{\"error\":\"unknown tool '\(call.name)'\"}"
+            }
+
+            var msg = ChatMessage(role: .tool, content: result)
+            msg.toolCallID = call.id
+            msg.toolName   = call.name
+            messages.append(msg)
+        }
+
+        // Relance une complétion pour que le modèle produise la réponse finale
+        // à partir des résultats de tools qu'on vient d'ajouter.
+        launchCompletion(hopsRemaining: hopsRemaining - 1)
     }
 
-    // MARK: - Internals
-
-    private func refreshState() async {
-        engineState = await engine.state
-    }
+    // MARK: - Request building
 
     private func buildRequestJSON(stream: Bool) -> String {
-        var oaiMessages: [[String: String]] = []
+        var oaiMessages: [[String: Any]] = []
+
         let sys = systemPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
         if !sys.isEmpty {
             oaiMessages.append(["role": "system", "content": sys])
         }
-        for m in messages where m.role != .assistant || !m.isStreaming {
-            oaiMessages.append(["role": m.role.rawValue, "content": m.content])
+
+        for m in messages {
+            if m.role == .assistant && m.isStreaming { continue }
+            switch m.role {
+            case .system:
+                continue // déjà injecté une seule fois ci-dessus
+            case .user:
+                oaiMessages.append(["role": "user", "content": m.content])
+            case .assistant:
+                var entry: [String: Any] = ["role": "assistant"]
+                // OAI autorise `content` vide quand il y a des tool_calls.
+                entry["content"] = m.content
+                if m.hasToolCalls {
+                    entry["tool_calls"] = m.toolCalls.map { tc -> [String: Any] in
+                        [
+                            "id":   tc.id,
+                            "type": "function",
+                            "function": [
+                                "name":      tc.name,
+                                "arguments": tc.arguments,
+                            ],
+                        ]
+                    }
+                }
+                oaiMessages.append(entry)
+            case .tool:
+                oaiMessages.append([
+                    "role":         "tool",
+                    "tool_call_id": m.toolCallID ?? "",
+                    "name":         m.toolName ?? "",
+                    "content":      m.content,
+                ])
+            }
         }
 
-        let payload: [String: Any] = [
-            "messages": oaiMessages,
-            "temperature": temperature,
-            "stream": stream,
-            // Pour les modèles de raisonnement (DeepSeek-R1, QwQ, …) :
-            // sépare le contenu de raisonnement dans `delta.reasoning_content`
-            // au lieu de le laisser dans `<think>…</think>` du contenu.
+        var payload: [String: Any] = [
+            "messages":         oaiMessages,
+            "temperature":      temperature,
+            "stream":           stream,
             "reasoning_format": "deepseek",
         ]
+        if enableTools {
+            payload["tools"]       = ToolRegistry.oaiToolsArray()
+            payload["tool_choice"] = "auto"
+        }
 
         guard let data = try? JSONSerialization.data(withJSONObject: payload, options: []),
               let json = String(data: data, encoding: .utf8) else {
@@ -207,50 +315,80 @@ final class ChatViewModel: ObservableObject {
         return json
     }
 
-    struct DeltaParts {
-        var content: String = ""
-        var reasoning: String = ""
-        var isEmpty: Bool { content.isEmpty && reasoning.isEmpty }
+    // MARK: - Chunk parsing
+
+    struct ToolCallDelta {
+        var index: Int
+        var id: String?
+        var name: String?
+        var argumentsDelta: String = ""
     }
 
-    /// Parse un chunk OpenAI-compatible et retourne les deltas `content` et
-    /// `reasoning_content` (ce dernier étant présent pour les modèles de
-    /// raisonnement quand `reasoning_format=deepseek`).
-    ///
-    /// Le chunk peut arriver sous deux formes :
+    struct ChunkParts {
+        var content: String = ""
+        var reasoning: String = ""
+        var toolCallDeltas: [ToolCallDelta] = []
+        var finishReason: String? = nil
+    }
+
+    /// Parse un chunk streaming OAI. Le moteur peut renvoyer :
     ///  - un objet JSON unique   : `{"choices":[{"delta":{…}}],…}`
-    ///  - un tableau d'objets    : `[{"choices":[{"delta":{…}}],…}, …]`
-    /// (le deuxième cas est utilisé quand `parallel_slots > 1` ou simplement
-    /// par la façon dont server-context agrège certains résultats).
-    static func extractDelta(from chunk: String) -> DeltaParts {
-        var parts = DeltaParts()
+    ///  - un tableau d'objets    : `[{"choices":[…]}, …]`
+    static func parseChunk(_ chunk: String) -> ChunkParts {
+        var parts = ChunkParts()
         guard let data = chunk.data(using: .utf8),
               let raw = try? JSONSerialization.jsonObject(with: data) else {
             return parts
         }
 
-        let chunkObjects: [[String: Any]]
+        let objects: [[String: Any]]
         if let arr = raw as? [[String: Any]] {
-            chunkObjects = arr
+            objects = arr
         } else if let obj = raw as? [String: Any] {
-            chunkObjects = [obj]
+            objects = [obj]
         } else {
             return parts
         }
 
-        for obj in chunkObjects {
+        for obj in objects {
             guard let choices = obj["choices"] as? [[String: Any]] else { continue }
             for choice in choices {
-                if let delta = choice["delta"] as? [String: Any] {
-                    if let s = delta["content"] as? String { parts.content += s }
-                    if let s = delta["reasoning_content"] as? String { parts.reasoning += s }
+                if let reason = choice["finish_reason"] as? String {
+                    parts.finishReason = reason
                 }
-                if let message = choice["message"] as? [String: Any] {
-                    if let s = message["content"] as? String { parts.content += s }
-                    if let s = message["reasoning_content"] as? String { parts.reasoning += s }
+
+                let container = (choice["delta"] as? [String: Any])
+                             ?? (choice["message"] as? [String: Any])
+                             ?? [:]
+
+                if let s = container["content"] as? String {
+                    parts.content += s
+                }
+                if let s = container["reasoning_content"] as? String {
+                    parts.reasoning += s
+                }
+                if let tcArr = container["tool_calls"] as? [[String: Any]] {
+                    for tc in tcArr {
+                        let idx = (tc["index"] as? Int) ?? 0
+                        var delta = ToolCallDelta(index: idx)
+                        delta.id   = tc["id"]   as? String
+                        if let fn = tc["function"] as? [String: Any] {
+                            delta.name = fn["name"] as? String
+                            if let a = fn["arguments"] as? String {
+                                delta.argumentsDelta = a
+                            }
+                        }
+                        parts.toolCallDeltas.append(delta)
+                    }
                 }
             }
         }
         return parts
+    }
+
+    // MARK: - Internals
+
+    private func refreshState() async {
+        engineState = await engine.state
     }
 }

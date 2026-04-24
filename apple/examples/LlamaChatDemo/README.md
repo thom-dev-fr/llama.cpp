@@ -8,8 +8,13 @@ L'app illustre :
 - le chargement / déchargement d'un modèle `.gguf` via `LlamaEngine.load(_:)`,
 - l'envoi d'une requête chat **OpenAI-compatible** via
   `LlamaEngine.chatCompletionStream(requestJSON:)`,
-- le parsing des chunks de streaming (`choices[0].delta.content`) pour mettre à
-  jour la bulle de réponse en temps réel,
+- le parsing des chunks streaming (acceptant les deux formes : objet JSON et
+  tableau `[{…}]`),
+- la gestion des modèles de **raisonnement** (DeepSeek-R1, QwQ, …) via
+  `delta.reasoning_content` affiché dans un bloc « Thinking » repliable,
+- le **function calling** OAI : déclaration de tools, détection des
+  `tool_calls` en streaming, exécution locale, relance automatique de la
+  complétion avec les résultats,
 - l'annulation coopérative (`Task.cancel()` → `llama_engine_stream_cancel`),
 - l'état du moteur (`unloaded` / `loading` / `ready` / …) exposé par
   `EngineState`.
@@ -18,10 +23,11 @@ L'app illustre :
 apple/examples/LlamaChatDemo/
 ├── Package.swift
 └── Sources/LlamaChatDemo/
-    ├── LlamaChatDemoApp.swift   # @main, WindowGroup
+    ├── LlamaChatDemoApp.swift    # @main, WindowGroup, AppDelegate macOS
     ├── ContentView.swift         # UI SwiftUI (header, settings, transcript, composer)
     ├── ChatViewModel.swift       # @MainActor ObservableObject, bridge vers LlamaEngine
-    └── ChatMessage.swift         # modèle de message
+    ├── ChatMessage.swift         # modèle (user / assistant / tool + ToolCall)
+    └── ToolRegistry.swift        # tools exposés au modèle (get_current_time, calculator)
 ```
 
 ## Prérequis
@@ -86,6 +92,39 @@ déposes-y les quatre sources de `Sources/LlamaChatDemo/`, puis ajoute le fork
 comme dépendance Swift Package (`File → Add Package Dependencies… → Add
 Local…` → sélectionne la racine du dépôt `llama.cpp`). Le projet Xcode génère
 un `Info.plist` complet, donc AppKit s'y retrouve et l'avertissement disparaît.
+
+## Tools (function calling)
+
+Le toggle **« Enable tools »** dans le panneau Paramètres injecte, dans chaque
+requête, le tableau `tools` contenant la déclaration OAI des deux fonctions
+définies dans `ToolRegistry.swift` :
+
+| Tool               | Description                                                    |
+|--------------------|----------------------------------------------------------------|
+| `get_current_time` | Renvoie l'heure courante ISO 8601, timezone optionnelle        |
+| `calculator`       | Évalue une expression arithmétique (`+ - * / ( )`) via NSExpression |
+
+Quand le modèle répond avec des `tool_calls` plutôt qu'avec du texte :
+
+1. Les appels sont accumulés à partir des deltas streamés
+   (`delta.tool_calls[].function.arguments` est concaténé morceau par morceau),
+   puis affichés dans une bulle orange « Call `<name>` » sous la bulle
+   assistant.
+2. À la fin du stream, chaque tool est exécuté localement par son handler Swift
+   et le résultat est ajouté comme message `role: "tool"` (bulle verte).
+3. Une nouvelle complétion est lancée automatiquement avec l'historique enrichi
+   — le modèle produit alors sa **réponse finale** à l'utilisateur. Limite :
+   `maxToolHops = 4` pour éviter les boucles infinies.
+
+Exemple de prompts qui déclenchent les tools :
+
+- « *Quelle heure est-il à Tokyo ?* »
+- « *Combien font 17 × 42 + 3 ?* »
+
+Le choix du modèle compte : tous les modèles ne savent pas utiliser les tools.
+Les familles **Qwen2.5 / Qwen3 Instruct**, **Llama 3.1+**, **Mistral Small**
+fonctionnent bien ; les modèles « base » ou très petits appelleront rarement
+un tool correctement.
 
 ## Ce que la démo ne fait **pas**
 
