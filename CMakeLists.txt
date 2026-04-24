@@ -196,9 +196,15 @@ add_subdirectory(src)
 # utils, programs, examples and tests
 #
 
+option(LLAMA_HTTPLIB "llama: link cpp-httplib (required for HTTP downloads and the server)" ON)
+
 if (LLAMA_BUILD_COMMON)
     add_subdirectory(common)
-    add_subdirectory(vendor/cpp-httplib)
+    if (LLAMA_HTTPLIB)
+        add_subdirectory(vendor/cpp-httplib)
+    elseif (LLAMA_BUILD_SERVER OR LLAMA_BUILD_TESTS)
+        message(FATAL_ERROR "LLAMA_HTTPLIB=OFF is only supported with LLAMA_BUILD_SERVER=OFF and LLAMA_BUILD_TESTS=OFF")
+    endif()
 endif()
 
 if (LLAMA_BUILD_COMMON AND LLAMA_BUILD_TESTS AND NOT CMAKE_JS_VERSION)

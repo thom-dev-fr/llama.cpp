@@ -119,3 +119,15 @@ Conflicts, if any, will typically land only in the single guarded block in the r
 ## Design notes
 
 See `apple/PRD.md` for the full product requirements and design rationale.
+
+### `cpp-httplib` is not linked
+
+Upstream exposes a top-level `LLAMA_HTTPLIB` option (ON by default). When set to OFF:
+
+- `vendor/cpp-httplib` is not added to the build.
+- `llama-common` does not link `cpp-httplib`.
+- `common/download.cpp` and `common/hf-cache.cpp` compile to inert stub bodies — every HTTP/HF/docker entry point returns an empty/error value without throwing at load time. `server-common.cpp` keeps calling `common_remote_get_content`; it now returns `{0, {}}`, which the existing status check treats as a failed download.
+
+`build-xcframework.sh` passes `-DLLAMA_HTTPLIB=OFF` and omits `libcpp-httplib.a` from the combined archive, so the resulting `LlamaEngineCore.xcframework` contains no HTTP client code. Any `http://` media URL in a chat request will surface as a runtime download failure; pass `file://` or base64 `data:` URLs instead.
+
+The option is guarded so that `LLAMA_BUILD_SERVER=ON` or `LLAMA_BUILD_TESTS=ON` together with `LLAMA_HTTPLIB=OFF` fails configuration — both of those downstream targets genuinely need the HTTP client.

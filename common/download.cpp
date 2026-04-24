@@ -1,9 +1,12 @@
+#include "download.h"
+
+#ifdef LLAMA_HTTPLIB
+
 #include "arg.h"
 
 #include "build-info.h"
 #include "common.h"
 #include "log.h"
-#include "download.h"
 #include "hf-cache.h"
 
 #define JSON_ASSERT GGML_ASSERT
@@ -956,3 +959,51 @@ std::vector<common_cached_model_info> common_list_cached_models() {
 
     return result;
 }
+
+#else // LLAMA_HTTPLIB
+
+// Stub implementations used when the build does not link cpp-httplib (e.g. the
+// Apple xcframework). Callers that rely on network access will observe empty
+// results / non-2xx status codes and must handle them gracefully, as they
+// already do on legitimate network failures.
+
+#include <stdexcept>
+
+std::pair<long, std::vector<char>> common_remote_get_content(
+        const std::string & /*url*/, const common_remote_params & /*params*/) {
+    return { 0, {} };
+}
+
+std::pair<std::string, std::string> common_download_split_repo_tag(
+        const std::string & hf_repo_with_tag) {
+    const auto pos = hf_repo_with_tag.find(':');
+    if (pos == std::string::npos) {
+        return { hf_repo_with_tag, "" };
+    }
+    return { hf_repo_with_tag.substr(0, pos), hf_repo_with_tag.substr(pos + 1) };
+}
+
+common_download_model_result common_download_model(
+        const common_params_model & /*model*/,
+        const common_download_opts & /*opts*/,
+        bool /*download_mmproj*/) {
+    return {};
+}
+
+std::vector<common_cached_model_info> common_list_cached_models() {
+    return {};
+}
+
+int common_download_file_single(const std::string & /*url*/,
+                                const std::string & /*path*/,
+                                const common_download_opts & /*opts*/,
+                                bool /*skip_etag*/) {
+    return -1;
+}
+
+std::string common_docker_resolve_model(const std::string & docker) {
+    throw std::runtime_error(
+        "docker model resolution is unavailable in this build (no cpp-httplib); requested: " + docker);
+}
+
+#endif // LLAMA_HTTPLIB

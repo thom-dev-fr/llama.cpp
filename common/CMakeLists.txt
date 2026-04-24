@@ -135,7 +135,11 @@ if (BUILD_SHARED_LIBS)
 endif()
 
 target_link_libraries(${TARGET} PUBLIC  llama-common-base)
-target_link_libraries(${TARGET} PRIVATE cpp-httplib)
+
+if (LLAMA_HTTPLIB)
+    target_link_libraries      (${TARGET} PRIVATE cpp-httplib)
+    target_compile_definitions (${TARGET} PRIVATE LLAMA_HTTPLIB)
+endif()
 
 if (LLAMA_LLGUIDANCE)
     include(ExternalProject)

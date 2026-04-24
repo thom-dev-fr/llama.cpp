@@ -45,6 +45,7 @@ COMMON_CMAKE_ARGS=(
     -DLLAMA_BUILD_SERVER=OFF
     -DLLAMA_BUILD_COMMON=ON
     -DLLAMA_BUILD_APPLE_ENGINE=ON
+    -DLLAMA_HTTPLIB=OFF
     -DGGML_METAL_EMBED_LIBRARY=${GGML_METAL_EMBED_LIBRARY}
     -DGGML_BLAS_DEFAULT=${GGML_BLAS_DEFAULT}
     -DGGML_METAL=${GGML_METAL}
@@ -200,7 +201,6 @@ combine_static_libraries() {
         "${REPO_ROOT}/${build_dir}/apple/llama-engine/${release_dir}/libllama-engine.a"
         "${REPO_ROOT}/${build_dir}/common/${release_dir}/libllama-common.a"
         "${REPO_ROOT}/${build_dir}/common/${release_dir}/libllama-common-base.a"
-        "${REPO_ROOT}/${build_dir}/vendor/cpp-httplib/${release_dir}/libcpp-httplib.a"
         "${REPO_ROOT}/${build_dir}/src/${release_dir}/libllama.a"
         "${REPO_ROOT}/${build_dir}/ggml/src/${release_dir}/libggml.a"
         "${REPO_ROOT}/${build_dir}/ggml/src/${release_dir}/libggml-base.a"
