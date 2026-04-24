@@ -27,6 +27,11 @@ final class ChatViewModel: ObservableObject {
     @Published private(set) var engineState: EngineState = .unloaded
     @Published private(set) var capabilities: EngineCapabilities = .none
     @Published private(set) var isBusy: Bool = false
+    /// True entre le clic Sleep et l'exécution effective côté moteur.
+    /// Sert aussi à distinguer une demande "sleep pendant loading" en file d'attente.
+    @Published private(set) var pendingSleep: Bool = false
+    /// Idem pour wake : l'UI affiche un état transitoire pendant le re-load.
+    @Published private(set) var pendingWake: Bool = false
     @Published var lastError: String?
 
     // MARK: - Engine
@@ -58,8 +63,21 @@ final class ChatViewModel: ObservableObject {
 
     var canUnload: Bool {
         (engineState == .ready || engineState == .sleeping)
-            && streamTask == nil
             && !isBusy
+    }
+
+    /// On autorise Sleep à tout moment où le moteur détient (ou prépare) un
+    /// contexte : `.ready`, `.loading` (load initial en cours) ou pendant un
+    /// wake en cours (toujours `.loading` côté C++). La méthode `sleep()`
+    /// étant `nonisolated`, elle préempte activement le chargement via le
+    /// progress-callback de llama.cpp — usage typique iOS-background.
+    var canSleep: Bool {
+        (engineState == .ready || engineState == .loading)
+            && !pendingSleep
+    }
+
+    var canWake: Bool {
+        engineState == .sleeping && !pendingWake && !isBusy
     }
 
     // MARK: - Lifecycle
@@ -84,11 +102,12 @@ final class ChatViewModel: ObservableObject {
         Task {
             do {
                 try await engine.load(config)
-                await refreshState()
+            } catch LlamaError.cancelled {
+                // Le load a été préempté par sleep() — pas une vraie erreur.
             } catch {
                 lastError = "Load failed: \(error)"
-                await refreshState()
             }
+            await refreshState()
             isBusy = false
         }
     }
@@ -104,6 +123,64 @@ final class ChatViewModel: ObservableObject {
             }
             await refreshState()
             isBusy = false
+        }
+    }
+
+    /// Mise en veille préemptive. Peut être appelée à n'importe quel moment :
+    ///  - depuis `.ready` : teardown normal.
+    ///  - pendant un `load()` ou `wake()` en cours : le progress-callback
+    ///    côté llama.cpp interrompt le chargement, puis le C-core bascule
+    ///    directement en `.sleeping` en conservant `last_params` pour un
+    ///    futur `wake()`. C'est le cas d'usage iOS → background.
+    ///
+    /// L'appel C `llama_engine_sleep` est synchrone et attend que le
+    /// chargement se soit effectivement arrêté (quelques ms au plus après le
+    /// prochain callback de progression, soit ~1% de données chargées). On
+    /// l'exécute dans une `Task.detached` pour ne pas bloquer le main thread.
+    func sleepModel() {
+        guard canSleep else { return }
+        cancelStream()
+        lastError = nil
+        pendingSleep = true
+
+        let engineRef = engine
+        Task.detached { [weak self] in
+            let failure: Error? = {
+                do {
+                    try engineRef.sleep()
+                    return nil
+                } catch {
+                    return error
+                }
+            }()
+            await MainActor.run { [weak self] in
+                if let err = failure {
+                    self?.lastError = "Sleep failed: \(err)"
+                }
+                self?.pendingSleep = false
+            }
+            await self?.refreshState()
+        }
+    }
+
+    /// Ré-hydrate le contexte depuis l'état `.sleeping`. Déclenche un nouveau
+    /// chargement du modèle avec les mêmes `last_params` conservés côté C++.
+    /// Peut lui-même être préempté par un `sleepModel()` — dans ce cas l'appel
+    /// throw `.cancelled` qu'on ignore silencieusement.
+    func wakeModel() {
+        guard canWake else { return }
+        lastError = nil
+        pendingWake = true
+        Task {
+            do {
+                try await engine.wake()
+            } catch LlamaError.cancelled {
+                // Wake préempté par sleep() — état final = .sleeping, rien à faire.
+            } catch {
+                lastError = "Wake failed: \(error)"
+            }
+            await refreshState()
+            pendingWake = false
         }
     }
 
@@ -435,7 +512,7 @@ final class ChatViewModel: ObservableObject {
     // MARK: - Internals
 
     private func refreshState() async {
-        engineState  = await engine.state
+        engineState  = engine.state
         capabilities = await engine.capabilities
     }
 

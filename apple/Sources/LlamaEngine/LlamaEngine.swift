@@ -1,29 +1,34 @@
 import Foundation
 import LlamaEngineCore
 
-/// Actor-isolated façade over the C engine. All lifecycle operations are
-/// serialised; chat completion streams are detached so multiple requests can
-/// run concurrently while the actor handles load/unload/sleep/wake.
+/// Actor-isolated façade over the C engine. Load / unload / wake and
+/// inference are serialised on the actor; `sleep()` is intentionally
+/// `nonisolated` so it can preempt an in-flight `load()` or `wake()` (for
+/// example when iOS transitions the app to the background).
+///
+/// The underlying C engine handle is created at `init()` and is immutable for
+/// the lifetime of this object, which lets us expose it safely outside the
+/// actor. All C entry points are internally thread-safe.
 public actor LlamaEngine {
-    private var handle: OpaquePointer?
+    private nonisolated let handle: OpaquePointer
 
     public init() {
-        self.handle = llama_engine_create()
+        guard let h = llama_engine_create() else {
+            fatalError("llama_engine_create returned null")
+        }
+        self.handle = h
     }
 
     deinit {
-        if let h = handle {
-            llama_engine_destroy(h)
-        }
+        llama_engine_destroy(handle)
     }
 
     public static func setLogLevel(_ level: LogLevel) {
         llama_engine_set_log_level(llama_engine_log_level(UInt32(level.rawValue)))
     }
 
-    public var state: EngineState {
-        guard let h = handle else { return .unloaded }
-        let raw = llama_engine_get_state(raw(h))
+    public nonisolated var state: EngineState {
+        let raw = llama_engine_get_state(handle)
         return EngineState(rawValue: Int(raw.rawValue)) ?? .unloaded
     }
 
@@ -34,9 +39,8 @@ public actor LlamaEngine {
     /// - the jinja chat template bundled with the model or provided via
     ///   `ModelConfig.chatTemplateOverride` (tool calls / reasoning).
     public var capabilities: EngineCapabilities {
-        guard let h = handle else { return .none }
         var c = llama_engine_capabilities()
-        let status = llama_engine_get_capabilities(raw(h), &c)
+        let status = llama_engine_get_capabilities(handle, &c)
         guard status == LLAMA_ENGINE_OK else { return .none }
         return EngineCapabilities(
             hasMultimodal:     c.has_mtmd,
@@ -50,54 +54,51 @@ public actor LlamaEngine {
     // MARK: - Lifecycle
 
     public func load(_ config: ModelConfig) throws {
-        guard let h = handle else { throw LlamaError.internalError("engine pointer is nil") }
-
         let status: llama_engine_status = config.withCConfig { cfg in
-            llama_engine_load(raw(h), &cfg)
+            llama_engine_load(handle, &cfg)
         }
-        try throwIfError(status, lastErrorHandle: h)
+        try throwIfError(status)
     }
 
     public func unload() throws {
-        guard let h = handle else { return }
-        let status = llama_engine_unload(raw(h))
-        try throwIfError(status, lastErrorHandle: h)
+        let status = llama_engine_unload(handle)
+        try throwIfError(status)
     }
 
-    public func sleep() throws {
-        guard let h = handle else { throw LlamaError.notLoaded }
-        let status = llama_engine_sleep(raw(h))
-        try throwIfError(status, lastErrorHandle: h)
+    /// Transition to `.sleeping`. Safe to call concurrently with an in-flight
+    /// `load()` or `wake()` — the C core preempts the load via its progress
+    /// callback and releases this function once the state has converged. The
+    /// preempted `load()` / `wake()` call throws `LlamaError.cancelled`.
+    public nonisolated func sleep() throws {
+        let status = llama_engine_sleep(handle)
+        try throwIfError(status)
     }
 
     public func wake() throws {
-        guard let h = handle else { throw LlamaError.notLoaded }
-        let status = llama_engine_wake(raw(h))
-        try throwIfError(status, lastErrorHandle: h)
+        let status = llama_engine_wake(handle)
+        try throwIfError(status)
     }
 
     // MARK: - Tokenization
 
     public func tokenize(_ text: String, addSpecial: Bool = true) throws -> [Int32] {
-        guard let h = handle else { throw LlamaError.notLoaded }
         var outTokens: UnsafeMutablePointer<Int32>? = nil
         var outN: Int = 0
         let status = text.withCString { cstr in
-            llama_engine_tokenize(raw(h), cstr, addSpecial, &outTokens, &outN)
+            llama_engine_tokenize(handle, cstr, addSpecial, &outTokens, &outN)
         }
-        try throwIfError(status, lastErrorHandle: h)
+        try throwIfError(status)
         defer { llama_engine_free_tokens(outTokens) }
         guard let base = outTokens else { return [] }
         return Array(UnsafeBufferPointer(start: base, count: outN))
     }
 
     public func detokenize(_ tokens: [Int32]) throws -> String {
-        guard let h = handle else { throw LlamaError.notLoaded }
         var outText: UnsafeMutablePointer<CChar>? = nil
         let status = tokens.withUnsafeBufferPointer { buf -> llama_engine_status in
-            llama_engine_detokenize(raw(h), buf.baseAddress, buf.count, &outText)
+            llama_engine_detokenize(handle, buf.baseAddress, buf.count, &outText)
         }
-        try throwIfError(status, lastErrorHandle: h)
+        try throwIfError(status)
         defer { llama_engine_free_string(outText) }
         return outText.map { String(cString: $0) } ?? ""
     }
@@ -107,19 +108,18 @@ public actor LlamaEngine {
     /// `requestJSON` is an OpenAI-compatible chat-completion request.
     /// Returns the raw JSON response.
     public func chatCompletion(requestJSON: String) throws -> String {
-        guard let h = handle else { throw LlamaError.notLoaded }
         var outResp: UnsafeMutablePointer<CChar>? = nil
         let status = requestJSON.withCString { cstr in
-            llama_engine_chat_completion(raw(h), cstr, &outResp)
+            llama_engine_chat_completion(handle, cstr, &outResp)
         }
         let responseText = outResp.map { String(cString: $0) }
         llama_engine_free_string(outResp)
 
         if status == LLAMA_ENGINE_ERR_INFERENCE {
-            let msg = lastError(h) ?? "inference error"
+            let msg = lastErrorMessage() ?? "inference error"
             throw LlamaError.inference(msg, payload: responseText)
         }
-        try throwIfError(status, lastErrorHandle: h)
+        try throwIfError(status)
         return responseText ?? ""
     }
 
@@ -148,21 +148,16 @@ public actor LlamaEngine {
         requestJSON: String,
         continuation: AsyncThrowingStream<String, Error>.Continuation
     ) async {
-        guard let h = handle else {
-            continuation.finish(throwing: LlamaError.notLoaded)
-            return
-        }
-
         var stream: OpaquePointer? = nil
         let openStatus = requestJSON.withCString { cstr -> llama_engine_status in
-            var raw: OpaquePointer? = nil
-            let s = llama_engine_chat_completion_stream(self.raw(h), cstr, &raw)
-            stream = raw
+            var rawPtr: OpaquePointer? = nil
+            let s = llama_engine_chat_completion_stream(handle, cstr, &rawPtr)
+            stream = rawPtr
             return s
         }
 
         if openStatus != LLAMA_ENGINE_OK {
-            let msg = lastError(h) ?? "failed to open stream"
+            let msg = lastErrorMessage() ?? "failed to open stream"
             let err = map(status: openStatus, message: msg, payload: nil)
             continuation.finish(throwing: err)
             return
@@ -185,7 +180,7 @@ public actor LlamaEngine {
             llama_engine_free_string(chunkPtr)
 
             if st == LLAMA_ENGINE_ERR_INFERENCE {
-                let msg = lastError(h) ?? "inference error"
+                let msg = lastErrorMessage() ?? "inference error"
                 continuation.finish(throwing: LlamaError.inference(msg, payload: chunk))
                 return
             }
@@ -194,7 +189,7 @@ public actor LlamaEngine {
                 return
             }
             if st != LLAMA_ENGINE_OK {
-                let msg = lastError(h) ?? "stream error"
+                let msg = lastErrorMessage() ?? "stream error"
                 continuation.finish(throwing: map(status: st, message: msg, payload: chunk))
                 return
             }
@@ -216,18 +211,14 @@ public actor LlamaEngine {
 
     // MARK: - Internals
 
-    private func raw(_ h: OpaquePointer) -> OpaquePointer {
-        return h
-    }
-
-    private func lastError(_ h: OpaquePointer) -> String? {
-        guard let cstr = llama_engine_last_error(raw(h)) else { return nil }
+    private nonisolated func lastErrorMessage() -> String? {
+        guard let cstr = llama_engine_last_error(handle) else { return nil }
         return String(cString: cstr)
     }
 
-    private func throwIfError(_ status: llama_engine_status, lastErrorHandle h: OpaquePointer) throws {
+    private nonisolated func throwIfError(_ status: llama_engine_status) throws {
         if status == LLAMA_ENGINE_OK { return }
-        throw map(status: status, message: lastError(h) ?? "unknown error", payload: nil)
+        throw map(status: status, message: lastErrorMessage() ?? "unknown error", payload: nil)
     }
 
     private nonisolated func map(status: llama_engine_status, message: String, payload: String?) -> LlamaError {

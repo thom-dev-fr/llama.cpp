@@ -70,6 +70,8 @@ struct ContentView: View {
                         .controlSize(.small)
                         .frame(width: 60)
                 }
+
+                lifecycleButtons
             }
 
             HStack {
@@ -238,6 +240,32 @@ struct ContentView: View {
 
     private var audioTypes: [UTType] {
         [UTType.wav, UTType.mp3].compactMap { $0 }
+    }
+
+    /// Boutons Sleep / Wake pour tester le cycle de mise en veille du moteur.
+    /// Le bouton Sleep reste actif pendant `.loading` : l'appel préempte
+    /// activement le chargement (initial ou wake) via le progress-callback
+    /// côté llama.cpp — c'est le scénario iOS → background.
+    @ViewBuilder private var lifecycleButtons: some View {
+        if vm.pendingSleep {
+            Button("Sleeping…") { }
+                .buttonStyle(.bordered)
+                .disabled(true)
+        } else if vm.canSleep {
+            Button("Sleep", action: vm.sleepModel)
+                .buttonStyle(.bordered)
+                .help(vm.engineState == .loading
+                      ? "Interrompt le chargement en cours et passe en veille."
+                      : "Libère le contexte, conserve la config pour wake().")
+        } else if vm.pendingWake {
+            Button("Waking…") { }
+                .buttonStyle(.bordered)
+                .disabled(true)
+        } else if vm.canWake {
+            Button("Wake", action: vm.wakeModel)
+                .buttonStyle(.borderedProminent)
+                .help("Recharge le modèle avec les mêmes paramètres.")
+        }
     }
 
     private var capabilitiesLabel: some View {

@@ -77,7 +77,21 @@ void             llama_engine_destroy(llama_engine_t * engine);
 // Lifecycle.
 llama_engine_status llama_engine_load(llama_engine_t * engine, const llama_engine_config * config);
 llama_engine_status llama_engine_unload(llama_engine_t * engine);
+
+// Transition the engine to the SLEEPING state, releasing the model context
+// while retaining the configuration so a later llama_engine_wake() can
+// restore it. Thread-safe and may be called concurrently from another thread:
+//   - from READY:    tears down the context synchronously.
+//   - from LOADING:  preempts the in-flight load or wake via the llama.cpp
+//                    model load progress callback. The call blocks until the
+//                    loading thread observes the cancellation; the concurrent
+//                    llama_engine_load() / llama_engine_wake() call returns
+//                    LLAMA_ENGINE_ERR_CANCELLED. This is the iOS
+//                    background-transition case: sleep() unblocks a long
+//                    load without leaving the engine in an inconsistent state.
+//   - from SLEEPING: no-op, returns LLAMA_ENGINE_OK.
 llama_engine_status llama_engine_sleep(llama_engine_t * engine);
+
 llama_engine_status llama_engine_wake(llama_engine_t * engine);
 llama_engine_state  llama_engine_get_state(llama_engine_t * engine);
 

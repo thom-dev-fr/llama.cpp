@@ -81,9 +81,22 @@ private:
 
     mutable std::mutex      mtx;
     std::condition_variable cv_streams;
+    // Signals transitions of state_. Used by sleep() to wait for an in-flight
+    // load_from_params_locked() to observe the cancellation flag.
+    std::condition_variable cv_lifecycle;
 
     std::atomic<llama_engine_state> state_{LLAMA_ENGINE_STATE_UNLOADED};
     std::string                     last_error_;
+
+    // Set by sleep() when called during LOADING. Read by the progress
+    // callback installed on common_params.load_progress_callback; returning
+    // false aborts llama_model_load_from_file and causes server_context::
+    // load_model() to return false.
+    std::atomic<bool> cancel_load_{false};
+    // Distinguishes an explicit sleep-preemption from other load failures,
+    // so the post-load path can transition to SLEEPING (keeping last_params)
+    // rather than UNLOADED.
+    std::atomic<bool> sleep_requested_{false};
 
     std::optional<common_params>           last_params;
     std::unique_ptr<server_context>        ctx;

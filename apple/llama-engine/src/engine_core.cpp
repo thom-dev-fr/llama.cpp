@@ -96,14 +96,32 @@ llama_engine_status engine_core::load_from_params_locked(std::unique_lock<std::m
         return LLAMA_ENGINE_ERR_INTERNAL;
     }
 
+    // Reset the cancel flag so a previous preemption doesn't bleed into this
+    // load. sleep_requested_ is intentionally NOT reset here: sleep() may
+    // have posted it before we took the lock (the caller holds it on entry)
+    // and we want to honour that intent.
+    cancel_load_.store(false);
+
     state_.store(LLAMA_ENGINE_STATE_LOADING);
+    cv_lifecycle.notify_all();
     last_error_.clear();
+
+    // Install the progress callback used to preempt a long-running load.
+    // llama_model_load_from_file invokes it every ~1% of loaded tensor data;
+    // returning false aborts the load cleanly and causes server_context::
+    // load_model() to return false.
+    last_params->load_progress_callback = [](float /*progress*/, void * ud) -> bool {
+        auto * self = static_cast<engine_core *>(ud);
+        return !self->cancel_load_.load();
+    };
+    last_params->load_progress_callback_user_data = this;
 
     auto new_ctx = std::make_unique<server_context>();
 
     // Drop the lock during load_model(); it synchronously initialises the
-    // model and can take seconds. Other lifecycle ops will be rejected because
-    // state_ == LOADING.
+    // model and can take seconds. Only sleep() is allowed to touch state_
+    // while we are here (it raises cancel_load_ + sleep_requested_ and waits
+    // on cv_lifecycle).
     lock.unlock();
 
     bool ok = false;
@@ -118,9 +136,21 @@ llama_engine_status engine_core::load_from_params_locked(std::unique_lock<std::m
 
     lock.lock();
 
+    const bool was_preempted_by_sleep = sleep_requested_.exchange(false);
+    cancel_load_.store(false);
+
     if (!ok) {
+        if (was_preempted_by_sleep) {
+            // Load was aborted because sleep() asked us to. Transition to
+            // SLEEPING and keep last_params so a later wake() can retry.
+            set_error("load cancelled by sleep()");
+            state_.store(LLAMA_ENGINE_STATE_SLEEPING);
+            cv_lifecycle.notify_all();
+            return LLAMA_ENGINE_ERR_CANCELLED;
+        }
         set_error(err.empty() ? "failed to load model" : err);
         state_.store(LLAMA_ENGINE_STATE_UNLOADED);
+        cv_lifecycle.notify_all();
         return LLAMA_ENGINE_ERR_LOAD_FAILED;
     }
 
@@ -149,7 +179,22 @@ llama_engine_status engine_core::load_from_params_locked(std::unique_lock<std::m
         ctx->start_loop();
     });
 
+    if (was_preempted_by_sleep) {
+        // Race: load_model() completed before the progress callback observed
+        // the cancel flag (sleep() was raised during the very last steps).
+        // We have a fully-initialised context but the caller wants SLEEPING,
+        // so tear it down immediately.
+        state_.store(LLAMA_ENGINE_STATE_UNLOADING);
+        cv_lifecycle.notify_all();
+        teardown_locked(lock);
+        state_.store(LLAMA_ENGINE_STATE_SLEEPING);
+        cv_lifecycle.notify_all();
+        set_error("load preempted by sleep()");
+        return LLAMA_ENGINE_ERR_CANCELLED;
+    }
+
     state_.store(LLAMA_ENGINE_STATE_READY);
+    cv_lifecycle.notify_all();
     return LLAMA_ENGINE_OK;
 }
 
@@ -226,17 +271,50 @@ llama_engine_status engine_core::unload() {
 llama_engine_status engine_core::sleep() {
     std::unique_lock<std::mutex> lock(mtx);
     auto s = state_.load();
+
     if (s == LLAMA_ENGINE_STATE_SLEEPING) {
         return LLAMA_ENGINE_OK;
     }
+
+    if (s == LLAMA_ENGINE_STATE_LOADING) {
+        // Preempt an in-flight load (initial load or wake()). Signal the
+        // progress callback to abort and wait until the loading thread
+        // flips state_ to a terminal value.
+        sleep_requested_.store(true);
+        cancel_load_.store(true);
+        cv_lifecycle.wait(lock, [&]() {
+            auto cur = state_.load();
+            return cur == LLAMA_ENGINE_STATE_SLEEPING
+                || cur == LLAMA_ENGINE_STATE_UNLOADED
+                || cur == LLAMA_ENGINE_STATE_READY;
+        });
+        auto resolved = state_.load();
+        if (resolved == LLAMA_ENGINE_STATE_SLEEPING) {
+            return LLAMA_ENGINE_OK;
+        }
+        if (resolved == LLAMA_ENGINE_STATE_READY) {
+            // Extremely narrow race: the load finished on a progress-poll
+            // boundary before our cancel flag could be observed and the
+            // post-load sleep_requested check also missed it. Fall through
+            // to the READY branch below with the lock still held.
+            s = resolved;
+        } else {
+            set_error("sleep() preempted a load that then failed");
+            return LLAMA_ENGINE_ERR_NOT_LOADED;
+        }
+    }
+
     if (s != LLAMA_ENGINE_STATE_READY) {
-        set_error("sleep() requires READY state");
+        set_error("sleep() requires READY, LOADING or SLEEPING state");
         return LLAMA_ENGINE_ERR_NOT_LOADED;
     }
+
     state_.store(LLAMA_ENGINE_STATE_UNLOADING);
+    cv_lifecycle.notify_all();
     teardown_locked(lock);
     // last_params intentionally retained for wake().
     state_.store(LLAMA_ENGINE_STATE_SLEEPING);
+    cv_lifecycle.notify_all();
     return LLAMA_ENGINE_OK;
 }
 
