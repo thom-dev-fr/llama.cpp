@@ -1,0 +1,5 @@
+framework module LlamaEngineCore {
+    umbrella header "llama_engine.h"
+    export *
+    module * { export * }
+}
