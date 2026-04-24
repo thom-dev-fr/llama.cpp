@@ -48,6 +48,10 @@ public:
 
     llama_engine_state state() const;
 
+    // Capabilities reflected from the currently loaded server_context meta.
+    // Returns LLAMA_ENGINE_ERR_NOT_LOADED if there is no loaded model.
+    llama_engine_status capabilities(llama_engine_capabilities & out);
+
     const char * last_error();
 
     // Tokenization
@@ -87,6 +91,11 @@ private:
     std::unique_ptr<server_context_meta>   meta;
     const llama_vocab *                    vocab = nullptr;
     struct mtmd_context *                  mctx  = nullptr; // unused in v1
+
+    // Capabilities are captured right after load_model() and kept across
+    // sleep/wake transitions, where `meta` is dropped. Only valid when
+    // last_params has a value.
+    std::optional<llama_engine_capabilities> cached_caps;
 
     std::set<stream_handle *> active_streams;
 

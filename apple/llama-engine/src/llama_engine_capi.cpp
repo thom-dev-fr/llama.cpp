@@ -66,6 +66,14 @@ extern "C" llama_engine_state llama_engine_get_state(llama_engine_t * engine) {
     return engine->core.state();
 }
 
+extern "C" llama_engine_status llama_engine_get_capabilities(
+    llama_engine_t * engine, llama_engine_capabilities * out)
+{
+    if (!engine || !out) return LLAMA_ENGINE_ERR_INVALID_ARG;
+    *out = llama_engine_capabilities{};
+    return engine->core.capabilities(*out);
+}
+
 extern "C" const char * llama_engine_last_error(llama_engine_t * engine) {
     if (!engine) return nullptr;
     const char * msg = engine->core.last_error();

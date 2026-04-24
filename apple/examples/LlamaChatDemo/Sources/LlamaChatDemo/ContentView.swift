@@ -1,8 +1,18 @@
 import SwiftUI
+import UniformTypeIdentifiers
 import LlamaEngine
+
+#if canImport(UIKit)
+import UIKit
+#elseif canImport(AppKit)
+import AppKit
+#endif
 
 struct ContentView: View {
     @StateObject private var vm = ChatViewModel()
+
+    @State private var showImagePicker: Bool = false
+    @State private var showAudioPicker: Bool = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -59,6 +69,15 @@ struct ContentView: View {
                     ProgressView()
                         .controlSize(.small)
                         .frame(width: 60)
+                }
+            }
+
+            HStack {
+                TextField("mmproj .gguf (optionnel, pour vision/audio)", text: $vm.mmprojPath)
+                    .textFieldStyle(.roundedBorder)
+                    .disabled(vm.engineState != .unloaded)
+                if vm.engineState == .ready, vm.capabilities.hasMultimodal {
+                    capabilitiesLabel
                 }
             }
 
@@ -130,27 +149,109 @@ struct ContentView: View {
     }
 
     private var composer: some View {
-        HStack(alignment: .bottom, spacing: 8) {
-            TextField("Message...", text: $vm.draft, axis: .vertical)
-                .textFieldStyle(.roundedBorder)
-                .lineLimit(1...5)
-                .onSubmit(vm.send)
-                .disabled(vm.engineState != .ready)
-
-            if vm.isStreaming {
-                Button("Stop", role: .destructive, action: vm.cancelStream)
-                    .buttonStyle(.bordered)
-            } else {
-                Button("Send", action: vm.send)
-                    .buttonStyle(.borderedProminent)
-                    .disabled(!vm.canSend)
+        VStack(spacing: 6) {
+            if !vm.pendingAttachments.isEmpty {
+                pendingAttachmentsStrip
             }
 
-            Button("Clear", action: vm.resetConversation)
-                .buttonStyle(.bordered)
-                .disabled(vm.messages.isEmpty)
+            HStack(alignment: .bottom, spacing: 8) {
+                if vm.capabilities.supportsVision {
+                    Button {
+                        showImagePicker = true
+                    } label: {
+                        Image(systemName: "photo.on.rectangle.angled")
+                    }
+                    .buttonStyle(.bordered)
+                    .help("Joindre une image")
+                    .disabled(vm.engineState != .ready)
+                    .fileImporter(
+                        isPresented: $showImagePicker,
+                        allowedContentTypes: [.image],
+                        allowsMultipleSelection: true
+                    ) { result in
+                        if case .success(let urls) = result {
+                            for u in urls { vm.addImage(fromURL: u) }
+                        }
+                    }
+                }
+                if vm.capabilities.supportsAudio {
+                    Button {
+                        showAudioPicker = true
+                    } label: {
+                        Image(systemName: "waveform")
+                    }
+                    .buttonStyle(.bordered)
+                    .help("Joindre un fichier audio (.wav / .mp3)")
+                    .disabled(vm.engineState != .ready)
+                    .fileImporter(
+                        isPresented: $showAudioPicker,
+                        allowedContentTypes: audioTypes,
+                        allowsMultipleSelection: true
+                    ) { result in
+                        if case .success(let urls) = result {
+                            for u in urls { vm.addAudio(fromURL: u) }
+                        }
+                    }
+                }
+
+                TextField("Message...", text: $vm.draft, axis: .vertical)
+                    .textFieldStyle(.roundedBorder)
+                    .lineLimit(1...5)
+                    .onSubmit(vm.send)
+                    .disabled(vm.engineState != .ready)
+
+                if vm.isStreaming {
+                    Button("Stop", role: .destructive, action: vm.cancelStream)
+                        .buttonStyle(.bordered)
+                } else {
+                    Button("Send", action: vm.send)
+                        .buttonStyle(.borderedProminent)
+                        .disabled(!vm.canSend)
+                }
+
+                Button("Clear", action: vm.resetConversation)
+                    .buttonStyle(.bordered)
+                    .disabled(vm.messages.isEmpty && vm.pendingAttachments.isEmpty)
+            }
         }
         .padding(12)
+    }
+
+    private var pendingAttachmentsStrip: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                ForEach(vm.pendingAttachments) { att in
+                    PendingAttachmentChip(attachment: att) {
+                        vm.removePendingAttachment(att.id)
+                    }
+                }
+            }
+            .padding(.horizontal, 2)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var audioTypes: [UTType] {
+        [UTType.wav, UTType.mp3].compactMap { $0 }
+    }
+
+    private var capabilitiesLabel: some View {
+        HStack(spacing: 4) {
+            if vm.capabilities.supportsVision {
+                Label("vision", systemImage: "eye")
+                    .labelStyle(.titleAndIcon)
+            }
+            if vm.capabilities.supportsAudio {
+                Label("audio", systemImage: "waveform")
+                    .labelStyle(.titleAndIcon)
+            }
+        }
+        .font(.caption2)
+        .foregroundStyle(.secondary)
+        .padding(.horizontal, 6)
+        .padding(.vertical, 2)
+        .background(Color.blue.opacity(0.1))
+        .clipShape(Capsule())
     }
 
     // MARK: - Helpers
@@ -175,6 +276,60 @@ struct ContentView: View {
     }
 }
 
+private struct PendingAttachmentChip: View {
+    let attachment: ChatMessage.Attachment
+    let onRemove: () -> Void
+
+    var body: some View {
+        ZStack(alignment: .topTrailing) {
+            Group {
+                if attachment.isImage, let img = AttachmentRenderer.image(from: attachment.data) {
+                    img
+                        .resizable()
+                        .aspectRatio(contentMode: .fill)
+                        .frame(width: 56, height: 56)
+                        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                } else {
+                    VStack(spacing: 2) {
+                        Image(systemName: attachment.isAudio ? "waveform.circle.fill" : "paperclip")
+                            .font(.title3)
+                        Text(attachment.filename)
+                            .font(.caption2)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
+                    .frame(width: 80, height: 56)
+                    .background(Color.gray.opacity(0.15))
+                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                }
+            }
+
+            Button(action: onRemove) {
+                Image(systemName: "xmark.circle.fill")
+                    .font(.caption)
+                    .foregroundStyle(.white, .black.opacity(0.6))
+            }
+            .buttonStyle(.plain)
+            .padding(2)
+        }
+    }
+}
+
+/// Décodage d'octets d'image vers une `SwiftUI.Image` (cross-platform).
+enum AttachmentRenderer {
+    static func image(from data: Data) -> Image? {
+        #if canImport(UIKit)
+        guard let ui = UIImage(data: data) else { return nil }
+        return Image(uiImage: ui)
+        #elseif canImport(AppKit)
+        guard let ns = NSImage(data: data) else { return nil }
+        return Image(nsImage: ns)
+        #else
+        return nil
+        #endif
+    }
+}
+
 private struct MessageBubble: View {
     let message: ChatMessage
     @State private var reasoningExpanded: Bool = true
@@ -191,6 +346,9 @@ private struct MessageBubble: View {
                 if message.role == .tool {
                     toolResultView
                 } else {
+                    if message.hasAttachments {
+                        attachmentsView
+                    }
                     if message.hasReasoning {
                         reasoningView
                     }
@@ -215,6 +373,48 @@ private struct MessageBubble: View {
     }
 
     // MARK: - Sub-views
+
+    private var attachmentsView: some View {
+        let images  = message.attachments.filter { $0.isImage }
+        let audios  = message.attachments.filter { $0.isAudio }
+        return VStack(alignment: .leading, spacing: 6) {
+            if !images.isEmpty {
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 120, maximum: 180), spacing: 6)],
+                          alignment: .leading, spacing: 6) {
+                    ForEach(images) { att in
+                        if let img = AttachmentRenderer.image(from: att.data) {
+                            img
+                                .resizable()
+                                .aspectRatio(contentMode: .fill)
+                                .frame(maxWidth: 180, maxHeight: 180)
+                                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                        }
+                    }
+                }
+            }
+            ForEach(audios) { att in
+                HStack(spacing: 6) {
+                    Image(systemName: "waveform.circle.fill")
+                        .font(.title3)
+                        .foregroundStyle(.blue)
+                    Text(att.filename)
+                        .font(.caption)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Spacer(minLength: 0)
+                    if case .audio(let fmt) = att.kind {
+                        Text(fmt.uppercased())
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                .background(Color.blue.opacity(0.08))
+                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+            }
+        }
+    }
 
     private var reasoningView: some View {
         DisclosureGroup(isExpanded: $reasoningExpanded) {
@@ -294,10 +494,13 @@ private struct MessageBubble: View {
     }
 
     /// N'affiche une bulle "content" que si on a réellement du texte OU aucun
-    /// autre bloc (reasoning/tool_calls) capable de remplir la zone.
+    /// autre bloc (reasoning/tool_calls/attachments) capable de remplir la zone.
     private var shouldShowContentBubble: Bool {
         if !message.content.isEmpty { return true }
-        if message.isStreaming && !message.hasReasoning && !message.hasToolCalls { return true }
+        if message.isStreaming
+            && !message.hasReasoning
+            && !message.hasToolCalls
+            && !message.hasAttachments { return true }
         return false
     }
 

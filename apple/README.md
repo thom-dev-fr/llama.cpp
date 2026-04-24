@@ -24,11 +24,13 @@ apple/
 - Chat completions (OpenAI-compatible JSON in/out)
   - Non-stream: `chatCompletion(requestJSON:) async throws -> String`
   - Stream: `chatCompletionStream(requestJSON:) -> AsyncThrowingStream<String, Error>`
+- Multimodal inputs (image / audio) via the OpenAI `image_url` / `input_audio`
+  content parts, gated by the projector shipped with the model
 - Tokenize / detokenize
 - Metal GPU backend with embedded library
 - Thread-safe via Swift `actor`, cooperative cancellation via `Task.cancel()` propagating into `server-context` cancel tasks
 
-Out of scope for v1: embeddings, rerank, multiple concurrent models, image/audio inputs at runtime (the mtmd library is linked but the API to pass media is not yet exposed), and parallel sampling (`n > 1`).
+Out of scope for v1: embeddings, rerank, multiple concurrent models, parallel sampling (`n > 1`).
 
 ## Build
 
@@ -89,6 +91,51 @@ for try await chunk in engine.chatCompletionStream(requestJSON: request) {
 
 try await engine.unload()
 ```
+
+## Multimodal inputs (image / audio)
+
+Pass an `mmproj` file (the projector that comes with the model, e.g.
+`mmproj-F16.gguf`) via `ModelConfig.mtmdProjectorPath`:
+
+```swift
+try await engine.load(ModelConfig(
+    modelPath:          URL(fileURLWithPath: "…/Qwen2-VL-7B-Instruct-Q4_K_M.gguf"),
+    mtmdProjectorPath:  URL(fileURLWithPath: "…/Qwen2-VL-7B-mmproj-F16.gguf")
+))
+
+// Ask the engine what the loaded model supports:
+let caps = await engine.capabilities
+print(caps.supportsVision, caps.supportsAudio)
+```
+
+Then send a standard OpenAI multi-part `content`:
+
+```json
+{
+  "messages": [{
+    "role": "user",
+    "content": [
+      {"type": "text", "text": "What's in this picture?"},
+      {"type": "image_url", "image_url": {
+        "url": "data:image/png;base64,iVBORw0KGgo..."
+      }}
+    ]
+  }]
+}
+```
+
+For audio, use `input_audio` with a base64-encoded `wav` or `mp3` payload:
+
+```json
+{"type": "input_audio", "input_audio": {"data": "…base64…", "format": "wav"}}
+```
+
+Notes:
+- `http://` URLs do not work — the xcframework is built with `LLAMA_HTTPLIB=OFF`.
+  Use a data URL (base64) or a `file://` URL (see `media_path` below).
+- `file://` URLs require the path gate: set `extraJSON: #"{"media_path":"/some/dir"}"#`
+  in `ModelConfig`. Only the specified directory and its relative subpaths are accepted.
+- Accepted audio formats at the OAI layer are `wav` and `mp3` only.
 
 ## Tests
 

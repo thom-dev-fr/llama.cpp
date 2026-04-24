@@ -60,7 +60,7 @@ typedef struct {
     int32_t      parallel_slots;             // n_parallel. 0 => 1
     int32_t      cpu_threads;                // 0 or <0 => auto (hw_concurrency)
     uint32_t     seed;                       // 0xFFFFFFFF => LLAMA_DEFAULT_SEED
-    const char * mtmd_projector_path;        // optional, NULL to disable. not active at runtime in v1.
+    const char * mtmd_projector_path;        // optional, NULL to disable. enables image/audio inputs when the model ships with a compatible mmproj.
     const char * chat_template_override;     // optional, NULL to use GGUF-embedded template
     bool         use_mmap;
     bool         use_mlock;
@@ -80,6 +80,18 @@ llama_engine_status llama_engine_unload(llama_engine_t * engine);
 llama_engine_status llama_engine_sleep(llama_engine_t * engine);
 llama_engine_status llama_engine_wake(llama_engine_t * engine);
 llama_engine_state  llama_engine_get_state(llama_engine_t * engine);
+
+// Capabilities of the currently loaded model. Only meaningful when the engine
+// is in READY or SLEEPING state; returns LLAMA_ENGINE_ERR_NOT_LOADED otherwise.
+typedef struct {
+    bool has_mtmd;         // true if an mmproj was loaded alongside the model
+    bool supports_vision;  // true if image inputs are accepted
+    bool supports_audio;   // true if audio inputs are accepted (wav/mp3)
+} llama_engine_capabilities;
+
+llama_engine_status llama_engine_get_capabilities(
+    llama_engine_t            * engine,
+    llama_engine_capabilities * out);
 
 // Retrieve the most recent error message attached to `engine`.
 // Returned pointer is valid until the next call on `engine`.

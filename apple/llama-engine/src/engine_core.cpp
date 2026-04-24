@@ -50,6 +50,16 @@ llama_engine_state engine_core::state() const {
     return state_.load();
 }
 
+llama_engine_status engine_core::capabilities(llama_engine_capabilities & out) {
+    std::lock_guard<std::mutex> lock(mtx);
+    if (!cached_caps.has_value()) {
+        set_error("no loaded model");
+        return LLAMA_ENGINE_ERR_NOT_LOADED;
+    }
+    out = *cached_caps;
+    return LLAMA_ENGINE_OK;
+}
+
 const char * engine_core::last_error() {
     std::lock_guard<std::mutex> lock(mtx);
     return last_error_.empty() ? nullptr : last_error_.c_str();
@@ -117,6 +127,12 @@ llama_engine_status engine_core::load_from_params_locked(std::unique_lock<std::m
     ctx  = std::move(new_ctx);
     meta = std::make_unique<server_context_meta>(ctx->get_meta());
     vocab = llama_model_get_vocab(llama_get_model(ctx->get_llama_context()));
+
+    llama_engine_capabilities caps{};
+    caps.has_mtmd        = meta->has_mtmd;
+    caps.supports_vision = meta->has_inp_image;
+    caps.supports_audio  = meta->has_inp_audio;
+    cached_caps = caps;
 
     loop_thread = std::thread([this]() {
         ctx->start_loop();
@@ -191,6 +207,7 @@ llama_engine_status engine_core::unload() {
     state_.store(LLAMA_ENGINE_STATE_UNLOADING);
     teardown_locked(lock);
     last_params.reset();
+    cached_caps.reset();
     state_.store(LLAMA_ENGINE_STATE_UNLOADED);
     return LLAMA_ENGINE_OK;
 }

@@ -56,6 +56,17 @@ void params_translator::apply_extra_json(common_params & params, const json & ex
     if (extra.contains("swa_full"))                   params.swa_full                     = extra.at("swa_full").get<bool>();
     if (extra.contains("warmup"))                     params.warmup                       = extra.at("warmup").get<bool>();
     if (extra.contains("verbosity"))                  params.verbosity                    = extra.at("verbosity").get<int32_t>();
+    if (extra.contains("media_path")) {
+        // Gate for file:// URLs in chat image_url/input_audio parts. Matches
+        // the behaviour of the amont --media-path flag: the path must be a
+        // directory and end with a separator so it can be concatenated with
+        // the relative path parsed from the file:// URL.
+        std::string mp = extra.at("media_path").get<std::string>();
+        if (!mp.empty() && mp.back() != '/') {
+            mp.push_back('/');
+        }
+        params.media_path = std::move(mp);
+    }
 }
 
 common_params params_translator::translate(const llama_engine_config & cfg) {

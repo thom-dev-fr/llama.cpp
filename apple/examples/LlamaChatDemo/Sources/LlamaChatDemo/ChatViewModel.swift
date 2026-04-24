@@ -7,9 +7,14 @@ final class ChatViewModel: ObservableObject {
     // MARK: - Published UI state
 
     @Published var modelPath: String = ""
+    /// Chemin optionnel vers un projector multimodal (mmproj GGUF).
+    /// Laisser vide pour un modèle texte.
+    @Published var mmprojPath: String = ""
     @Published var systemPrompt: String = "You are a helpful assistant. When the user asks for the current time or a calculation, call the appropriate tool."
     @Published var messages: [ChatMessage] = []
     @Published var draft: String = ""
+    /// Pièces jointes en attente d'envoi avec le prochain message user.
+    @Published var pendingAttachments: [ChatMessage.Attachment] = []
 
     @Published var temperature: Double = 0.7
     @Published var contextSize: Int = 4096
@@ -20,6 +25,7 @@ final class ChatViewModel: ObservableObject {
     @Published var enableTools: Bool = true
 
     @Published private(set) var engineState: EngineState = .unloaded
+    @Published private(set) var capabilities: EngineCapabilities = .none
     @Published private(set) var isBusy: Bool = false
     @Published var lastError: String?
 
@@ -39,9 +45,9 @@ final class ChatViewModel: ObservableObject {
     // MARK: - Derived
 
     var canSend: Bool {
-        engineState == .ready
-            && !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            && streamTask == nil
+        guard engineState == .ready, streamTask == nil else { return false }
+        let hasText = !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        return hasText || !pendingAttachments.isEmpty
     }
 
     var canLoad: Bool {
@@ -66,10 +72,12 @@ final class ChatViewModel: ObservableObject {
         isBusy = true
         engineState = .loading
 
+        let mmproj = mmprojPath.trimmingCharacters(in: .whitespacesAndNewlines)
         let config = ModelConfig(
             modelPath: URL(fileURLWithPath: path),
             contextSize: Int32(contextSize),
             gpuLayers: Int32(gpuLayers),
+            mtmdProjectorPath: mmproj.isEmpty ? nil : URL(fileURLWithPath: mmproj),
             flashAttention: flashAttention
         )
 
@@ -107,11 +115,17 @@ final class ChatViewModel: ObservableObject {
     // MARK: - Chat
 
     func send() {
+        guard streamTask == nil else { return }
         let prompt = draft.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !prompt.isEmpty, streamTask == nil else { return }
+        let attachments = pendingAttachments
+        guard !prompt.isEmpty || !attachments.isEmpty else { return }
 
-        messages.append(ChatMessage(role: .user, content: prompt))
+        var msg = ChatMessage(role: .user, content: prompt)
+        msg.attachments = attachments
+        messages.append(msg)
+
         draft = ""
+        pendingAttachments.removeAll()
 
         launchCompletion(hopsRemaining: maxToolHops)
     }
@@ -269,7 +283,7 @@ final class ChatViewModel: ObservableObject {
             case .system:
                 continue // déjà injecté une seule fois ci-dessus
             case .user:
-                oaiMessages.append(["role": "user", "content": m.content])
+                oaiMessages.append(["role": "user", "content": userContent(for: m)])
             case .assistant:
                 var entry: [String: Any] = ["role": "assistant"]
                 // OAI autorise `content` vide quand il y a des tool_calls.
@@ -313,6 +327,38 @@ final class ChatViewModel: ObservableObject {
             return "{}"
         }
         return json
+    }
+
+    /// Construit le champ `content` d'un message user au format OAI.
+    /// Renvoie une simple `String` si aucune pièce jointe, sinon un tableau
+    /// de parts multimodales (text / image_url / input_audio).
+    private func userContent(for m: ChatMessage) -> Any {
+        guard m.hasAttachments else {
+            return m.content
+        }
+        var parts: [[String: Any]] = []
+        if !m.content.isEmpty {
+            parts.append(["type": "text", "text": m.content])
+        }
+        for a in m.attachments {
+            switch a.kind {
+            case .image(let mime):
+                let b64 = a.data.base64EncodedString()
+                parts.append([
+                    "type": "image_url",
+                    "image_url": ["url": "data:\(mime);base64,\(b64)"],
+                ])
+            case .audio(let format):
+                parts.append([
+                    "type": "input_audio",
+                    "input_audio": [
+                        "data":   a.data.base64EncodedString(),
+                        "format": format,
+                    ],
+                ])
+            }
+        }
+        return parts
     }
 
     // MARK: - Chunk parsing
@@ -389,6 +435,49 @@ final class ChatViewModel: ObservableObject {
     // MARK: - Internals
 
     private func refreshState() async {
-        engineState = await engine.state
+        engineState  = await engine.state
+        capabilities = await engine.capabilities
+    }
+
+    // MARK: - Attachments
+
+    /// Ajoute une pièce jointe à la composition en cours. Refuse silencieusement
+    /// si le modèle courant ne supporte pas la modalité concernée.
+    func addAttachment(_ attachment: ChatMessage.Attachment) {
+        switch attachment.kind {
+        case .image where !capabilities.supportsVision: return
+        case .audio where !capabilities.supportsAudio:  return
+        default: break
+        }
+        pendingAttachments.append(attachment)
+    }
+
+    func removePendingAttachment(_ id: UUID) {
+        pendingAttachments.removeAll { $0.id == id }
+    }
+
+    /// Appelé par l'UI quand l'utilisateur pointe un fichier image.
+    func addImage(fromURL url: URL) {
+        guard capabilities.supportsVision else { return }
+        // Security-scoped resource sur macOS sandboxé et iOS file importer.
+        let needsStop = url.startAccessingSecurityScopedResource()
+        defer { if needsStop { url.stopAccessingSecurityScopedResource() } }
+        if let a = AttachmentSupport.makeImageAttachment(from: url) {
+            addAttachment(a)
+        } else {
+            lastError = "Unable to read image at \(url.lastPathComponent)."
+        }
+    }
+
+    /// Appelé par l'UI quand l'utilisateur pointe un fichier audio .wav/.mp3.
+    func addAudio(fromURL url: URL) {
+        guard capabilities.supportsAudio else { return }
+        let needsStop = url.startAccessingSecurityScopedResource()
+        defer { if needsStop { url.stopAccessingSecurityScopedResource() } }
+        if let a = AttachmentSupport.makeAudioAttachment(from: url) {
+            addAttachment(a)
+        } else {
+            lastError = "Audio must be .wav or .mp3 and ≤ 20 MB."
+        }
     }
 }

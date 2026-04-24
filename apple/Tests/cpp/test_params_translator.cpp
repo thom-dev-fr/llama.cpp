@@ -95,6 +95,22 @@ static void test_extra_json_invalid() {
     EXPECT_THROWS(params_translator::translate(cfg), std::invalid_argument);
 }
 
+static void test_extra_json_media_path() {
+    CASE("extra_json media_path normalises trailing slash");
+    auto cfg = make_minimal_cfg();
+    cfg.extra_json = R"({"media_path": "/tmp/media"})";
+    auto p = params_translator::translate(cfg);
+    EXPECT_EQ(p.media_path, std::string("/tmp/media/"));
+
+    cfg.extra_json = R"({"media_path": "/tmp/media/"})";
+    p = params_translator::translate(cfg);
+    EXPECT_EQ(p.media_path, std::string("/tmp/media/"));
+
+    cfg.extra_json = R"({"media_path": ""})";
+    p = params_translator::translate(cfg);
+    EXPECT_EQ(p.media_path, std::string(""));
+}
+
 static void test_cpu_threads_auto() {
     CASE("cpu_threads <= 0 uses hardware concurrency");
     auto cfg = make_minimal_cfg();
@@ -113,5 +129,6 @@ void run_params_translator_tests() {
     test_context_size_override();
     test_extra_json_valid_keys();
     test_extra_json_invalid();
+    test_extra_json_media_path();
     test_cpu_threads_auto();
 }

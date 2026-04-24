@@ -17,7 +17,10 @@ public struct ModelConfig: Sendable {
     public var parallelSlots: Int32        = 1
     public var cpuThreads: Int32           = 0      // 0 => auto
     public var seed: UInt32                = 0xFFFF_FFFF
-    public var mtmdProjectorPath: URL?     = nil    // reserved; see PRD
+    /// Optional path to a multimodal projector (mmproj GGUF). When set,
+    /// enables `image_url` / `input_audio` content parts in chat requests.
+    /// Pass `nil` for text-only models.
+    public var mtmdProjectorPath: URL?     = nil
     public var chatTemplateOverride: String? = nil
     public var useMMap: Bool               = true
     public var useMlock: Bool              = false

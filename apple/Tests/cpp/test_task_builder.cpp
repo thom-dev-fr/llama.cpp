@@ -34,6 +34,14 @@ static server_chat_params make_synthetic_chat_params() {
     return p;
 }
 
+// 1×1 transparent PNG (base64). 67 bytes decoded.
+static constexpr const char * TINY_PNG_B64 =
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
+
+// Arbitrary 8-byte payload as base64 — upstream only base64-decodes and stores
+// audio bytes in parsed.files; no format validation happens at this layer.
+static constexpr const char * TINY_AUDIO_B64 = "UklGRgAAAAA=";
+
 static void test_invalid_json_throws() {
     CASE("invalid JSON throws invalid_argument");
     auto opt = make_synthetic_chat_params();
@@ -125,6 +133,106 @@ static void test_image_without_allow_image_throws() {
         std::runtime_error);
 }
 
+static void test_image_data_url_extracted_to_files() {
+    CASE("image_url data: URL is decoded into parsed.files");
+    auto opt = make_synthetic_chat_params();
+    opt.allow_image = true;
+    const std::string req = std::string(R"({
+        "messages": [{
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "describe this"},
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,)") + TINY_PNG_B64 + R"("}}
+            ]
+        }]
+    })";
+    auto parsed = task_builder::parse_oai_chat_request(req, opt);
+    EXPECT_EQ(parsed.files.size(), (size_t)1);
+    EXPECT(parsed.files[0].size() > 8);
+    // PNG magic bytes: 89 50 4E 47 0D 0A 1A 0A
+    EXPECT_EQ((int)parsed.files[0][0], 0x89);
+    EXPECT_EQ((int)parsed.files[0][1], 0x50);
+    EXPECT_EQ((int)parsed.files[0][2], 0x4E);
+    EXPECT_EQ((int)parsed.files[0][3], 0x47);
+}
+
+static void test_audio_wav_extracted_to_files() {
+    CASE("input_audio wav base64 is decoded into parsed.files");
+    auto opt = make_synthetic_chat_params();
+    opt.allow_audio = true;
+    const std::string req = std::string(R"({
+        "messages": [{
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "transcribe"},
+                {"type": "input_audio", "input_audio": {"data": ")") + TINY_AUDIO_B64 + R"(", "format": "wav"}}
+            ]
+        }]
+    })";
+    auto parsed = task_builder::parse_oai_chat_request(req, opt);
+    EXPECT_EQ(parsed.files.size(), (size_t)1);
+    EXPECT(parsed.files[0].size() > 0);
+}
+
+static void test_audio_bad_format_throws() {
+    CASE("input_audio with unsupported format throws");
+    auto opt = make_synthetic_chat_params();
+    opt.allow_audio = true;
+    const std::string req = std::string(R"({
+        "messages": [{
+            "role": "user",
+            "content": [
+                {"type": "input_audio", "input_audio": {"data": ")") + TINY_AUDIO_B64 + R"(", "format": "flac"}}
+            ]
+        }]
+    })";
+    EXPECT_THROWS(
+        task_builder::parse_oai_chat_request(req, opt),
+        std::invalid_argument);
+}
+
+static void test_audio_without_allow_audio_throws() {
+    CASE("input_audio content part without allow_audio throws");
+    auto opt = make_synthetic_chat_params();
+    opt.allow_audio = false;
+    const std::string req = std::string(R"({
+        "messages": [{
+            "role": "user",
+            "content": [
+                {"type": "input_audio", "input_audio": {"data": ")") + TINY_AUDIO_B64 + R"(", "format": "wav"}}
+            ]
+        }]
+    })";
+    EXPECT_THROWS(
+        task_builder::parse_oai_chat_request(req, opt),
+        std::runtime_error);
+}
+
+static void test_multiple_images_preserve_order() {
+    CASE("multiple image parts produce buffers in source order");
+    auto opt = make_synthetic_chat_params();
+    opt.allow_image = true;
+    // Two distinct images: the tiny PNG, and the tiny PNG with one byte changed
+    // by using a different (still valid) base64 payload for the second one.
+    // Simpler: send the same PNG twice but check count & first bytes of each.
+    const std::string req = std::string(R"({
+        "messages": [{
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "compare"},
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,)") + TINY_PNG_B64 + R"("}},
+                {"type": "text", "text": "and"},
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,)" + std::string(TINY_PNG_B64) + R"("}}
+            ]
+        }]
+    })";
+    auto parsed = task_builder::parse_oai_chat_request(req, opt);
+    EXPECT_EQ(parsed.files.size(), (size_t)2);
+    EXPECT_EQ((int)parsed.files[0][0], 0x89);
+    EXPECT_EQ((int)parsed.files[1][0], 0x89);
+    EXPECT_EQ(parsed.files[0].size(), parsed.files[1].size());
+}
+
 static void test_tools_without_jinja_throws() {
     CASE("tools without jinja throws runtime_error");
     auto opt = make_synthetic_chat_params();
@@ -147,5 +255,10 @@ void run_task_builder_tests() {
     test_stop_string_wrapped_to_array();
     test_response_format_bad_type_throws();
     test_image_without_allow_image_throws();
+    test_image_data_url_extracted_to_files();
+    test_audio_wav_extracted_to_files();
+    test_audio_bad_format_throws();
+    test_audio_without_allow_audio_throws();
+    test_multiple_images_preserve_order();
     test_tools_without_jinja_throws();
 }
