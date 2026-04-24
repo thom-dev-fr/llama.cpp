@@ -199,6 +199,8 @@ combine_static_libraries() {
     local libs=(
         "${REPO_ROOT}/${build_dir}/apple/llama-engine/${release_dir}/libllama-engine.a"
         "${REPO_ROOT}/${build_dir}/common/${release_dir}/libllama-common.a"
+        "${REPO_ROOT}/${build_dir}/common/${release_dir}/libllama-common-base.a"
+        "${REPO_ROOT}/${build_dir}/vendor/cpp-httplib/${release_dir}/libcpp-httplib.a"
         "${REPO_ROOT}/${build_dir}/src/${release_dir}/libllama.a"
         "${REPO_ROOT}/${build_dir}/ggml/src/${release_dir}/libggml.a"
         "${REPO_ROOT}/${build_dir}/ggml/src/${release_dir}/libggml-base.a"

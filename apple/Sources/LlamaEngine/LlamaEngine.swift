@@ -8,12 +8,12 @@ public actor LlamaEngine {
     private var handle: OpaquePointer?
 
     public init() {
-        self.handle = llama_engine_create().map { OpaquePointer($0) }
+        self.handle = llama_engine_create()
     }
 
     deinit {
         if let h = handle {
-            llama_engine_destroy(OpaquePointer(h))
+            llama_engine_destroy(h)
         }
     }
 
@@ -135,9 +135,9 @@ public actor LlamaEngine {
 
         var stream: OpaquePointer? = nil
         let openStatus = requestJSON.withCString { cstr -> llama_engine_status in
-            var raw: UnsafeMutablePointer<llama_engine_stream_t>? = nil
+            var raw: OpaquePointer? = nil
             let s = llama_engine_chat_completion_stream(self.raw(h), cstr, &raw)
-            stream = raw.map { OpaquePointer($0) }
+            stream = raw
             return s
         }
 
@@ -153,15 +153,13 @@ public actor LlamaEngine {
         }
 
         defer {
-            llama_engine_stream_close(UnsafeMutablePointer<llama_engine_stream_t>(streamPtr))
+            llama_engine_stream_close(streamPtr)
         }
 
         while !Task.isCancelled {
             var chunkPtr: UnsafeMutablePointer<CChar>? = nil
             var done = false
-            let st = llama_engine_stream_next(
-                UnsafeMutablePointer<llama_engine_stream_t>(streamPtr),
-                &chunkPtr, &done)
+            let st = llama_engine_stream_next(streamPtr, &chunkPtr, &done)
 
             let chunk = chunkPtr.map { String(cString: $0) }
             llama_engine_free_string(chunkPtr)
@@ -192,14 +190,14 @@ public actor LlamaEngine {
         }
 
         // Task cancelled: signal cancel into the C stream and drain once.
-        llama_engine_stream_cancel(UnsafeMutablePointer<llama_engine_stream_t>(streamPtr))
+        llama_engine_stream_cancel(streamPtr)
         continuation.finish(throwing: LlamaError.cancelled)
     }
 
     // MARK: - Internals
 
-    private func raw(_ h: OpaquePointer) -> UnsafeMutablePointer<llama_engine_t> {
-        return UnsafeMutablePointer<llama_engine_t>(h)
+    private func raw(_ h: OpaquePointer) -> OpaquePointer {
+        return h
     }
 
     private func lastError(_ h: OpaquePointer) -> String? {
