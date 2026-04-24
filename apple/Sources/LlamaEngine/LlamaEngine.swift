@@ -27,18 +27,23 @@ public actor LlamaEngine {
         return EngineState(rawValue: Int(raw.rawValue)) ?? .unloaded
     }
 
-    /// Capabilities of the currently loaded model (vision/audio support).
-    /// Returns `.none` when the engine is unloaded; otherwise reflects the
-    /// projector loaded at `load()` time.
+    /// Capabilities of the currently loaded model.
+    ///
+    /// Returns `.none` when the engine is unloaded; otherwise reflects:
+    /// - the projector loaded at `load()` time (vision / audio),
+    /// - the jinja chat template bundled with the model or provided via
+    ///   `ModelConfig.chatTemplateOverride` (tool calls / reasoning).
     public var capabilities: EngineCapabilities {
         guard let h = handle else { return .none }
         var c = llama_engine_capabilities()
         let status = llama_engine_get_capabilities(raw(h), &c)
         guard status == LLAMA_ENGINE_OK else { return .none }
         return EngineCapabilities(
-            hasMultimodal:  c.has_mtmd,
-            supportsVision: c.supports_vision,
-            supportsAudio:  c.supports_audio
+            hasMultimodal:     c.has_mtmd,
+            supportsVision:    c.supports_vision,
+            supportsAudio:     c.supports_audio,
+            supportsToolCalls: c.supports_tool_calls,
+            supportsReasoning: c.supports_reasoning
         )
     }
 

@@ -18,10 +18,19 @@ public enum EngineState: Int, Sendable, CustomStringConvertible {
     }
 }
 
-/// Describes what kinds of inputs the currently loaded model accepts.
+/// Describes what the currently loaded model is able to do.
 ///
-/// Populated when an `mmproj` projector is provided at load time and the
+/// Multimodal flags (`hasMultimodal`, `supportsVision`, `supportsAudio`) are
+/// populated when an `mmproj` projector is provided at load time and the
 /// projector's backbone reports support for the corresponding modality.
+///
+/// Tool-call and reasoning flags are derived from the jinja chat template
+/// shipped with the model (or the override passed via
+/// `ModelConfig.chatTemplateOverride`). They reflect what the template can
+/// render/parse, not whether the underlying weights were fine-tuned for the
+/// feature — a model without a tool-call-aware template will report
+/// `supportsToolCalls == false` even if it "knows" how to call tools.
+///
 /// Values are captured once at `load()` and kept across `sleep()`/`wake()`.
 public struct EngineCapabilities: Sendable, Equatable {
     /// True when an mmproj has been loaded alongside the base model.
@@ -30,13 +39,24 @@ public struct EngineCapabilities: Sendable, Equatable {
     public var supportsVision: Bool
     /// True when the loaded projector accepts audio inputs (wav/mp3).
     public var supportsAudio: Bool
+    /// True when the loaded chat template can render assistant `tool_calls`
+    /// (i.e. the model/template pair is usable for OpenAI-style tool calling).
+    public var supportsToolCalls: Bool
+    /// True when the loaded chat template preserves `reasoning_content`
+    /// across turns (i.e. the model/template pair supports multi-turn
+    /// chain-of-thought style reasoning).
+    public var supportsReasoning: Bool
 
     public init(hasMultimodal: Bool = false,
                 supportsVision: Bool = false,
-                supportsAudio: Bool = false) {
-        self.hasMultimodal  = hasMultimodal
-        self.supportsVision = supportsVision
-        self.supportsAudio  = supportsAudio
+                supportsAudio: Bool = false,
+                supportsToolCalls: Bool = false,
+                supportsReasoning: Bool = false) {
+        self.hasMultimodal     = hasMultimodal
+        self.supportsVision    = supportsVision
+        self.supportsAudio     = supportsAudio
+        self.supportsToolCalls = supportsToolCalls
+        self.supportsReasoning = supportsReasoning
     }
 
     public static let none = EngineCapabilities()

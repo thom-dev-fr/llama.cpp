@@ -132,6 +132,17 @@ llama_engine_status engine_core::load_from_params_locked(std::unique_lock<std::m
     caps.has_mtmd        = meta->has_mtmd;
     caps.supports_vision = meta->has_inp_image;
     caps.supports_audio  = meta->has_inp_audio;
+
+    // Reflect the jinja chat-template capabilities. Keys mirror
+    // jinja::caps::to_map() in common/jinja/caps.cpp. Absent keys fall back
+    // to false (e.g. when the template could not be analysed).
+    auto caps_lookup = [&](const char * key) -> bool {
+        auto it = meta->chat_template_caps.find(key);
+        return it != meta->chat_template_caps.end() && it->second;
+    };
+    caps.supports_tool_calls = caps_lookup("supports_tool_calls");
+    caps.supports_reasoning  = caps_lookup("supports_preserve_reasoning");
+
     cached_caps = caps;
 
     loop_thread = std::thread([this]() {

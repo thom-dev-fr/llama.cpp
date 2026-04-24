@@ -76,9 +76,10 @@ struct ContentView: View {
                 TextField("mmproj .gguf (optionnel, pour vision/audio)", text: $vm.mmprojPath)
                     .textFieldStyle(.roundedBorder)
                     .disabled(vm.engineState != .unloaded)
-                if vm.engineState == .ready, vm.capabilities.hasMultimodal {
-                    capabilitiesLabel
-                }
+            }
+
+            if vm.engineState == .ready, vm.capabilities.hasAnyCapability {
+                capabilitiesLabel
             }
 
             DisclosureGroup("Paramètres") {
@@ -116,6 +117,10 @@ struct ContentView: View {
                         .disabled(vm.engineState != .unloaded)
 
                     Toggle("Enable tools (get_current_time, calculator)", isOn: $vm.enableTools)
+                        .disabled(vm.engineState == .ready && !vm.capabilities.supportsToolCalls)
+                        .help(vm.engineState == .ready && !vm.capabilities.supportsToolCalls
+                              ? "The loaded chat template does not advertise tool-call support."
+                              : "Expose the local tools to the model as OpenAI-style functions.")
                 }
                 .padding(.top, 4)
             }
@@ -236,22 +241,26 @@ struct ContentView: View {
     }
 
     private var capabilitiesLabel: some View {
-        HStack(spacing: 4) {
+        HStack(spacing: 6) {
+            Text("Capabilities:")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+
             if vm.capabilities.supportsVision {
-                Label("vision", systemImage: "eye")
-                    .labelStyle(.titleAndIcon)
+                CapabilityBadge(text: "vision", icon: "eye", tint: .blue)
             }
             if vm.capabilities.supportsAudio {
-                Label("audio", systemImage: "waveform")
-                    .labelStyle(.titleAndIcon)
+                CapabilityBadge(text: "audio", icon: "waveform", tint: .blue)
             }
+            if vm.capabilities.supportsToolCalls {
+                CapabilityBadge(text: "tool calls", icon: "wrench.and.screwdriver", tint: .orange)
+            }
+            if vm.capabilities.supportsReasoning {
+                CapabilityBadge(text: "reasoning", icon: "brain", tint: .purple)
+            }
+
+            Spacer(minLength: 0)
         }
-        .font(.caption2)
-        .foregroundStyle(.secondary)
-        .padding(.horizontal, 6)
-        .padding(.vertical, 2)
-        .background(Color.blue.opacity(0.1))
-        .clipShape(Capsule())
     }
 
     // MARK: - Helpers
@@ -273,6 +282,35 @@ struct ContentView: View {
         case .sleeping:  return .blue
         case .unloading: return .orange
         }
+    }
+}
+
+private struct CapabilityBadge: View {
+    let text: String
+    let icon: String
+    let tint: Color
+
+    var body: some View {
+        Label(text, systemImage: icon)
+            .labelStyle(.titleAndIcon)
+            .font(.caption2.weight(.medium))
+            .foregroundStyle(tint)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 3)
+            .background(tint.opacity(0.12))
+            .overlay(
+                Capsule().stroke(tint.opacity(0.35), lineWidth: 0.5)
+            )
+            .clipShape(Capsule())
+    }
+}
+
+private extension EngineCapabilities {
+    /// True as soon as the loaded model advertises any kind of capability
+    /// (multimodal, tool-calls, or reasoning). Used to decide whether to
+    /// render the capability badge strip.
+    var hasAnyCapability: Bool {
+        supportsVision || supportsAudio || supportsToolCalls || supportsReasoning
     }
 }
 

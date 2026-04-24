@@ -84,9 +84,11 @@ llama_engine_state  llama_engine_get_state(llama_engine_t * engine);
 // Capabilities of the currently loaded model. Only meaningful when the engine
 // is in READY or SLEEPING state; returns LLAMA_ENGINE_ERR_NOT_LOADED otherwise.
 typedef struct {
-    bool has_mtmd;         // true if an mmproj was loaded alongside the model
-    bool supports_vision;  // true if image inputs are accepted
-    bool supports_audio;   // true if audio inputs are accepted (wav/mp3)
+    bool has_mtmd;              // true if an mmproj was loaded alongside the model
+    bool supports_vision;       // true if image inputs are accepted
+    bool supports_audio;        // true if audio inputs are accepted (wav/mp3)
+    bool supports_tool_calls;   // true if the loaded chat template advertises tool-call rendering
+    bool supports_reasoning;    // true if the loaded chat template preserves reasoning_content across turns
 } llama_engine_capabilities;
 
 llama_engine_status llama_engine_get_capabilities(

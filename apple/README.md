@@ -106,6 +106,7 @@ try await engine.load(ModelConfig(
 // Ask the engine what the loaded model supports:
 let caps = await engine.capabilities
 print(caps.supportsVision, caps.supportsAudio)
+print(caps.supportsToolCalls, caps.supportsReasoning)
 ```
 
 Then send a standard OpenAI multi-part `content`:
