@@ -56,6 +56,8 @@ void params_translator::apply_extra_json(common_params & params, const json & ex
     if (extra.contains("swa_full"))                   params.swa_full                     = extra.at("swa_full").get<bool>();
     if (extra.contains("warmup"))                     params.warmup                       = extra.at("warmup").get<bool>();
     if (extra.contains("verbosity"))                  params.verbosity                    = extra.at("verbosity").get<int32_t>();
+    if (extra.contains("image_min_tokens"))           params.image_min_tokens             = extra.at("image_min_tokens").get<int>();
+    if (extra.contains("image_max_tokens"))           params.image_max_tokens             = extra.at("image_max_tokens").get<int>();
     if (extra.contains("media_path")) {
         // Gate for file:// URLs in chat image_url/input_audio parts. Matches
         // the behaviour of the amont --media-path flag: the path must be a
@@ -100,7 +102,11 @@ common_params params_translator::translate(const llama_engine_config & cfg) {
     p.sampling.seed = cfg.seed;
 
     if (cfg.mtmd_projector_path != nullptr && cfg.mtmd_projector_path[0] != '\0') {
-        p.mmproj.path = cfg.mtmd_projector_path;
+        p.mmproj.path = cfg.mtmd_projector_path;    
+        // Disable context shifting when multimodal is enabled
+        // This is because an media chunk may contain multiple tokens
+        // and context shifting could break the media representation
+        p.ctx_shift = false;
     }
 
     if (cfg.chat_template_override != nullptr && cfg.chat_template_override[0] != '\0') {
@@ -117,6 +123,7 @@ common_params params_translator::translate(const llama_engine_config & cfg) {
 
     // Server defaults that we want consistently applied for library use.
     p.embedding          = false;
+    p.warmup             = false;
     p.use_jinja          = true;
     p.cache_prompt       = true;
     p.cont_batching      = true;
