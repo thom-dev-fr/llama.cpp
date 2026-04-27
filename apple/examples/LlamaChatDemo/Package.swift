@@ -4,14 +4,23 @@ import PackageDescription
 // LlamaChatDemo — exemple minimal SwiftUI exploitant le produit `LlamaEngine`
 // exposé par le package racine de ce fork (llama.cpp/Package.swift).
 //
-// Prérequis : avoir construit au préalable le xcframework :
+// Deux modes de build (gérés par le Package.swift racine) :
 //
-//     ./apple/scripts/build-xcframework.sh
+// 1) Libs statiques (DÉFAUT — itération rapide, host uniquement) :
 //
-// Lancement (macOS) :
+//        ./apple/scripts/build-static-libs.sh
+//        cd apple/examples/LlamaChatDemo
+//        swift run LlamaChatDemo
 //
-//     cd apple/examples/LlamaChatDemo
-//     swift run LlamaChatDemo
+//    SwiftPM lit `apple/build/static-libs/macos/` par défaut. Pour pointer
+//    ailleurs (ex. ios-sim), exporter `LLAMA_ENGINE_STATIC_LIBS_DIR`.
+//
+// 2) xcframework (opt-in, multi-plateforme) :
+//
+//        ./apple/scripts/build-xcframework.sh
+//        export LLAMA_ENGINE_USE_XCFRAMEWORK=1
+//        cd apple/examples/LlamaChatDemo
+//        swift run LlamaChatDemo
 //
 // Pour iOS : ouvrir ce Package.swift dans Xcode, sélectionner un device, Run.
 
