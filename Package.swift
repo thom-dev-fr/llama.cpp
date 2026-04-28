@@ -4,7 +4,8 @@ import Foundation
 
 // LlamaEngine SwiftPM package — two build modes (default = static libs):
 //
-// 1. Default — static libs from `apple/build/static-libs/macos/` (or the
+// 1. static libs from `apple/build/static-libs/macos/` opt-in via `useXcframework=false`
+//    (or the
 //    directory pointed at by `LLAMA_ENGINE_STATIC_LIBS_DIR` if it is set).
 //    Build them once with:
 //
@@ -15,7 +16,7 @@ import Foundation
 //    SwiftPM then links the resulting `.a` files directly. This is the
 //    fastest iteration path and is what the example app uses out of the box.
 //
-// 2. xcframework — opt-in via `LLAMA_ENGINE_USE_XCFRAMEWORK=1`.
+// 2. xcframework — opt-in via `useXcframework=true`.
 //    Build the multi-slice xcframework first:
 //
 //        ./apple/scripts/build-xcframework.sh
@@ -24,7 +25,7 @@ import Foundation
 //    consumes `apple/build/LlamaEngineCore.xcframework` as a `binaryTarget`.
 
 let env = ProcessInfo.processInfo.environment
-let useXcframework = (env["LLAMA_ENGINE_USE_XCFRAMEWORK"].map { !$0.isEmpty && $0 != "0" }) ?? false
+let useXcframework = true
 
 let coreTarget: Target
 if useXcframework {
