@@ -26,7 +26,7 @@ public struct ModelConfig: Sendable {
     public var useMlock: Bool              = false
     public var flashAttention: Bool        = false
     public var kvCacheType: KVCacheType    = .f16
-    public var idleSleepSeconds: Int32     = -1     // -1 => disabled
+    public var idlePauseSeconds: Int32     = -1     // -1 => disabled
     /// Escape hatch: JSON object merged into the underlying common_params.
     /// Only a whitelist of keys is honoured (see ParamsTranslator::apply_extra_json).
     public var extraJSON: String?          = nil
@@ -44,7 +44,7 @@ public struct ModelConfig: Sendable {
         useMlock: Bool = false,
         flashAttention: Bool = false,
         kvCacheType: KVCacheType = .f16,
-        idleSleepSeconds: Int32 = -1,
+        idlePauseSeconds: Int32 = -1,
         extraJSON: String? = nil
     ) {
         self.modelPath = modelPath
@@ -59,7 +59,7 @@ public struct ModelConfig: Sendable {
         self.useMlock = useMlock
         self.flashAttention = flashAttention
         self.kvCacheType = kvCacheType
-        self.idleSleepSeconds = idleSleepSeconds
+        self.idlePauseSeconds = idlePauseSeconds
         self.extraJSON = extraJSON
     }
 }

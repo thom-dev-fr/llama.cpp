@@ -51,14 +51,14 @@ extern "C" llama_engine_status llama_engine_unload(llama_engine_t * engine) {
     return engine->core.unload();
 }
 
-extern "C" llama_engine_status llama_engine_sleep(llama_engine_t * engine) {
+extern "C" llama_engine_status llama_engine_pause(llama_engine_t * engine) {
     if (!engine) return LLAMA_ENGINE_ERR_INVALID_ARG;
-    return engine->core.sleep();
+    return engine->core.pause();
 }
 
-extern "C" llama_engine_status llama_engine_wake(llama_engine_t * engine) {
+extern "C" llama_engine_status llama_engine_resume(llama_engine_t * engine) {
     if (!engine) return LLAMA_ENGINE_ERR_INVALID_ARG;
-    return engine->core.wake();
+    return engine->core.resume();
 }
 
 extern "C" llama_engine_state llama_engine_get_state(llama_engine_t * engine) {

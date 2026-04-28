@@ -26,12 +26,6 @@ final class ChatViewModel: ObservableObject {
 
     @Published private(set) var engineState: EngineState = .unloaded
     @Published private(set) var capabilities: EngineCapabilities = .none
-    @Published private(set) var isBusy: Bool = false
-    /// True entre le clic Sleep et l'exécution effective côté moteur.
-    /// Sert aussi à distinguer une demande "sleep pendant loading" en file d'attente.
-    @Published private(set) var pendingSleep: Bool = false
-    /// Idem pour wake : l'UI affiche un état transitoire pendant le re-load.
-    @Published private(set) var pendingWake: Bool = false
     @Published var lastError: String?
 
     // MARK: - Engine
@@ -58,26 +52,25 @@ final class ChatViewModel: ObservableObject {
     var canLoad: Bool {
         engineState == .unloaded
             && !modelPath.trimmingCharacters(in: .whitespaces).isEmpty
-            && !isBusy
     }
 
     var canUnload: Bool {
-        (engineState == .ready || engineState == .sleeping)
-            && !isBusy
+        engineState == .ready || engineState == .paused
     }
 
-    /// On autorise Sleep à tout moment où le moteur détient (ou prépare) un
+    /// On autorise Pause à tout moment où le moteur détient (ou prépare) un
     /// contexte : `.ready`, `.loading` (load initial en cours) ou pendant un
-    /// wake en cours (toujours `.loading` côté C++). La méthode `sleep()`
-    /// étant `nonisolated`, elle préempte activement le chargement via le
+    /// resume en cours (`.resuming` côté C++). La méthode `pause()` étant
+    /// `nonisolated`, elle préempte activement le chargement via le
     /// progress-callback de llama.cpp — usage typique iOS-background.
-    var canSleep: Bool {
-        (engineState == .ready || engineState == .loading)
-            && !pendingSleep
+    /// `.pausing` n'est pas inclus : le bouton est déjà désactivé pendant
+    /// la transition (eager-set côté `pauseModel`).
+    var canPause: Bool {
+        engineState == .ready || engineState == .loading || engineState == .resuming
     }
 
-    var canWake: Bool {
-        engineState == .sleeping && !pendingWake && !isBusy
+    var canResume: Bool {
+        engineState == .paused
     }
 
     // MARK: - Lifecycle
@@ -87,7 +80,6 @@ final class ChatViewModel: ObservableObject {
         guard !path.isEmpty else { return }
 
         lastError = nil
-        isBusy = true
         engineState = .loading
 
         let mmproj = mmprojPath.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -103,51 +95,53 @@ final class ChatViewModel: ObservableObject {
             do {
                 try await engine.load(config)
             } catch LlamaError.cancelled {
-                // Le load a été préempté par sleep() — pas une vraie erreur.
+                // Le load a été préempté par pause() — pas une vraie erreur.
             } catch {
                 lastError = "Load failed: \(error)"
             }
             await refreshState()
-            isBusy = false
         }
     }
 
     func unloadModel() {
-        isBusy = true
+        cancelStream()
+        engineState = .unloading
         Task {
-            cancelStream()
             do {
                 try await engine.unload()
             } catch {
                 lastError = "Unload failed: \(error)"
             }
             await refreshState()
-            isBusy = false
         }
     }
 
-    /// Mise en veille préemptive. Peut être appelée à n'importe quel moment :
-    ///  - depuis `.ready` : teardown normal.
-    ///  - pendant un `load()` ou `wake()` en cours : le progress-callback
+    /// Mise en pause préemptive. Peut être appelée à n'importe quel moment :
+    ///  - depuis `.ready` : transition `.pausing` puis `.paused`.
+    ///  - pendant un `load()` ou `resume()` en cours : le progress-callback
     ///    côté llama.cpp interrompt le chargement, puis le C-core bascule
-    ///    directement en `.sleeping` en conservant `last_params` pour un
-    ///    futur `wake()`. C'est le cas d'usage iOS → background.
+    ///    directement en `.paused` en conservant `last_params` pour un
+    ///    futur `resume()`. C'est le cas d'usage iOS → background.
     ///
-    /// L'appel C `llama_engine_sleep` est synchrone et attend que le
+    /// L'appel C `llama_engine_pause` est synchrone et attend que le
     /// chargement se soit effectivement arrêté (quelques ms au plus après le
     /// prochain callback de progression, soit ~1% de données chargées). On
     /// l'exécute dans une `Task.detached` pour ne pas bloquer le main thread.
-    func sleepModel() {
-        guard canSleep else { return }
+    ///
+    /// `engineState` est positionné à `.pausing` immédiatement pour que l'UI
+    /// désactive le bouton sans attendre la première publication d'état du
+    /// C-core (qui n'arrive qu'à la fin de l'appel via `refreshState()`).
+    func pauseModel() {
+        guard canPause else { return }
         cancelStream()
         lastError = nil
-        pendingSleep = true
+        engineState = .pausing
 
         let engineRef = engine
         Task.detached { [weak self] in
             let failure: Error? = {
                 do {
-                    try engineRef.sleep()
+                    try engineRef.pause()
                     return nil
                 } catch {
                     return error
@@ -155,32 +149,30 @@ final class ChatViewModel: ObservableObject {
             }()
             await MainActor.run { [weak self] in
                 if let err = failure {
-                    self?.lastError = "Sleep failed: \(err)"
+                    self?.lastError = "Pause failed: \(err)"
                 }
-                self?.pendingSleep = false
             }
             await self?.refreshState()
         }
     }
 
-    /// Ré-hydrate le contexte depuis l'état `.sleeping`. Déclenche un nouveau
+    /// Ré-hydrate le contexte depuis l'état `.paused`. Déclenche un nouveau
     /// chargement du modèle avec les mêmes `last_params` conservés côté C++.
-    /// Peut lui-même être préempté par un `sleepModel()` — dans ce cas l'appel
-    /// throw `.cancelled` qu'on ignore silencieusement.
-    func wakeModel() {
-        guard canWake else { return }
+    /// Peut lui-même être préempté par un `pauseModel()` — dans ce cas
+    /// l'appel throw `.cancelled` qu'on ignore silencieusement.
+    func resumeModel() {
+        guard canResume else { return }
         lastError = nil
-        pendingWake = true
+        engineState = .resuming
         Task {
             do {
-                try await engine.wake()
+                try await engine.resume()
             } catch LlamaError.cancelled {
-                // Wake préempté par sleep() — état final = .sleeping, rien à faire.
+                // Resume préempté par pause() — état final = .paused, rien à faire.
             } catch {
-                lastError = "Wake failed: \(error)"
+                lastError = "Resume failed: \(error)"
             }
             await refreshState()
-            pendingWake = false
         }
     }
 

@@ -242,29 +242,38 @@ struct ContentView: View {
         [UTType.wav, UTType.mp3].compactMap { $0 }
     }
 
-    /// Boutons Sleep / Wake pour tester le cycle de mise en veille du moteur.
-    /// Le bouton Sleep reste actif pendant `.loading` : l'appel préempte
-    /// activement le chargement (initial ou wake) via le progress-callback
-    /// côté llama.cpp — c'est le scénario iOS → background.
+    /// Boutons Pause / Resume pour tester le cycle de pause du moteur.
+    /// Le bouton Pause reste actif pendant `.loading` et `.resuming` :
+    /// l'appel préempte activement le chargement (initial ou resume) via le
+    /// progress-callback côté llama.cpp — c'est le scénario iOS → background.
     @ViewBuilder private var lifecycleButtons: some View {
-        if vm.pendingSleep {
-            Button("Sleeping…") { }
+        switch vm.engineState {
+        case .pausing:
+            Button("Pausing…") { }
                 .buttonStyle(.bordered)
                 .disabled(true)
-        } else if vm.canSleep {
-            Button("Sleep", action: vm.sleepModel)
-                .buttonStyle(.bordered)
-                .help(vm.engineState == .loading
-                      ? "Interrompt le chargement en cours et passe en veille."
-                      : "Libère le contexte, conserve la config pour wake().")
-        } else if vm.pendingWake {
-            Button("Waking…") { }
-                .buttonStyle(.bordered)
-                .disabled(true)
-        } else if vm.canWake {
-            Button("Wake", action: vm.wakeModel)
-                .buttonStyle(.borderedProminent)
-                .help("Recharge le modèle avec les mêmes paramètres.")
+        case .ready, .loading, .resuming:
+            if vm.canPause {
+                Button("Pause", action: vm.pauseModel)
+                    .buttonStyle(.bordered)
+                    .help(pauseHelp(for: vm.engineState))
+            }
+        case .paused:
+            if vm.canResume {
+                Button("Resume", action: vm.resumeModel)
+                    .buttonStyle(.borderedProminent)
+                    .help("Recharge le modèle avec les mêmes paramètres.")
+            }
+        case .unloaded, .unloading:
+            EmptyView()
+        }
+    }
+
+    private func pauseHelp(for state: EngineState) -> String {
+        switch state {
+        case .loading:  return "Interrompt le chargement en cours et passe en pause."
+        case .resuming: return "Interrompt la reprise en cours et reste en pause."
+        default:        return "Libère le contexte, conserve la config pour resume()."
         }
     }
 
@@ -307,8 +316,10 @@ struct ContentView: View {
         case .unloaded:  return .gray
         case .loading:   return .orange
         case .ready:     return .green
-        case .sleeping:  return .blue
+        case .paused:    return .blue
         case .unloading: return .orange
+        case .pausing:   return .blue
+        case .resuming:  return .orange
         }
     }
 }

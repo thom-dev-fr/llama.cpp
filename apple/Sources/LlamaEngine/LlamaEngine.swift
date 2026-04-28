@@ -1,9 +1,9 @@
 import Foundation
 import LlamaEngineCore
 
-/// Actor-isolated façade over the C engine. Load / unload / wake and
-/// inference are serialised on the actor; `sleep()` is intentionally
-/// `nonisolated` so it can preempt an in-flight `load()` or `wake()` (for
+/// Actor-isolated façade over the C engine. Load / unload / resume and
+/// inference are serialised on the actor; `pause()` is intentionally
+/// `nonisolated` so it can preempt an in-flight `load()` or `resume()` (for
 /// example when iOS transitions the app to the background).
 ///
 /// The underlying C engine handle is created at `init()` and is immutable for
@@ -65,17 +65,22 @@ public actor LlamaEngine {
         try throwIfError(status)
     }
 
-    /// Transition to `.sleeping`. Safe to call concurrently with an in-flight
-    /// `load()` or `wake()` — the C core preempts the load via its progress
+    /// Transition to `.paused`. Safe to call concurrently with an in-flight
+    /// `load()` or `resume()` — the C core preempts the load via its progress
     /// callback and releases this function once the state has converged. The
-    /// preempted `load()` / `wake()` call throws `LlamaError.cancelled`.
-    public nonisolated func sleep() throws {
-        let status = llama_engine_sleep(handle)
+    /// preempted `load()` / `resume()` call throws `LlamaError.cancelled`.
+    /// The engine briefly transitions through `.pausing` while the context is
+    /// being torn down before settling on `.paused`.
+    public nonisolated func pause() throws {
+        let status = llama_engine_pause(handle)
         try throwIfError(status)
     }
 
-    public func wake() throws {
-        let status = llama_engine_wake(handle)
+    /// Transition from `.paused` back to `.ready` by reloading the model
+    /// using the cached configuration. The engine reports `.resuming` while
+    /// the reload is in flight (distinct from the initial `.loading`).
+    public func resume() throws {
+        let status = llama_engine_resume(handle)
         try throwIfError(status)
     }
 
@@ -265,7 +270,7 @@ fileprivate extension ModelConfig {
                             use_mlock: useMlock,
                             flash_attention: flashAttention,
                             kv_cache_type: llama_engine_kv_type(UInt32(kvCacheType.rawValue)),
-                            idle_sleep_seconds: idleSleepSeconds,
+                            idle_pause_seconds: idlePauseSeconds,
                             extra_json: (extra?.isEmpty == false) ? cExtra : nil
                         )
                         return body(&cfg)

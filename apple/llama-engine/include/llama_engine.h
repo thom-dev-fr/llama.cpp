@@ -29,8 +29,10 @@ typedef enum {
     LLAMA_ENGINE_STATE_UNLOADED  = 0,
     LLAMA_ENGINE_STATE_LOADING   = 1,
     LLAMA_ENGINE_STATE_READY     = 2,
-    LLAMA_ENGINE_STATE_SLEEPING  = 3,
+    LLAMA_ENGINE_STATE_PAUSED    = 3,
     LLAMA_ENGINE_STATE_UNLOADING = 4,
+    LLAMA_ENGINE_STATE_PAUSING   = 5,
+    LLAMA_ENGINE_STATE_RESUMING  = 6,
 } llama_engine_state;
 
 typedef enum {
@@ -66,7 +68,7 @@ typedef struct {
     bool         use_mlock;
     bool         flash_attention;
     llama_engine_kv_type kv_cache_type;
-    int32_t      idle_sleep_seconds;         // -1 => disabled
+    int32_t      idle_pause_seconds;         // -1 => disabled
     const char * extra_json;                 // optional, NULL or JSON object merged into common_params
 } llama_engine_config;
 
@@ -78,25 +80,31 @@ void             llama_engine_destroy(llama_engine_t * engine);
 llama_engine_status llama_engine_load(llama_engine_t * engine, const llama_engine_config * config);
 llama_engine_status llama_engine_unload(llama_engine_t * engine);
 
-// Transition the engine to the SLEEPING state, releasing the model context
-// while retaining the configuration so a later llama_engine_wake() can
+// Transition the engine to the PAUSED state, releasing the model context
+// while retaining the configuration so a later llama_engine_resume() can
 // restore it. Thread-safe and may be called concurrently from another thread:
-//   - from READY:    tears down the context synchronously.
-//   - from LOADING:  preempts the in-flight load or wake via the llama.cpp
-//                    model load progress callback. The call blocks until the
-//                    loading thread observes the cancellation; the concurrent
-//                    llama_engine_load() / llama_engine_wake() call returns
-//                    LLAMA_ENGINE_ERR_CANCELLED. This is the iOS
-//                    background-transition case: sleep() unblocks a long
-//                    load without leaving the engine in an inconsistent state.
-//   - from SLEEPING: no-op, returns LLAMA_ENGINE_OK.
-llama_engine_status llama_engine_sleep(llama_engine_t * engine);
+//   - from READY:     transitions through PAUSING and tears down synchronously.
+//   - from LOADING:   preempts the in-flight load via the llama.cpp model
+//                     load progress callback. The call blocks until the
+//                     loading thread observes the cancellation; the concurrent
+//                     llama_engine_load() call returns
+//                     LLAMA_ENGINE_ERR_CANCELLED. This is the iOS
+//                     background-transition case: pause() unblocks a long
+//                     load without leaving the engine in an inconsistent state.
+//   - from RESUMING:  same preemption mechanism as LOADING; the concurrent
+//                     llama_engine_resume() call returns
+//                     LLAMA_ENGINE_ERR_CANCELLED.
+//   - from PAUSING:   waits for the in-flight pause to finish, returns OK.
+//   - from PAUSED:    no-op, returns LLAMA_ENGINE_OK.
+llama_engine_status llama_engine_pause(llama_engine_t * engine);
 
-llama_engine_status llama_engine_wake(llama_engine_t * engine);
+// Transition from PAUSED back to READY by reloading the model with the
+// previously cached configuration. Goes through RESUMING during the reload.
+llama_engine_status llama_engine_resume(llama_engine_t * engine);
 llama_engine_state  llama_engine_get_state(llama_engine_t * engine);
 
 // Capabilities of the currently loaded model. Only meaningful when the engine
-// is in READY or SLEEPING state; returns LLAMA_ENGINE_ERR_NOT_LOADED otherwise.
+// is in READY or PAUSED state; returns LLAMA_ENGINE_ERR_NOT_LOADED otherwise.
 typedef struct {
     bool has_mtmd;              // true if an mmproj was loaded alongside the model
     bool supports_vision;       // true if image inputs are accepted

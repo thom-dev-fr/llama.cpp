@@ -74,7 +74,7 @@ llama_engine_status engine_core::load_locked(const llama_engine_config & cfg,
                                              std::unique_lock<std::mutex> & lock)
 {
     if (state_.load() != LLAMA_ENGINE_STATE_UNLOADED &&
-        state_.load() != LLAMA_ENGINE_STATE_SLEEPING) {
+        state_.load() != LLAMA_ENGINE_STATE_PAUSED) {
         set_error("engine already loaded or busy");
         return LLAMA_ENGINE_ERR_ALREADY_LOADED;
     }
@@ -86,10 +86,11 @@ llama_engine_status engine_core::load_locked(const llama_engine_config & cfg,
         return LLAMA_ENGINE_ERR_INVALID_ARG;
     }
 
-    return load_from_params_locked(lock);
+    return load_from_params_locked(lock, /*from_resume=*/false);
 }
 
-llama_engine_status engine_core::load_from_params_locked(std::unique_lock<std::mutex> & lock)
+llama_engine_status engine_core::load_from_params_locked(std::unique_lock<std::mutex> & lock,
+                                                         bool from_resume)
 {
     if (!last_params.has_value()) {
         set_error("no cached params for load_from_params");
@@ -97,12 +98,13 @@ llama_engine_status engine_core::load_from_params_locked(std::unique_lock<std::m
     }
 
     // Reset the cancel flag so a previous preemption doesn't bleed into this
-    // load. sleep_requested_ is intentionally NOT reset here: sleep() may
+    // load. pause_requested_ is intentionally NOT reset here: pause() may
     // have posted it before we took the lock (the caller holds it on entry)
     // and we want to honour that intent.
     cancel_load_.store(false);
 
-    state_.store(LLAMA_ENGINE_STATE_LOADING);
+    state_.store(from_resume ? LLAMA_ENGINE_STATE_RESUMING
+                             : LLAMA_ENGINE_STATE_LOADING);
     cv_lifecycle.notify_all();
     last_error_.clear();
 
@@ -119,8 +121,8 @@ llama_engine_status engine_core::load_from_params_locked(std::unique_lock<std::m
     auto new_ctx = std::make_unique<server_context>();
 
     // Drop the lock during load_model(); it synchronously initialises the
-    // model and can take seconds. Only sleep() is allowed to touch state_
-    // while we are here (it raises cancel_load_ + sleep_requested_ and waits
+    // model and can take seconds. Only pause() is allowed to touch state_
+    // while we are here (it raises cancel_load_ + pause_requested_ and waits
     // on cv_lifecycle).
     lock.unlock();
 
@@ -136,15 +138,15 @@ llama_engine_status engine_core::load_from_params_locked(std::unique_lock<std::m
 
     lock.lock();
 
-    const bool was_preempted_by_sleep = sleep_requested_.exchange(false);
+    const bool was_preempted_by_pause = pause_requested_.exchange(false);
     cancel_load_.store(false);
 
     if (!ok) {
-        if (was_preempted_by_sleep) {
-            // Load was aborted because sleep() asked us to. Transition to
-            // SLEEPING and keep last_params so a later wake() can retry.
-            set_error("load cancelled by sleep()");
-            state_.store(LLAMA_ENGINE_STATE_SLEEPING);
+        if (was_preempted_by_pause) {
+            // Load was aborted because pause() asked us to. Transition to
+            // PAUSED and keep last_params so a later resume() can retry.
+            set_error("load cancelled by pause()");
+            state_.store(LLAMA_ENGINE_STATE_PAUSED);
             cv_lifecycle.notify_all();
             return LLAMA_ENGINE_ERR_CANCELLED;
         }
@@ -175,23 +177,28 @@ llama_engine_status engine_core::load_from_params_locked(std::unique_lock<std::m
 
     cached_caps = caps;
 
+    // IMPORTANT: check the pause-preempt flag BEFORE spawning loop_thread.
+    // server_queue::start_loop() unconditionally sets `running = true` at
+    // entry, so a terminate() raised before the thread actually runs would
+    // be silently overwritten and the join() in teardown_locked() would
+    // hang forever. This race is common when load_model() returns very fast
+    // (typically during resume() with an OS-cached model file).
+    if (was_preempted_by_pause) {
+        state_.store(LLAMA_ENGINE_STATE_PAUSING);
+        cv_lifecycle.notify_all();
+        // teardown_locked() handles a non-joinable loop_thread gracefully,
+        // so it's safe to call here without a started thread: it just drops
+        // ctx/meta/vocab.
+        teardown_locked(lock);
+        state_.store(LLAMA_ENGINE_STATE_PAUSED);
+        cv_lifecycle.notify_all();
+        set_error("load preempted by pause()");
+        return LLAMA_ENGINE_ERR_CANCELLED;
+    }
+
     loop_thread = std::thread([this]() {
         ctx->start_loop();
     });
-
-    if (was_preempted_by_sleep) {
-        // Race: load_model() completed before the progress callback observed
-        // the cancel flag (sleep() was raised during the very last steps).
-        // We have a fully-initialised context but the caller wants SLEEPING,
-        // so tear it down immediately.
-        state_.store(LLAMA_ENGINE_STATE_UNLOADING);
-        cv_lifecycle.notify_all();
-        teardown_locked(lock);
-        state_.store(LLAMA_ENGINE_STATE_SLEEPING);
-        cv_lifecycle.notify_all();
-        set_error("load preempted by sleep()");
-        return LLAMA_ENGINE_ERR_CANCELLED;
-    }
 
     state_.store(LLAMA_ENGINE_STATE_READY);
     cv_lifecycle.notify_all();
@@ -256,7 +263,8 @@ llama_engine_status engine_core::unload() {
     if (s == LLAMA_ENGINE_STATE_UNLOADED) {
         return LLAMA_ENGINE_OK;
     }
-    if (s == LLAMA_ENGINE_STATE_LOADING || s == LLAMA_ENGINE_STATE_UNLOADING) {
+    if (s == LLAMA_ENGINE_STATE_LOADING || s == LLAMA_ENGINE_STATE_UNLOADING ||
+        s == LLAMA_ENGINE_STATE_PAUSING || s == LLAMA_ENGINE_STATE_RESUMING) {
         set_error("engine is busy");
         return LLAMA_ENGINE_ERR_INTERNAL;
     }
@@ -268,67 +276,75 @@ llama_engine_status engine_core::unload() {
     return LLAMA_ENGINE_OK;
 }
 
-llama_engine_status engine_core::sleep() {
+llama_engine_status engine_core::pause() {
     std::unique_lock<std::mutex> lock(mtx);
     auto s = state_.load();
 
-    if (s == LLAMA_ENGINE_STATE_SLEEPING) {
+    if (s == LLAMA_ENGINE_STATE_PAUSED) {
         return LLAMA_ENGINE_OK;
     }
 
-    if (s == LLAMA_ENGINE_STATE_LOADING) {
-        // Preempt an in-flight load (initial load or wake()). Signal the
+    if (s == LLAMA_ENGINE_STATE_PAUSING) {
+        // Another pause() is already tearing down. Wait for it to finish.
+        cv_lifecycle.wait(lock, [&]() {
+            return state_.load() == LLAMA_ENGINE_STATE_PAUSED;
+        });
+        return LLAMA_ENGINE_OK;
+    }
+
+    if (s == LLAMA_ENGINE_STATE_LOADING || s == LLAMA_ENGINE_STATE_RESUMING) {
+        // Preempt an in-flight load (initial load or resume()). Signal the
         // progress callback to abort and wait until the loading thread
         // flips state_ to a terminal value.
-        sleep_requested_.store(true);
+        pause_requested_.store(true);
         cancel_load_.store(true);
         cv_lifecycle.wait(lock, [&]() {
             auto cur = state_.load();
-            return cur == LLAMA_ENGINE_STATE_SLEEPING
+            return cur == LLAMA_ENGINE_STATE_PAUSED
                 || cur == LLAMA_ENGINE_STATE_UNLOADED
                 || cur == LLAMA_ENGINE_STATE_READY;
         });
         auto resolved = state_.load();
-        if (resolved == LLAMA_ENGINE_STATE_SLEEPING) {
+        if (resolved == LLAMA_ENGINE_STATE_PAUSED) {
             return LLAMA_ENGINE_OK;
         }
         if (resolved == LLAMA_ENGINE_STATE_READY) {
             // Extremely narrow race: the load finished on a progress-poll
             // boundary before our cancel flag could be observed and the
-            // post-load sleep_requested check also missed it. Fall through
+            // post-load pause_requested check also missed it. Fall through
             // to the READY branch below with the lock still held.
             s = resolved;
         } else {
-            set_error("sleep() preempted a load that then failed");
+            set_error("pause() preempted a load that then failed");
             return LLAMA_ENGINE_ERR_NOT_LOADED;
         }
     }
 
     if (s != LLAMA_ENGINE_STATE_READY) {
-        set_error("sleep() requires READY, LOADING or SLEEPING state");
+        set_error("pause() requires READY, LOADING, RESUMING, PAUSING or PAUSED state");
         return LLAMA_ENGINE_ERR_NOT_LOADED;
     }
 
-    state_.store(LLAMA_ENGINE_STATE_UNLOADING);
+    state_.store(LLAMA_ENGINE_STATE_PAUSING);
     cv_lifecycle.notify_all();
     teardown_locked(lock);
-    // last_params intentionally retained for wake().
-    state_.store(LLAMA_ENGINE_STATE_SLEEPING);
+    // last_params intentionally retained for resume().
+    state_.store(LLAMA_ENGINE_STATE_PAUSED);
     cv_lifecycle.notify_all();
     return LLAMA_ENGINE_OK;
 }
 
-llama_engine_status engine_core::wake() {
+llama_engine_status engine_core::resume() {
     std::unique_lock<std::mutex> lock(mtx);
     auto s = state_.load();
     if (s == LLAMA_ENGINE_STATE_READY) {
         return LLAMA_ENGINE_OK;
     }
-    if (s != LLAMA_ENGINE_STATE_SLEEPING) {
-        set_error("wake() requires SLEEPING state");
+    if (s != LLAMA_ENGINE_STATE_PAUSED) {
+        set_error("resume() requires PAUSED state");
         return LLAMA_ENGINE_ERR_NOT_LOADED;
     }
-    return load_from_params_locked(lock);
+    return load_from_params_locked(lock, /*from_resume=*/true);
 }
 
 llama_engine_status engine_core::tokenize(const std::string & text, bool add_special,
@@ -336,8 +352,8 @@ llama_engine_status engine_core::tokenize(const std::string & text, bool add_spe
 {
     std::unique_lock<std::mutex> lock(mtx);
     if (state_.load() != LLAMA_ENGINE_STATE_READY) {
-        if (state_.load() == LLAMA_ENGINE_STATE_SLEEPING) {
-            auto st = load_from_params_locked(lock);
+        if (state_.load() == LLAMA_ENGINE_STATE_PAUSED) {
+            auto st = load_from_params_locked(lock, /*from_resume=*/true);
             if (st != LLAMA_ENGINE_OK) return st;
         } else {
             set_error("engine not loaded");
@@ -359,8 +375,8 @@ llama_engine_status engine_core::detokenize(const std::vector<int32_t> & tokens,
 {
     std::unique_lock<std::mutex> lock(mtx);
     if (state_.load() != LLAMA_ENGINE_STATE_READY) {
-        if (state_.load() == LLAMA_ENGINE_STATE_SLEEPING) {
-            auto st = load_from_params_locked(lock);
+        if (state_.load() == LLAMA_ENGINE_STATE_PAUSED) {
+            auto st = load_from_params_locked(lock, /*from_resume=*/true);
             if (st != LLAMA_ENGINE_OK) return st;
         } else {
             set_error("engine not loaded");
@@ -381,8 +397,8 @@ llama_engine_status engine_core::chat_completion(const std::string & request_jso
                                                  std::string & out_json)
 {
     std::unique_lock<std::mutex> lock(mtx);
-    if (state_.load() == LLAMA_ENGINE_STATE_SLEEPING) {
-        auto st = load_from_params_locked(lock);
+    if (state_.load() == LLAMA_ENGINE_STATE_PAUSED) {
+        auto st = load_from_params_locked(lock, /*from_resume=*/true);
         if (st != LLAMA_ENGINE_OK) return st;
     }
     if (state_.load() != LLAMA_ENGINE_STATE_READY) {
@@ -441,8 +457,8 @@ llama_engine_status engine_core::chat_completion_stream(const std::string & requ
     *out_stream = nullptr;
 
     std::unique_lock<std::mutex> lock(mtx);
-    if (state_.load() == LLAMA_ENGINE_STATE_SLEEPING) {
-        auto st = load_from_params_locked(lock);
+    if (state_.load() == LLAMA_ENGINE_STATE_PAUSED) {
+        auto st = load_from_params_locked(lock, /*from_resume=*/true);
         if (st != LLAMA_ENGINE_OK) return st;
     }
     if (state_.load() != LLAMA_ENGINE_STATE_READY) {

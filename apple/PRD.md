@@ -19,7 +19,7 @@ Un xcframework binaire distribué via SwiftPM, appelé `LlamaEngine`, qui :
 - Réutilise intégralement la cible CMake `server-context` du repo en amont (qui encapsule déjà toute la logique métier de `tools/server` indépendamment du transport HTTP). Aucune modification du code amont n'est nécessaire.
 - Vit dans un dossier isolé `apple/` du fork, avec un `Package.swift` à la racine du repo qui expose un `binaryTarget` sur le xcframework généré localement par un script de build.
 - Se synchronise avec l'amont par un simple `git merge` suivi d'un re-build du xcframework, grâce au périmètre strictement confiné des changements.
-- Libère la VRAM Metal à la demande (sleep / unload) et la reconstitue automatiquement lors de la requête suivante (wake implicite), avec annulation préemptive des inférences en cours via `SERVER_TASK_TYPE_CANCEL` pour honorer les transitions sans blocage.
+- Libère la VRAM Metal à la demande (pause / unload) et la reconstitue automatiquement lors de la requête suivante (resume implicite), avec annulation préemptive des inférences en cours via `SERVER_TASK_TYPE_CANCEL` pour honorer les transitions sans blocage.
 
 ## User Stories
 
@@ -39,12 +39,12 @@ Développeur de l'app iOS / macOS consommateur du framework :
 12. En tant que développeur iOS, je veux lancer plusieurs inférences chat en parallèle sur une même instance et qu'elles utilisent réellement les slots parallèles du moteur, pour servir plusieurs conversations ou requêtes simultanées.
 13. En tant que développeur iOS, je veux tokenizer une chaîne de caractères en entiers (tokens) via `async` / `await`, pour pouvoir compter les tokens d'un prompt avant de l'envoyer.
 14. En tant que développeur iOS, je veux détokenizer une séquence d'entiers en chaîne de caractères, pour afficher ou diagnostiquer des tokens manipulés côté Swift.
-15. En tant que développeur iOS, je veux appeler `sleep` pour libérer la VRAM Metal quand mon app passe en arrière-plan, pour que l'OS ne tue pas mon app pour cause de pression mémoire.
-16. En tant que développeur iOS, je veux que `sleep` préempte les inférences en cours par cancellation et se termine dans un délai borné, pour que la transition de cycle de vie ne bloque pas indéfiniment.
-17. En tant que développeur iOS, je veux que la première requête chat après un `sleep` déclenche automatiquement le rechargement du modèle sans avoir à appeler `wake` explicitement, pour simplifier le code dans les callbacks de retour au premier plan.
-18. En tant que développeur iOS, je veux pouvoir observer l'état du moteur (déchargé, en cours de chargement, prêt, en veille, en cours de déchargement) à tout moment, pour afficher un indicateur de progression dans mon UI SwiftUI.
+15. En tant que développeur iOS, je veux appeler `pause` pour libérer la VRAM Metal quand mon app passe en arrière-plan, pour que l'OS ne tue pas mon app pour cause de pression mémoire.
+16. En tant que développeur iOS, je veux que `pause` préempte les inférences en cours par cancellation et se termine dans un délai borné, pour que la transition de cycle de vie ne bloque pas indéfiniment.
+17. En tant que développeur iOS, je veux que la première requête chat après un `pause` déclenche automatiquement le rechargement du modèle sans avoir à appeler `resume` explicitement, pour simplifier le code dans les callbacks de retour au premier plan.
+18. En tant que développeur iOS, je veux pouvoir observer l'état du moteur (déchargé, en cours de chargement, prêt, en pause, en cours de mise en pause, en cours de reprise, en cours de déchargement) à tout moment, pour afficher un indicateur de progression dans mon UI SwiftUI.
 19. En tant que développeur iOS, je veux appeler `unload` pour décharger complètement le modèle et oublier sa configuration, pour basculer proprement vers un autre modèle sans conserver l'ancien état.
-20. En tant que développeur iOS, je veux configurer un délai d'inactivité après lequel le moteur passe automatiquement en veille, pour ne pas avoir à gérer moi-même la mise en veille dans mon code applicatif.
+20. En tant que développeur iOS, je veux configurer un délai d'inactivité après lequel le moteur passe automatiquement en pause, pour ne pas avoir à gérer moi-même la mise en pause dans mon code applicatif.
 21. En tant que développeur iOS, je veux régler le niveau de verbosité des logs C++, pour pouvoir couper le bruit en production et l'activer lors du debug.
 22. En tant que développeur iOS travaillant sur l'app, je veux une seule instance de `LlamaEngine` à la fois par processus, conformément aux garanties documentées, pour ne pas avoir à raisonner sur des interactions inter-instances.
 23. En tant que développeur iOS, je veux que le framework expose une cancellation préemptive via les mécanismes Swift Concurrency idiomatiques (`Task`, `withTaskCancellationHandler`), pour que mon code soit naturel et que mes tests unitaires cancellation fonctionnent de manière prévisible.
@@ -70,7 +70,7 @@ Développeur mainteneur du fork :
 
 ### Architecture d'ensemble
 
-- Le framework réutilise intégralement la cible CMake `server-context` déjà exposée par le code amont. Cette cible contient tout le coeur métier (prompt cache, slots parallèles, application des templates de chat jinja, tool-calling PEG/auto, multimodal `mtmd`, streaming, speculative decoding, cancellation granulaire via `SERVER_TASK_TYPE_CANCEL`, sleep/wake automatique). Aucune modification de `tools/server/` ni d'autres fichiers amont n'est nécessaire.
+- Le framework réutilise intégralement la cible CMake `server-context` déjà exposée par le code amont. Cette cible contient tout le coeur métier (prompt cache, slots parallèles, application des templates de chat jinja, tool-calling PEG/auto, multimodal `mtmd`, streaming, speculative decoding, cancellation granulaire via `SERVER_TASK_TYPE_CANCEL`, sleep/wake automatique upstream, exposé chez nous comme pause/resume). Aucune modification de `tools/server/` ni d'autres fichiers amont n'est nécessaire.
 - Le pilotage se fait via `server_response_reader`, qui est explicitement prévu dans le code amont pour un usage non-HTTP.
 - Le framework n'embarque pas de serveur HTTP. Il expose une API locale native.
 
@@ -87,7 +87,7 @@ Six modules logiques principaux :
 
 ### Contrat d'API côté Swift (haute niveau)
 
-- Façade présentée sous forme d'actor, avec cycle de vie `load` / `unload` / `sleep` / `wake` et propriété d'état observable.
+- Façade présentée sous forme d'actor, avec cycle de vie `load` / `unload` / `pause` / `resume` et propriété d'état observable.
 - Inférence chat exposée sous deux formes : non-stream (`async throws -> Data`) et streaming (`AsyncThrowingStream<Data, Error>`). Les deux acceptent en entrée un `Data` contenant du JSON OpenAI-compatible.
 - Tokenisation et détokenisation exposées directement en Swift typé (pas de JSON).
 - Contrôle de verbosité exposé via un setter de niveau de log.
@@ -104,15 +104,15 @@ Six modules logiques principaux :
 - Une seule instance `LlamaEngine` prise en charge à la fois par processus. Le backend ggml/Metal est initialisé une unique fois au premier `load`.
 - Cycle de vie sérialisé par l'isolation actor Swift.
 - Les inférences concurrentes sur une même instance sont autorisées et exploitent réellement les slots parallèles configurés.
-- `sleep` et `unload` appliquent une politique de préemption : envoi de `SERVER_TASK_TYPE_CANCEL` à toutes les tâches en vol, puis attente bornée de leur fin avant démontage. Les streams préemptés lèvent une erreur de cancellation typée.
+- `pause` et `unload` appliquent une politique de préemption : envoi de `SERVER_TASK_TYPE_CANCEL` à toutes les tâches en vol, puis attente bornée de leur fin avant démontage. Les streams préemptés lèvent une erreur de cancellation typée.
 - `load` sur une instance déjà chargée lève une erreur typée (pas de remplacement implicite).
-- `wake` implicite : une requête d'inférence sur une instance en veille déclenche automatiquement le rechargement du modèle à partir de la configuration préservée. L'état transite par `loading` puis `ready`.
-- `wake` explicite sur une instance non-en-veille : no-op silencieux.
+- `resume` implicite : une requête d'inférence sur une instance en pause déclenche automatiquement le rechargement du modèle à partir de la configuration préservée. L'état transite par `resuming` puis `ready`.
+- `resume` explicite sur une instance non-en-pause : no-op silencieux.
 - La cancellation d'un `Task` Swift qui consomme un stream d'inférence est propagée activement côté C++ via `SERVER_TASK_TYPE_CANCEL` avec l'identifiant de tâche correspondant, pour un arrêt immédiat au niveau du slot et non au prochain poll.
 
 ### Configuration du modèle
 
-Le `ModelConfig` public expose les champs suivants (avec défauts sensés) : chemin du GGUF, taille de contexte, couches GPU, nombre de slots parallèles, nombre de threads CPU (auto par défaut), seed, chemin du projector multimodal optionnel, override de template de chat optionnel, mmap, mlock, flash attention, type de quantification du KV cache, durée d'inactivité avant sleep automatique (désactivé par défaut), et dictionnaire d'options libres pour les paramètres avancés non typés.
+Le `ModelConfig` public expose les champs suivants (avec défauts sensés) : chemin du GGUF, taille de contexte, couches GPU, nombre de slots parallèles, nombre de threads CPU (auto par défaut), seed, chemin du projector multimodal optionnel, override de template de chat optionnel, mmap, mlock, flash attention, type de quantification du KV cache, durée d'inactivité avant pause automatique (désactivé par défaut), et dictionnaire d'options libres pour les paramètres avancés non typés.
 
 ### Backends et plateformes
 
@@ -189,6 +189,6 @@ Explicitement hors périmètre v1 :
 - Le périmètre fonctionnel du coeur `server-context` est très large et évolue vite en amont (tool-calling, reasoning/thinking models, multimodal). Le fait que le framework soit un fin adaptateur permet d'hériter gratuitement de ces évolutions à chaque synchronisation, tant qu'elles restent pilotables par `server_task` sans changement de l'ABI interne. Si l'ABI interne d'`server_context` change de façon incompatible, le travail d'adaptation se concentre dans `EngineCore`, pas dans les modules purs.
 - La décision de ne pas émuler le transport SSE dans l'API de streaming est délibérée. Le SSE est une convention HTTP, pas une convention d'API. Le format retenu (un JSON `ChatCompletionChunk` par élément) est strictement équivalent en information et trivialement consommable côté Swift.
 - La décision de conserver une entrée et une sortie JSON (plutôt qu'une API Swift typée native) est pragmatique : l'application consommatrice utilise déjà un client OpenAI Swift qui produit et consomme ces JSON, et l'API OpenAI évolue. Un mapping typé complet coûterait plus cher à maintenir qu'à utiliser.
-- L'auto-sleep configurable combiné au wake implicite forme un cycle de vie adapté aux contraintes mobiles : l'app peut "oublier" de libérer la VRAM — le moteur le fait seul après inactivité — et n'a qu'à relancer une requête pour la reprise. Cela simplifie nettement le code applicatif des callbacks de cycle de vie iOS.
+- L'auto-pause configurable combinée au resume implicite forme un cycle de vie adapté aux contraintes mobiles : l'app peut "oublier" de libérer la VRAM — le moteur le fait seul après inactivité — et n'a qu'à relancer une requête pour la reprise. Cela simplifie nettement le code applicatif des callbacks de cycle de vie iOS.
 - Si un besoin futur de routage des logs via OSLog apparaît, la voie la plus propre est un patch isolé de `common/log.cpp` ajoutant un setter de callback. Ce patch devra rester atomique et réversible pour faciliter la synchronisation amont. En attendant, l'utilisation de `setLogLevel(.off)` permet de supprimer le bruit à défaut de le rediriger.
 - Les trois modules purs (`ParamsTranslator`, `TaskBuilder`, `ResultFormatter`) concentrent la valeur testable du framework. Un défaut dans `EngineCore` ou dans la façade Swift sera probablement détecté rapidement par l'usage manuel dans l'application de dev. Un défaut dans un module pur — par exemple un champ OpenAI mal mappé — peut passer inaperçu longtemps et causer des comportements silencieusement incorrects. Priorité donnée aux tests là où le ROI est maximal.

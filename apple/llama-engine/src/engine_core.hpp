@@ -43,8 +43,8 @@ public:
     // Lifecycle
     llama_engine_status load(const llama_engine_config & cfg);
     llama_engine_status unload();
-    llama_engine_status sleep();
-    llama_engine_status wake();
+    llama_engine_status pause();
+    llama_engine_status resume();
 
     llama_engine_state state() const;
 
@@ -73,7 +73,12 @@ public:
 private:
     llama_engine_status load_locked(const llama_engine_config & cfg,
                                     std::unique_lock<std::mutex> & lock);
-    llama_engine_status load_from_params_locked(std::unique_lock<std::mutex> & lock);
+    // `from_resume == true` makes the entry transient state RESUMING instead
+    // of LOADING, so observers can distinguish a fresh load from a
+    // pause-recovery reload. Cancellation/preemption semantics are otherwise
+    // identical.
+    llama_engine_status load_from_params_locked(std::unique_lock<std::mutex> & lock,
+                                                bool from_resume);
     void                teardown_locked(std::unique_lock<std::mutex> & lock);
     void                preempt_all_streams_locked(std::unique_lock<std::mutex> & lock);
 
@@ -81,22 +86,22 @@ private:
 
     mutable std::mutex      mtx;
     std::condition_variable cv_streams;
-    // Signals transitions of state_. Used by sleep() to wait for an in-flight
+    // Signals transitions of state_. Used by pause() to wait for an in-flight
     // load_from_params_locked() to observe the cancellation flag.
     std::condition_variable cv_lifecycle;
 
     std::atomic<llama_engine_state> state_{LLAMA_ENGINE_STATE_UNLOADED};
     std::string                     last_error_;
 
-    // Set by sleep() when called during LOADING. Read by the progress
-    // callback installed on common_params.load_progress_callback; returning
-    // false aborts llama_model_load_from_file and causes server_context::
-    // load_model() to return false.
+    // Set by pause() when called during LOADING/RESUMING. Read by the
+    // progress callback installed on common_params.load_progress_callback;
+    // returning false aborts llama_model_load_from_file and causes
+    // server_context::load_model() to return false.
     std::atomic<bool> cancel_load_{false};
-    // Distinguishes an explicit sleep-preemption from other load failures,
-    // so the post-load path can transition to SLEEPING (keeping last_params)
+    // Distinguishes an explicit pause-preemption from other load failures,
+    // so the post-load path can transition to PAUSED (keeping last_params)
     // rather than UNLOADED.
-    std::atomic<bool> sleep_requested_{false};
+    std::atomic<bool> pause_requested_{false};
 
     std::optional<common_params>           last_params;
     std::unique_ptr<server_context>        ctx;
@@ -106,7 +111,7 @@ private:
     struct mtmd_context *                  mctx  = nullptr; // unused in v1
 
     // Capabilities are captured right after load_model() and kept across
-    // sleep/wake transitions, where `meta` is dropped. Only valid when
+    // pause/resume transitions, where `meta` is dropped. Only valid when
     // last_params has a value.
     std::optional<llama_engine_capabilities> cached_caps;
 

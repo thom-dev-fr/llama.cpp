@@ -20,7 +20,7 @@ apple/
 
 ## Scope (v1)
 
-- Single model lifecycle: `load` / `unload` / `sleep` / `wake`
+- Single model lifecycle: `load` / `unload` / `pause` / `resume`
 - Chat completions (OpenAI-compatible JSON in/out)
   - Non-stream: `chatCompletion(requestJSON:) async throws -> String`
   - Stream: `chatCompletionStream(requestJSON:) -> AsyncThrowingStream<String, Error>`

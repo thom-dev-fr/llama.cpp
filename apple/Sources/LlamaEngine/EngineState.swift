@@ -4,16 +4,20 @@ public enum EngineState: Int, Sendable, CustomStringConvertible {
     case unloaded  = 0
     case loading   = 1
     case ready     = 2
-    case sleeping  = 3
+    case paused    = 3
     case unloading = 4
+    case pausing   = 5
+    case resuming  = 6
 
     public var description: String {
         switch self {
         case .unloaded:  return "unloaded"
         case .loading:   return "loading"
         case .ready:     return "ready"
-        case .sleeping:  return "sleeping"
+        case .paused:    return "paused"
         case .unloading: return "unloading"
+        case .pausing:   return "pausing"
+        case .resuming:  return "resuming"
         }
     }
 }
@@ -31,7 +35,7 @@ public enum EngineState: Int, Sendable, CustomStringConvertible {
 /// feature — a model without a tool-call-aware template will report
 /// `supportsToolCalls == false` even if it "knows" how to call tools.
 ///
-/// Values are captured once at `load()` and kept across `sleep()`/`wake()`.
+/// Values are captured once at `load()` and kept across `pause()`/`resume()`.
 public struct EngineCapabilities: Sendable, Equatable {
     /// True when an mmproj has been loaded alongside the base model.
     public var hasMultimodal: Bool

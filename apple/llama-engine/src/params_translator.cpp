@@ -119,7 +119,7 @@ common_params params_translator::translate(const llama_engine_config & cfg) {
                                                : LLAMA_FLASH_ATTN_TYPE_AUTO;
     p.cache_type_k       = map_kv_cache_type(cfg.kv_cache_type);
     p.cache_type_v       = map_kv_cache_type(cfg.kv_cache_type);
-    p.sleep_idle_seconds = cfg.idle_sleep_seconds;
+    p.sleep_idle_seconds = cfg.idle_pause_seconds;
 
     // Server defaults that we want consistently applied for library use.
     p.embedding          = false;

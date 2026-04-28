@@ -17,7 +17,7 @@ static llama_engine_config make_minimal_cfg() {
     cfg.cpu_threads = 0;
     cfg.seed = 0xFFFFFFFFu;
     cfg.kv_cache_type = LLAMA_ENGINE_KV_F16;
-    cfg.idle_sleep_seconds = -1;
+    cfg.idle_pause_seconds = -1;
     cfg.use_mmap = true;
     return cfg;
 }
