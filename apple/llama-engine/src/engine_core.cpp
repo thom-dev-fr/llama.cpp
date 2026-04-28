@@ -5,6 +5,7 @@
 #include "result_formatter.hpp"
 
 #include "common.h"
+#include "chat.h"
 #include "log.h"
 #include "llama.h"
 #include "ggml-backend.h"
@@ -173,7 +174,31 @@ llama_engine_status engine_core::load_from_params_locked(std::unique_lock<std::m
         return it != meta->chat_template_caps.end() && it->second;
     };
     caps.supports_tool_calls = caps_lookup("supports_tool_calls");
-    caps.supports_reasoning  = caps_lookup("supports_preserve_reasoning");
+
+    // `supports_preserve_reasoning` (jinja-caps) only tells whether the chat
+    // template re-injects a prior assistant `reasoning_content` field into
+    // the rendered prompt. Very few templates do (Qwen3 recent, GLM-4.5,
+    // gpt-oss, DeepSeek-V3.1...); Gemma, Ministral, old Qwen/DeepSeek-R1
+    // distills do not, even though the *model* is perfectly capable of
+    // producing <think>...</think> reasoning.
+    //
+    // The right signal for "can this model emit reasoning" is
+    // `common_chat_params::supports_thinking`, exposed publicly via
+    // `common_chat_templates_support_enable_thinking()` (it runs the template
+    // with enable_thinking=true and goes through specialized parsers or the
+    // differential autoparser, which also handles workarounds for old
+    // reasoning-capable templates).
+    bool supports_thinking = false;
+    if (meta->chat_params.tmpls) {
+        try {
+            supports_thinking = common_chat_templates_support_enable_thinking(
+                meta->chat_params.tmpls.get());
+        } catch (const std::exception & e) {
+            LOG_WRN("%s: enable_thinking probe failed: %s\n", __func__, e.what());
+        }
+    }
+    caps.supports_reasoning           = supports_thinking;
+    caps.supports_preserve_reasoning  = caps_lookup("supports_preserve_reasoning");
 
     cached_caps = caps;
 

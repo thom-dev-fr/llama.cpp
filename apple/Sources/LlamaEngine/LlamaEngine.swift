@@ -43,11 +43,12 @@ public actor LlamaEngine {
         let status = llama_engine_get_capabilities(handle, &c)
         guard status == LLAMA_ENGINE_OK else { return .none }
         return EngineCapabilities(
-            hasMultimodal:     c.has_mtmd,
-            supportsVision:    c.supports_vision,
-            supportsAudio:     c.supports_audio,
-            supportsToolCalls: c.supports_tool_calls,
-            supportsReasoning: c.supports_reasoning
+            hasMultimodal:             c.has_mtmd,
+            supportsVision:            c.supports_vision,
+            supportsAudio:             c.supports_audio,
+            supportsToolCalls:         c.supports_tool_calls,
+            supportsReasoning:         c.supports_reasoning,
+            supportsPreserveReasoning: c.supports_preserve_reasoning
         )
     }
 

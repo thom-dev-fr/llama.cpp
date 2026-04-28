@@ -110,7 +110,12 @@ typedef struct {
     bool supports_vision;       // true if image inputs are accepted
     bool supports_audio;        // true if audio inputs are accepted (wav/mp3)
     bool supports_tool_calls;   // true if the loaded chat template advertises tool-call rendering
-    bool supports_reasoning;    // true if the loaded chat template preserves reasoning_content across turns
+    bool supports_reasoning;    // true if the model can emit reasoning (thinking) output,
+                                // i.e. common_chat_templates_support_enable_thinking() succeeds.
+                                // Covers Gemma, Ministral, Qwen3, DeepSeek-R1 distills, gpt-oss, GLM, etc.
+    bool supports_preserve_reasoning; // true if the chat template re-injects a prior assistant
+                                      // `reasoning_content` field into the rendered prompt on the
+                                      // next turn (rare: Qwen3 recent, GLM-4.5, gpt-oss, DeepSeek-V3.1).
 } llama_engine_capabilities;
 
 llama_engine_status llama_engine_get_capabilities(
