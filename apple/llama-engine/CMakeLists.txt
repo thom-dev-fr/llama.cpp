@@ -19,35 +19,16 @@ find_package(Threads REQUIRED)
 set(SERVER_DIR ${LLAMA_REPO_ROOT}/tools/server)
 set(MTMD_DIR   ${LLAMA_REPO_ROOT}/tools/mtmd)
 
-set(MTMD_MODELS
-    cogvlm.cpp
-    conformer.cpp
-    dotsocr.cpp
-    gemma4a.cpp
-    gemma4v.cpp
-    glm4v.cpp
-    hunyuanocr.cpp
-    internvl.cpp
-    kimivl.cpp
-    kimik25.cpp
-    nemotron-v2-vl.cpp
-    llama4.cpp
-    llava.cpp
-    minicpmv.cpp
-    paddleocr.cpp
-    pixtral.cpp
-    qwen2vl.cpp
-    qwen3vl.cpp
-    qwen3a.cpp
-    step3vl.cpp
-    siglip.cpp
-    whisper-enc.cpp
-    deepseekocr.cpp
-    mobilenetv5.cpp
-    youtuvl.cpp
-    yasa2.cpp
+# Automatically pick up all upstream MTMD model implementations.
+# CONFIGURE_DEPENDS asks CMake to re-run configure when files are added/removed.
+file(GLOB MTMD_MODELS CONFIGURE_DEPENDS
+    "${MTMD_DIR}/models/*.cpp"
 )
-list(TRANSFORM MTMD_MODELS PREPEND ${MTMD_DIR}/models/)
+list(SORT MTMD_MODELS)
+
+if (NOT MTMD_MODELS)
+    message(FATAL_ERROR "No MTMD model sources found in ${MTMD_DIR}/models")
+endif()
 
 set(LLAMA_ENGINE_SOURCES
     ${SERVER_DIR}/server-chat.cpp
