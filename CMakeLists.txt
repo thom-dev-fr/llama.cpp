@@ -224,10 +224,15 @@ add_subdirectory(src)
 # utils, programs, examples and tests
 #
 
+option(LLAMA_HTTPLIB "llama: link cpp-httplib (required for HTTP downloads and the server)" ON)
+
 add_subdirectory(vendor)
 
 if (LLAMA_BUILD_COMMON)
     add_subdirectory(common)
+    if (NOT LLAMA_HTTPLIB AND (LLAMA_BUILD_SERVER OR LLAMA_BUILD_TESTS))
+        message(FATAL_ERROR "LLAMA_HTTPLIB=OFF is only supported with LLAMA_BUILD_SERVER=OFF and LLAMA_BUILD_TESTS=OFF")
+    endif()
 endif()
 
 if (LLAMA_BUILD_COMMON AND LLAMA_BUILD_TESTS AND NOT CMAKE_JS_VERSION)
@@ -256,6 +261,17 @@ endif()
 option(LLAMA_BUILD_MTMD "llama: build tools/mtmd library standalone" OFF)
 if (LLAMA_BUILD_MTMD AND NOT (LLAMA_BUILD_COMMON AND LLAMA_BUILD_TOOLS))
     add_subdirectory(tools/mtmd)
+endif()
+
+option(LLAMA_BUILD_ENGINE "llama: build the embeddable inference engine" OFF)
+if (LLAMA_BUILD_ENGINE AND LLAMA_BUILD_COMMON)
+    if (NOT TARGET mtmd)
+        message(FATAL_ERROR "llama-engine requires the mtmd target. Configure with -DLLAMA_BUILD_MTMD=ON when LLAMA_BUILD_TOOLS=OFF.")
+    endif()
+    if (NOT TARGET server-context)
+        add_subdirectory(tools/server)
+    endif()
+    add_subdirectory(engine)
 endif()
 
 #

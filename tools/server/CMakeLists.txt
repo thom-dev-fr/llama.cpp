@@ -1,6 +1,9 @@
+# This file can be included without tools/CMakeLists.txt when only server-context is needed
+find_package(Threads REQUIRED)
+
 include_directories(${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_BINARY_DIR})
 
-# server-context containing the core server logic, used by llama-server and CLI
+# server-context containing the core server logic, used by llama-server, CLI and engine
 
 set(TARGET server-context)
 
@@ -32,6 +35,11 @@ endif()
 target_include_directories(${TARGET} PRIVATE ../mtmd)
 target_include_directories(${TARGET} PRIVATE ${CMAKE_SOURCE_DIR})
 target_link_libraries(${TARGET} PUBLIC llama-common mtmd ${CMAKE_THREAD_LIBS_INIT})
+
+# server-context is reused by non-server targets; skip the HTTP server targets when disabled
+if (NOT LLAMA_BUILD_SERVER)
+    return()
+endif()
 
 # llama-server-impl: server logic, reusable by app
 

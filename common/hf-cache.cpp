@@ -1,5 +1,7 @@
 #include "hf-cache.h"
 
+#ifdef LLAMA_HTTPLIB
+
 #include "build-info.h"
 #include "common.h"
 #include "log.h"
@@ -507,3 +509,26 @@ bool remove_cached_repo(const std::string & repo_id) {
 }
 
 } // namespace hf_cache
+
+#else // LLAMA_HTTPLIB
+
+// Stub implementations used when the build does not link cpp-httplib.
+
+namespace hf_cache {
+
+hf_files get_repo_files(const std::string & /*repo_id*/, const std::string & /*token*/) {
+    return {};
+}
+
+hf_files get_cached_files(const std::string & /*repo_id*/) {
+    return {};
+}
+
+std::string finalize_file(const hf_file & /*file*/) {
+    return {};
+}
+
+
+} // namespace hf_cache
+
+#endif // LLAMA_HTTPLIB
