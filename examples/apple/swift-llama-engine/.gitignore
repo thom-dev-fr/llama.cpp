@@ -1,0 +1,8 @@
+build/
+*.xcframework
+*.xcframework.zip
+DerivedData/
+.build/
+.swiftpm/
+xcuserdata/
+*.xcuserstate
