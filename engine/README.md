@@ -44,3 +44,45 @@ You can also run the test binary directly:
 ```sh
 ./build-engine-tests/bin/test-llama-engine-pure
 ```
+
+## Swift binding example
+
+An Apple SwiftPM binding is available in `examples/apple/swift-llama-engine`.
+Build its XCFramework first:
+
+```sh
+./examples/apple/swift-llama-engine/scripts/build-xcframework.sh
+```
+
+Then add it to an app package:
+
+```swift
+// Package.swift
+.package(name: "LlamaEngine", path: "../llama.cpp/examples/apple/swift-llama-engine")
+
+// Target dependency
+.product(name: "LlamaEngine", package: "LlamaEngine")
+```
+
+Minimal usage:
+
+```swift
+import Foundation
+import LlamaEngine
+
+let engine = LlamaEngine()
+try await engine.load(ModelConfig(
+    modelPath: URL(fileURLWithPath: "/path/to/model.gguf"),
+    gpuLayers: -1,
+    flashAttention: true
+))
+
+let response = try await engine.chatCompletion(requestJSON: #"""
+{
+  "messages": [{"role": "user", "content": "Say hello."}]
+}
+"""#)
+print(response)
+
+try await engine.unload()
+```
