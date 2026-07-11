@@ -12,6 +12,18 @@ let package = Package(
             name: "LlamaEngine",
             targets: ["LlamaEngine"]
         ),
+        .library(
+            name: "LlamaLanguageModel",
+            targets: ["LlamaLanguageModel"]
+        ),
+        .library(
+            name: "LlamaServerLanguageModel",
+            targets: ["LlamaServerLanguageModel"]
+        ),
+        .library(
+            name: "LlamaOpenAICompatible",
+            targets: ["LlamaOpenAICompatible"]
+        ),
     ],
     targets: [
         .binaryTarget(
@@ -20,12 +32,47 @@ let package = Package(
         ),
         .target(
             name: "LlamaEngine",
-            dependencies: ["LlamaEngineCore"],
-            path: "Sources"
+            dependencies: ["LlamaEngineCore"]
+        ),
+        .target(
+            name: "LlamaOpenAICompatible",
+            swiftSettings: [
+                .enableExperimentalFeature("InternalImportsByDefault"),
+                .enableExperimentalFeature("NonisolatedNonsendingByDefault"),
+                .enableUpcomingFeature("MemberImportVisibility"),
+            ]
+        ),
+        .target(
+            name: "LlamaLanguageModel",
+            dependencies: [
+                "LlamaEngine",
+                "LlamaOpenAICompatible",
+            ],
+            swiftSettings: [
+                .enableExperimentalFeature("InternalImportsByDefault"),
+                .enableExperimentalFeature("NonisolatedNonsendingByDefault"),
+                .enableUpcomingFeature("MemberImportVisibility"),
+            ]
+        ),
+        .target(
+            name: "LlamaServerLanguageModel",
+            dependencies: [
+                "LlamaOpenAICompatible",
+            ],
+            swiftSettings: [
+                .enableExperimentalFeature("InternalImportsByDefault"),
+                .enableExperimentalFeature("NonisolatedNonsendingByDefault"),
+                .enableUpcomingFeature("MemberImportVisibility"),
+            ]
         ),
         .testTarget(
             name: "LlamaEngineTests",
-            dependencies: ["LlamaEngine"],
+            dependencies: [
+                "LlamaEngine",
+                "LlamaLanguageModel",
+                "LlamaOpenAICompatible",
+                "LlamaServerLanguageModel",
+            ],
             path: "Tests"
         ),
     ]
