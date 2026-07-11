@@ -14,9 +14,12 @@ engine/
 `-- CMakeLists.txt       # Built in-tree via the LLAMA_BUILD_ENGINE option
 
 examples/apple/swift-llama-engine/
-|-- Package.swift        # SwiftPM package consumed by apps
-|-- Sources/LlamaEngine/ # Swift facade (thread-safe class + value types)
-`-- scripts/             # build-xcframework.sh
+|-- Package.swift                    # SwiftPM package consumed by apps
+|-- Sources/LlamaEngine/             # Swift facade (thread-safe class + value types)
+|-- Sources/LlamaLanguageModel/      # Foundation Models adapter for local llama inference
+|-- Sources/LlamaServerLanguageModel/# Foundation Models adapter for llama-server HTTP inference
+|-- Sources/LlamaOpenAICompatible/   # Shared OpenAI-compatible codec, usage, and telemetry mapping
+`-- scripts/                         # build-xcframework.sh
 ```
 
 ## Scope
@@ -154,6 +157,12 @@ Notes:
 - `file://` URLs require the path gate: set `extraJSON: #"{"media_path":"/some/dir"}"#`
   in `ModelConfig`. Only the specified directory and its relative subpaths are accepted.
 - Accepted audio formats at the OAI layer are `wav` and `mp3` only.
+
+## Foundation Models adapters
+
+`LlamaLanguageModel` adapts a local `LlamaEngine` model to Apple's `LanguageModelSession`. `LlamaServerLanguageModel` is an independent SwiftPM target that adapts a remote llama-server `/chat/completions` endpoint. Both share the `LlamaOpenAICompatible` generation codec, so transcript conversion, tool calls, reasoning deltas, usage, and llama telemetry metadata are handled consistently.
+
+Both adapters accept `extraBody` for llama.cpp-specific request fields such as `timings_per_token` and `return_progress`. Their `supportedReasoningLevels` are derived from the configured `reasoningEffortMapping`, so host apps can offer the `ContextOptions.ReasoningLevel` values that map to enabled llama.cpp thinking, including custom levels such as `.custom("xhigh")`. Shared telemetry keys live in `LlamaTelemetryMetadataKeys` and currently cover `timings` and `prompt_progress`.
 
 ## Token counting
 
