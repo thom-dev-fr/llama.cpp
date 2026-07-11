@@ -1,6 +1,6 @@
 import Foundation
 
-public struct ModelConfig: Sendable {
+public struct ModelConfig: Sendable, Hashable {
     public enum KVCacheType: Int32, Sendable, Hashable, Codable {
         case f32    = 0
         case f16    = 1

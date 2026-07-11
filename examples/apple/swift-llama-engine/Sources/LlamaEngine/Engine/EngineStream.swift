@@ -8,7 +8,7 @@ import LlamaEngineCore
 public final class EngineStream: AsyncSequence, @unchecked Sendable {
     public typealias Element = String
 
-    public struct AsyncIterator: AsyncIteratorProtocol {
+    public struct AsyncIterator: AsyncIteratorProtocol, Sendable {
         private let stream: EngineStream?
         private let alreadyConsumed: Bool
 

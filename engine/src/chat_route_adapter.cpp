@@ -24,13 +24,6 @@ static std::unique_ptr<server_http_req> make_route_request(
     });
 }
 
-static std::unique_ptr<server_http_req> make_chat_route_request(
-    const std::string & body,
-    const std::function<bool()> & should_stop)
-{
-    return make_route_request("/v1/chat/completions", body, should_stop);
-}
-
 static bool starts_with(const std::string & s, const char * prefix) {
     return s.rfind(prefix, 0) == 0;
 }
@@ -114,28 +107,31 @@ static llama_engine_status status_from_http_error(int status) {
     return LLAMA_ENGINE_ERR_INFERENCE;
 }
 
-llama_engine_status chat_route_adapter::chat_completion(
-    const std::shared_ptr<server_routes> & routes,
+static llama_engine_status completion_impl(
+    const std::string & path,
+    const server_http_context::handler_t & handler,
     const std::string & request_json,
     active_request & request_state,
     std::string & out_json,
-    const set_error_fn & set_error)
+    const chat_route_adapter::set_error_fn & set_error,
+    const char * op_name,
+    const char * stream_hint)
 {
     out_json.clear();
 
     std::function<bool()> should_stop = [&request_state]() {
         return request_state.cancelled.load();
     };
-    auto request = make_chat_route_request(request_json, should_stop);
+    auto request = make_route_request(path, request_json, should_stop);
 
     server_http_res_ptr response;
     try {
-        response = routes->post_chat_completions(*request);
+        response = handler(*request);
     } catch (const std::exception & e) {
         set_error(e.what());
         return LLAMA_ENGINE_ERR_INVALID_REQUEST;
     } catch (...) {
-        set_error("unknown exception while handling chat completion");
+        set_error(std::string("unknown exception while handling ") + op_name);
         return LLAMA_ENGINE_ERR_INTERNAL;
     }
 
@@ -144,21 +140,40 @@ llama_engine_status chat_route_adapter::chat_completion(
         return LLAMA_ENGINE_ERR_CANCELLED;
     }
     if (!response) {
-        set_error("empty response from chat route");
+        set_error(std::string("empty response from ") + op_name + " route");
         return LLAMA_ENGINE_ERR_INTERNAL;
     }
     if (response->is_stream()) {
-        set_error("chat_completion received a streaming response; use chat_completion_stream() or set stream=false");
+        set_error(std::string(op_name) + " received a streaming response; use " + stream_hint + " or set stream=false");
         response.reset();
         return LLAMA_ENGINE_ERR_INVALID_REQUEST;
     }
 
     out_json = response->data;
     if (response->status >= 400) {
-        set_error(error_message_from_json(out_json, "chat completion failed"));
+        const std::string fallback = std::string(op_name) + " failed";
+        set_error(error_message_from_json(out_json, fallback.c_str()));
         return status_from_http_error(response->status);
     }
     return LLAMA_ENGINE_OK;
+}
+
+llama_engine_status chat_route_adapter::chat_completion(
+    const std::shared_ptr<server_routes> & routes,
+    const std::string & request_json,
+    active_request & request_state,
+    std::string & out_json,
+    const set_error_fn & set_error)
+{
+    return completion_impl(
+        "/v1/chat/completions",
+        routes->post_chat_completions,
+        request_json,
+        request_state,
+        out_json,
+        set_error,
+        "chat_completion",
+        "chat_completion_stream()");
 }
 
 static llama_engine_status count_tokens_impl(
@@ -234,16 +249,17 @@ std::unique_ptr<stream_handle> chat_route_adapter::make_stream_handle(
     handle->should_stop = [raw]() {
         return raw->cancelled.load();
     };
-    handle->request = make_chat_route_request(request_json, handle->should_stop);
+    handle->request = make_route_request("/v1/chat/completions", request_json, handle->should_stop);
     return handle;
 }
 
-llama_engine_status chat_route_adapter::open_registered_stream(
-    const std::shared_ptr<server_routes> & routes,
+static llama_engine_status open_registered_stream_impl(
+    const server_http_context::handler_t & handler,
     inflight_registry & registry,
     std::unique_ptr<stream_handle> handle,
     stream_handle ** out_stream,
-    const set_error_fn & set_error)
+    const chat_route_adapter::set_error_fn & set_error,
+    const char * op_name)
 {
     *out_stream = nullptr;
     if (!handle) return LLAMA_ENGINE_ERR_INVALID_ARG;
@@ -252,7 +268,7 @@ llama_engine_status chat_route_adapter::open_registered_stream(
 
     server_http_res_ptr response;
     try {
-        response = routes->post_chat_completions(*handle->request);
+        response = handler(*handle->request);
     } catch (const std::exception & e) {
         registry.remove_stream(raw);
         {
@@ -269,7 +285,7 @@ llama_engine_status chat_route_adapter::open_registered_stream(
             raw->opening = false;
             raw->request.reset();
         }
-        set_error("unknown exception while opening chat completion stream");
+        set_error(std::string("unknown exception while opening ") + op_name + " stream");
         return LLAMA_ENGINE_ERR_INTERNAL;
     }
 
@@ -291,7 +307,7 @@ llama_engine_status chat_route_adapter::open_registered_stream(
             raw->opening = false;
             raw->request.reset();
         }
-        set_error("empty response from chat route");
+        set_error(std::string("empty response from ") + op_name + " route");
         return LLAMA_ENGINE_ERR_INTERNAL;
     }
 
@@ -302,7 +318,8 @@ llama_engine_status chat_route_adapter::open_registered_stream(
             raw->opening = false;
             raw->request.reset();
         }
-        set_error(error_message_from_json(response->data, "invalid chat completion request"));
+        const std::string fallback = std::string("invalid ") + op_name + " request";
+        set_error(error_message_from_json(response->data, fallback.c_str()));
         return LLAMA_ENGINE_ERR_INVALID_REQUEST;
     }
 
@@ -331,6 +348,22 @@ llama_engine_status chat_route_adapter::open_registered_stream(
 
     *out_stream = handle.release();
     return LLAMA_ENGINE_OK;
+}
+
+llama_engine_status chat_route_adapter::open_registered_stream(
+    const std::shared_ptr<server_routes> & routes,
+    inflight_registry & registry,
+    std::unique_ptr<stream_handle> handle,
+    stream_handle ** out_stream,
+    const set_error_fn & set_error)
+{
+    return open_registered_stream_impl(
+        routes->post_chat_completions,
+        registry,
+        std::move(handle),
+        out_stream,
+        set_error,
+        "chat completion");
 }
 
 llama_engine_status chat_route_adapter::open_stream(
