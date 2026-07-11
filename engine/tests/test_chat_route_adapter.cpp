@@ -73,6 +73,19 @@ void run_chat_route_adapter_tests() {
         EXPECT(error.empty());
     }
 
+    CASE("SSE event fields are ignored");
+    {
+        auto stream = make_stream({"event: message\ndata: {\"delta\":\"ok\"}\n\n"});
+        std::string chunk;
+        bool done = false;
+        std::string error;
+
+        EXPECT_EQ(chat_route_adapter::stream_next(stream.get(), chunk, done, [&](std::string e) { error = std::move(e); }), LLAMA_ENGINE_OK);
+        EXPECT_EQ(chunk, std::string("{\"delta\":\"ok\"}"));
+        EXPECT(done);
+        EXPECT(error.empty());
+    }
+
     CASE("preempt during stream open preserves the route request");
     {
         auto stream = chat_route_adapter::make_stream_handle("{}");
