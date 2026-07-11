@@ -5,9 +5,9 @@
 ## What it provides
 
 - Model lifecycle: load, unload, pause, and resume.
-- Chat completion through OpenAI-compatible JSON requests.
+- Chat completions through OpenAI-compatible JSON requests.
 - Streaming chat completions with cancellation.
-- Tokenize, detokenize, and chat token counting helpers.
+- Tokenize, detokenize, and input token counting helpers.
 - Lightweight GGUF capability and metadata probing.
 - Optional multimodal projector and MTP speculative decoding support.
 
