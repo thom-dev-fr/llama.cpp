@@ -190,6 +190,13 @@ extern "C" void llama_engine_free_string(char * str) {
     std::free(str);
 }
 
+static llama_engine_status dup_response(llama_engine_status st, const std::string & out, char ** out_response) {
+    if (st != LLAMA_ENGINE_OK && st != LLAMA_ENGINE_ERR_INFERENCE) return st;
+    *out_response = dup_string(out);
+    if (!*out_response) return LLAMA_ENGINE_ERR_INTERNAL;
+    return st;
+}
+
 extern "C" llama_engine_status llama_engine_count_chat_tokens(
     llama_engine_t * engine, const char * request_json, char ** out_response)
 {
@@ -198,11 +205,7 @@ extern "C" llama_engine_status llama_engine_count_chat_tokens(
 
     std::string out;
     auto st = engine->core.count_chat_tokens(request_json, out);
-    if (st != LLAMA_ENGINE_OK && st != LLAMA_ENGINE_ERR_INFERENCE) return st;
-
-    *out_response = dup_string(out);
-    if (!*out_response) return LLAMA_ENGINE_ERR_INTERNAL;
-    return st;
+    return dup_response(st, out, out_response);
 }
 
 extern "C" llama_engine_status llama_engine_chat_completion(
@@ -213,11 +216,26 @@ extern "C" llama_engine_status llama_engine_chat_completion(
 
     std::string out;
     auto st = engine->core.chat_completion(request_json, out);
-    if (st != LLAMA_ENGINE_OK && st != LLAMA_ENGINE_ERR_INFERENCE) return st;
+    return dup_response(st, out, out_response);
+}
 
-    *out_response = dup_string(out);
-    if (!*out_response) return LLAMA_ENGINE_ERR_INTERNAL;
-    return st;
+static llama_engine_status wrap_stream(
+    engine_core * core, llama_engine_status st, stream_handle * handle, llama_engine_stream_t ** out_stream)
+{
+    if (st != LLAMA_ENGINE_OK || !handle) {
+        if (handle) core->stream_close(handle);
+        return st;
+    }
+
+    auto * wrapper = new (std::nothrow) llama_engine_stream_t();
+    if (!wrapper) {
+        core->stream_close(handle);
+        return LLAMA_ENGINE_ERR_INTERNAL;
+    }
+    wrapper->handle = handle;
+    wrapper->owner  = core;
+    *out_stream = wrapper;
+    return LLAMA_ENGINE_OK;
 }
 
 extern "C" llama_engine_status llama_engine_chat_completion_stream(
@@ -228,20 +246,7 @@ extern "C" llama_engine_status llama_engine_chat_completion_stream(
 
     stream_handle * handle = nullptr;
     auto st = engine->core.chat_completion_stream(request_json, &handle);
-    if (st != LLAMA_ENGINE_OK || !handle) {
-        if (handle) engine->core.stream_close(handle);
-        return st;
-    }
-
-    auto * wrapper = new (std::nothrow) llama_engine_stream_t();
-    if (!wrapper) {
-        engine->core.stream_close(handle);
-        return LLAMA_ENGINE_ERR_INTERNAL;
-    }
-    wrapper->handle = handle;
-    wrapper->owner  = &engine->core;
-    *out_stream = wrapper;
-    return LLAMA_ENGINE_OK;
+    return wrap_stream(&engine->core, st, handle, out_stream);
 }
 
 extern "C" llama_engine_status llama_engine_stream_next(
