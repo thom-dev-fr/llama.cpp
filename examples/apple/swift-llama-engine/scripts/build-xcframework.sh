@@ -437,6 +437,7 @@ combine_static_libraries() {
         "${REPO_ROOT}/${build_dir}/engine/${product_dir}/libllama-engine.a"
         "${REPO_ROOT}/${build_dir}/tools/server/${product_dir}/libserver-context.a"
         "${REPO_ROOT}/${build_dir}/tools/mtmd/${product_dir}/libmtmd.a"
+        "${REPO_ROOT}/${build_dir}/vendor/hash/${product_dir}/libvendor-hash.a"
         "${REPO_ROOT}/${build_dir}/common/${product_dir}/libllama-common.a"
         "${REPO_ROOT}/${build_dir}/common/${product_dir}/libllama-common-base.a"
         "${REPO_ROOT}/${build_dir}/src/${product_dir}/libllama.a"
