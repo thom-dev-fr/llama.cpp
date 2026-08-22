@@ -128,8 +128,15 @@ common_params params_translator::translate(const llama_engine_config & cfg) {
         p.chat_template = cfg.chat_template_override;
     }
 
-    p.use_mmap           = cfg.use_mmap;
-    p.use_mlock          = cfg.use_mlock;
+    if (cfg.use_mmap && cfg.use_mlock) {
+        p.load_mode = LLAMA_LOAD_MODE_MMAP_MLOCK;
+    } else if (cfg.use_mmap) {
+        p.load_mode = LLAMA_LOAD_MODE_MMAP;
+    } else if (cfg.use_mlock) {
+        p.load_mode = LLAMA_LOAD_MODE_MLOCK;
+    } else {
+        p.load_mode = LLAMA_LOAD_MODE_NONE;
+    }
     p.flash_attn_type    = cfg.flash_attention ? LLAMA_FLASH_ATTN_TYPE_ENABLED
                                                : LLAMA_FLASH_ATTN_TYPE_AUTO;
     p.cache_type_k       = map_kv_cache_type(cfg.kv_cache_type);
