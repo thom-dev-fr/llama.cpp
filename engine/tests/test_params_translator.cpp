@@ -30,8 +30,27 @@ static void test_minimal_config() {
     EXPECT_EQ(p.model.path, std::string("/tmp/fake.gguf"));
     EXPECT_EQ(p.n_gpu_layers, -1);
     EXPECT_EQ(p.n_parallel, 1);
-    EXPECT_EQ(p.use_mmap, true);
+    EXPECT_EQ(p.load_mode, LLAMA_LOAD_MODE_MMAP);
     EXPECT(p.cpuparams.n_threads > 0);
+}
+
+static void test_load_mode_mapping() {
+    CASE("use_mmap and use_mlock map to load_mode");
+    auto cfg = make_minimal_cfg();
+
+    cfg.use_mmap = false;
+    cfg.use_mlock = false;
+    EXPECT_EQ(params_translator::translate(cfg).load_mode, LLAMA_LOAD_MODE_NONE);
+
+    cfg.use_mmap = true;
+    EXPECT_EQ(params_translator::translate(cfg).load_mode, LLAMA_LOAD_MODE_MMAP);
+
+    cfg.use_mmap = false;
+    cfg.use_mlock = true;
+    EXPECT_EQ(params_translator::translate(cfg).load_mode, LLAMA_LOAD_MODE_MLOCK);
+
+    cfg.use_mmap = true;
+    EXPECT_EQ(params_translator::translate(cfg).load_mode, LLAMA_LOAD_MODE_MMAP_MLOCK);
 }
 
 static void test_missing_model_path_throws() {
@@ -184,6 +203,7 @@ static void test_mtp_extra_json_knobs() {
 void run_params_translator_tests() {
     std::fprintf(stderr, "ParamsTranslator:\n");
     test_minimal_config();
+    test_load_mode_mapping();
     test_missing_model_path_throws();
     test_kv_type_mapping();
     test_flash_attention_enum();
