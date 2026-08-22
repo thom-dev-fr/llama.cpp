@@ -106,7 +106,8 @@ llama_engine_status engine_core::load_from_params_locked(std::unique_lock<std::m
     last_params->load_progress_callback           = hook.callback;
     last_params->load_progress_callback_user_data = hook.user_data;
 
-    auto new_ctx = std::make_unique<server_context>();
+    auto new_ctx    = std::make_unique<server_context>();
+    auto new_routes = std::make_shared<server_routes>(*last_params, *new_ctx);
 
     // Drop the lock during load_model(); it synchronously initialises the
     // model and can take seconds. Only pause() is allowed to alter Engine
@@ -144,9 +145,9 @@ llama_engine_status engine_core::load_from_params_locked(std::unique_lock<std::m
 
     // Load succeeded — wire the runtime.
     ctx    = std::move(new_ctx);
+    routes = std::move(new_routes);
     meta   = std::make_unique<server_context_meta>(ctx->get_meta());
     vocab  = llama_model_get_vocab(llama_get_model(ctx->get_llama_context()));
-    routes = std::make_shared<server_routes>(*last_params, *ctx);
     routes->update_meta(*ctx);
 
     // pause() may have arrived during the gap between load_model() returning
