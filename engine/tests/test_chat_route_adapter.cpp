@@ -86,6 +86,32 @@ void run_chat_route_adapter_tests() {
         EXPECT(error.empty());
     }
 
+    CASE("SSE error payload returns its message");
+    {
+        auto stream = make_stream({"data: {\"error\":{\"message\":\"boom\"}}\n\n"});
+        std::string chunk;
+        bool done = false;
+        std::string error;
+
+        EXPECT_EQ(chat_route_adapter::stream_next(stream.get(), chunk, done, [&](std::string e) { error = std::move(e); }), LLAMA_ENGINE_ERR_INFERENCE);
+        EXPECT_EQ(chunk, std::string("{\"error\":{\"message\":\"boom\"}}"));
+        EXPECT(done);
+        EXPECT_EQ(error, std::string("boom"));
+    }
+
+    CASE("non-JSON SSE payload remains normal data");
+    {
+        auto stream = make_stream({"data: not json\n\n"});
+        std::string chunk;
+        bool done = false;
+        std::string error;
+
+        EXPECT_EQ(chat_route_adapter::stream_next(stream.get(), chunk, done, [&](std::string e) { error = std::move(e); }), LLAMA_ENGINE_OK);
+        EXPECT_EQ(chunk, std::string("not json"));
+        EXPECT(done);
+        EXPECT(error.empty());
+    }
+
     CASE("preempt during stream open preserves the route request");
     {
         auto stream = chat_route_adapter::make_stream_handle("{}");
