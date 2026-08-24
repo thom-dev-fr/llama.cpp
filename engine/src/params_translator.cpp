@@ -7,7 +7,7 @@
 
 namespace llama_engine {
 
-using json = nlohmann::ordered_json;
+using json = common_json;
 
 ggml_type params_translator::map_kv_cache_type(llama_engine_kv_type t) {
     switch (t) {
@@ -172,7 +172,7 @@ common_params params_translator::translate(const llama_engine_config & cfg) {
         json extra;
         try {
             extra = json::parse(cfg.extra_json);
-        } catch (const json::parse_error & e) {
+        } catch (const common_json_error & e) {
             throw std::invalid_argument(std::string("extra_json: ") + e.what());
         }
         apply_extra_json(p, extra);
