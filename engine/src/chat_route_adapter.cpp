@@ -1,6 +1,6 @@
 #include "chat_route_adapter.hpp"
 
-#include <nlohmann/json.hpp>
+#include "json.h"
 
 #include <cstring>
 #include <utility>
@@ -78,24 +78,17 @@ static std::vector<std::string> sse_data_payloads(const std::string & frame, boo
 }
 
 static bool payload_is_error(const std::string & payload) {
-    try {
-        auto j = nlohmann::ordered_json::parse(payload);
-        return j.is_object() && j.contains("error");
-    } catch (...) {
-        return false;
-    }
+    auto j = common_json::parse_no_throw(payload);
+    return !j.is_discarded() && j.is_object() && j.contains("error");
 }
 
 static std::string error_message_from_json(const std::string & payload, const char * fallback) {
-    try {
-        auto j = nlohmann::ordered_json::parse(payload);
-        if (j.is_object() && j.contains("error") && j.at("error").is_object()) {
-            const auto & err = j.at("error");
-            if (err.contains("message") && err.at("message").is_string()) {
-                return err.at("message").get<std::string>();
-            }
+    auto j = common_json::parse_no_throw(payload);
+    if (!j.is_discarded() && j.is_object() && j.contains("error") && j.at("error").is_object()) {
+        const auto & err = j.at("error");
+        if (err.contains("message") && err.at("message").is_string()) {
+            return err.at("message").get<std::string>();
         }
-    } catch (...) {
     }
     return fallback;
 }

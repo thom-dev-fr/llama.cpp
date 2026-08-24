@@ -3,8 +3,7 @@
 #include "llama_engine.h"
 
 #include "common.h"
-
-#include <nlohmann/json.hpp>
+#include "json.h"
 
 #include <string>
 
@@ -20,7 +19,7 @@ struct params_translator {
 
     // Exposed for unit tests.
     static ggml_type map_kv_cache_type(llama_engine_kv_type t);
-    static void apply_extra_json(common_params & params, const nlohmann::ordered_json & extra);
+    static void apply_extra_json(common_params & params, const common_json & extra);
 };
 
 } // namespace llama_engine
