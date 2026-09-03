@@ -396,14 +396,18 @@ static void derive_chat_template_caps(const std::string & tmpl_src,
                 return it != map.end() && it->second;
             };
             caps.supports_tool_calls         = lookup("supports_tool_calls");
+            caps.supports_reasoning          = lookup("supports_reasoning");
             caps.supports_preserve_reasoning = lookup("supports_preserve_reasoning");
         } catch (const std::exception & e) {
             LOG_WRN("caps_probe: chat_templates_get_caps failed: %s\n", e.what());
         }
-        try {
-            caps.supports_reasoning = common_chat_templates_support_enable_thinking(tmpls.get());
-        } catch (const std::exception & e) {
-            LOG_WRN("caps_probe: enable_thinking probe failed: %s\n", e.what());
+        if (caps.supports_reasoning) {
+            try {
+                caps.supports_reasoning_toggle = common_chat_templates_supports_reasoning_toggle(tmpls.get());
+                caps.has_supports_reasoning_toggle = true;
+            } catch (const std::exception & e) {
+                LOG_WRN("caps_probe: reasoning toggle probe failed: %s\n", e.what());
+            }
         }
     } catch (const std::exception & e) {
         LOG_WRN("caps_probe: chat_templates_init failed: %s\n", e.what());
