@@ -266,6 +266,7 @@ void autoparser::analyze_template(const common_chat_template & tmpl) {
     for (auto & workaround : workarounds) {
         workaround(tmpl, *this);
     }
+    reasoning.detect_capabilities();
 
     LOG_DBG("\n--- Reasoning & Content Structure ---\n");
     LOG_DBG("user_msg_start: %s\n", user_start.c_str());
@@ -273,6 +274,8 @@ void autoparser::analyze_template(const common_chat_template & tmpl) {
     LOG_DBG("reasoning_mode: %s\n", mode_to_str(reasoning.mode).c_str());
     LOG_DBG("reasoning_start: '%s'\n", reasoning.start.c_str());
     LOG_DBG("reasoning_end: '%s'\n", reasoning.end.c_str());
+    LOG_DBG("supports_reasoning: %s\n", reasoning.supports_reasoning ? "true" : "false");
+    LOG_DBG("supports_reasoning_toggle: %s\n", reasoning.supports_reasoning_toggle ? "true" : "false");
     LOG_DBG("content_mode: %s\n", mode_to_str(content.mode).c_str());
     LOG_DBG("content_start: '%s'\n", content.start.c_str());
     LOG_DBG("content_end: '%s'\n", content.end.c_str());
@@ -481,51 +484,74 @@ void analyze_reasoning::compare_reasoning_presence() {
         { "content", ASSISTANT_MSG }
     };
 
-    json assistant_with_reasoning = json{
-        { "role",              "assistant"                },
-        { "content",           ASSISTANT_MSG              },
-        { "reasoning_content", THINKING_CONTENT           }
-    };
+    const auto detect = [&](const json & assistant_with_reasoning, bool normalize_messages) {
+        template_params params;
+        params.messages              = json::array({ user_msg, assistant_no_reasoning });
+        params.add_generation_prompt = false;
+        params.enable_thinking       = true;
+        params.normalize_messages    = normalize_messages;
 
-    template_params params;
-    params.messages              = json::array({ user_msg, assistant_no_reasoning });
-    params.add_generation_prompt = false;
-    params.enable_thinking       = true;
-
-    auto comparison = compare_variants(
-        *tmpl, params, [&](template_params & p) { p.messages = json::array({ user_msg, assistant_with_reasoning }); });
-
-    if (!comparison) {
-        LOG_DBG(ANSI_ORANGE "%s: Template application failed, skipping reasoning detection\n" ANSI_RESET, __func__);
-        return;
-    }
-
-    const auto & diff = comparison->diff;
-
-    const std::string reasoning_content = THINKING_CONTENT;
-
-    if (!diff.right.empty() && diff.right.find(reasoning_content) != std::string::npos) {
-        auto parser_delimiter = build_tagged_peg_parser([&](common_peg_parser_builder &p) {
-            return p.literal(reasoning_content) + p.space() + p.optional(p.tag("post", (p.marker() + p.space())) + p.rest());
+        auto comparison = compare_variants(*tmpl, params, [&](template_params & p) {
+            p.messages = json::array({ user_msg, assistant_with_reasoning });
         });
-        auto parser_wrapped = build_tagged_peg_parser([&](common_peg_parser_builder &p) {
-            return p.tag("pre", p.marker() + p.space()) + p.literal(reasoning_content) + p.tag("post", (p.space() + p.marker() + p.space())) + p.rest();
+        if (!comparison) {
+            return;
+        }
+
+        const auto & diff = comparison->diff;
+        if (diff.right.empty() || diff.right.find(THINKING_CONTENT) == std::string::npos) {
+            return;
+        }
+
+        auto parser_delimiter = build_tagged_peg_parser([&](common_peg_parser_builder & p) {
+            return p.literal(THINKING_CONTENT) + p.space() +
+                   p.optional(p.tag("post", (p.marker() + p.space())) + p.rest());
         });
-        // try the more aggressive parse first, if it fails, fall back to the delimiter one
+        auto parser_wrapped   = build_tagged_peg_parser([&](common_peg_parser_builder & p) {
+            return p.tag("pre", p.marker() + p.space()) + p.literal(THINKING_CONTENT) +
+                   p.tag("post", (p.space() + p.marker() + p.space())) + p.rest();
+        });
         auto result = parser_wrapped.parse_anywhere_and_extract(comparison->output_B);
         if (!result.result.success()) {
             result = parser_delimiter.parse_anywhere_and_extract(comparison->output_B);
         }
-        if (result.result.success()) {
-            if (!result.tags["pre"].empty() && !result.tags["post"].empty()) {
-                mode = reasoning_mode::TAG_BASED;
-                start = result.tags["pre"];
-                end   = result.tags["post"];
-            } else if (!result.tags["post"].empty()) {
-                mode = reasoning_mode::TAG_BASED;
-                end = result.tags["post"];
-            }
+        if (!result.result.success()) {
+            return;
         }
+        if (!result.tags["pre"].empty() && !result.tags["post"].empty()) {
+            mode  = reasoning_mode::TAG_BASED;
+            start = result.tags["pre"];
+            end   = result.tags["post"];
+        } else if (!result.tags["post"].empty()) {
+            mode = reasoning_mode::TAG_BASED;
+            end  = result.tags["post"];
+        }
+    };
+
+    detect(
+        json{
+            { "role",              "assistant"      },
+            { "content",           ASSISTANT_MSG    },
+            { "reasoning_content", THINKING_CONTENT }
+    },
+        true);
+    if (mode == reasoning_mode::NONE) {
+        detect(
+            json{
+                { "role",    "assistant"                                                                                        },
+                { "content", json::array({ json{ { "type", "thinking" }, { "thinking", THINKING_CONTENT } },
+                                           json{ { "type", "text" }, { "text", ASSISTANT_MSG } } }) }
+        },
+            false);
+    }
+    if (mode == reasoning_mode::NONE) {
+        detect(
+            json{
+                { "role",     "assistant"      },
+                { "content",  ASSISTANT_MSG    },
+                { "thinking", THINKING_CONTENT }
+        },
+            false);
     }
 }
 
@@ -610,6 +636,86 @@ void analyze_reasoning::compare_thinking_enabled() {
 
     if (mode == reasoning_mode::NONE && start.empty() && !end.empty()) {
         mode = reasoning_mode::TAG_BASED;
+    }
+}
+
+void analyze_reasoning::detect_capabilities() {
+    supports_reasoning              = false;
+    supports_reasoning_toggle       = false;
+    supports_reasoning_toggle_known = false;
+    if (mode == reasoning_mode::NONE || tmpl == nullptr) {
+        supports_reasoning_toggle_known = true;
+        return;
+    }
+
+    generation_params params;
+    params.messages = json::array({ json{
+        { "role",    "user"   },
+        { "content", USER_MSG }
+    } });
+
+    std::string enabled;
+    std::string enabled_prompt;
+    try {
+        params.add_generation_prompt              = true;
+        params.enable_thinking                    = true;
+        params.extra_context["reasoning_effort"] = "low";
+        enabled                                   = common_chat_template_generation_prompt(*tmpl, params);
+        enabled_prompt                            = common_chat_template_direct_apply(*tmpl, params);
+    } catch (const std::exception &) {
+        return;
+    }
+
+    const auto reasoning_is_enabled = [&](const std::string & generation_prompt) {
+        if (end.empty()) {
+            return true;
+        }
+        const size_t end_pos = generation_prompt.rfind(end);
+        if (end_pos == std::string::npos) {
+            return true;
+        }
+        if (start.empty()) {
+            return false;
+        }
+        const size_t start_pos = generation_prompt.rfind(start);
+        return start_pos != std::string::npos && start_pos > end_pos;
+    };
+
+    supports_reasoning = reasoning_is_enabled(enabled);
+    if (!supports_reasoning) {
+        supports_reasoning_toggle_known = true;
+        return;
+    }
+
+    try {
+        params.enable_thinking                    = false;
+        params.extra_context["reasoning_effort"] = "none";
+        const std::string disabled                = common_chat_template_generation_prompt(*tmpl, params);
+        const std::string disabled_prompt         = common_chat_template_direct_apply(*tmpl, params);
+        supports_reasoning_toggle                 = !reasoning_is_enabled(disabled);
+
+        if (!supports_reasoning_toggle) {
+            const auto has_reasoning_marker = [](const std::string & text) {
+                for (const auto & segment : segmentize_markers(text)) {
+                    if (segment.type != segment_type::MARKER) {
+                        continue;
+                    }
+                    std::string marker = segment.value;
+                    std::transform(marker.begin(), marker.end(), marker.begin(),
+                                   [](unsigned char c) { return std::tolower(c); });
+                    if (marker.find("think") != std::string::npos || marker.find("reason") != std::string::npos ||
+                        marker.find("thought") != std::string::npos || marker.find("analysis") != std::string::npos) {
+                        return true;
+                    }
+                }
+                return false;
+            };
+            const diff_split diff = calculate_diff_split(disabled_prompt, enabled_prompt);
+            supports_reasoning_toggle = has_reasoning_marker(diff.left) || has_reasoning_marker(diff.right);
+        }
+        supports_reasoning_toggle_known = true;
+    } catch (const std::exception &) {
+        return;
     }
 }
 

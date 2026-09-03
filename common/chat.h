@@ -348,6 +348,9 @@ common_chat_tool_choice common_chat_tool_choice_parse_oaicompat(const std::strin
 
 bool common_chat_templates_support_enable_thinking(const common_chat_templates * chat_templates);
 
+// Throws if the template cannot be evaluated.
+bool common_chat_templates_supports_reasoning_toggle(const common_chat_templates * chat_templates);
+
 // Parses a JSON array of messages in OpenAI's chat completion API format.
 std::vector<common_chat_msg> common_chat_msgs_parse_oaicompat(const common_json & messages);
 

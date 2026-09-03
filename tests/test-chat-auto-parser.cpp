@@ -81,6 +81,7 @@ static void test_cohere_analysis(testing & t);
 
 // SmolLM3 template analysis tests
 static void test_smollm3_analysis(testing & t);
+static void test_reasoning_capabilities(testing & t);
 
 // Marker separation
 static void test_marker_separation(testing & t);
@@ -559,6 +560,7 @@ int main(int argc, char * argv[]) {
     t.test("laguna-s", test_laguna_s_analysis);
     t.test("laguna-xs2", test_laguna_xs2_analysis);
     t.test("smollm3", test_smollm3_analysis);
+    t.test("reasoning_capabilities", test_reasoning_capabilities);
     t.test("standard_json_tools", test_standard_json_tools_formats);
     t.test("normalize_quotes_to_json", test_normalize_quotes_to_json);
     t.test("tagged_args_embedded_quotes", test_tagged_args_with_embedded_quotes);
@@ -2034,6 +2036,8 @@ static void test_smollm3_reasoning_detection(testing & t) {
     t.assert_equal("reasoning_start should be '<think>'", "<think>", analysis.reasoning.start);
     t.assert_equal("reasoning_end should be '</think>'", "</think>", analysis.reasoning.end);
     t.assert_equal("reasoning should be TAG_BASED", reasoning_mode::TAG_BASED, analysis.reasoning.mode);
+    t.assert_true("should support reasoning", analysis.reasoning.supports_reasoning);
+    t.assert_true("should support reasoning toggle", analysis.reasoning.supports_reasoning_toggle);
 
     // Content should remain plain (no wrappers)
     t.assert_equal("content start should be empty", "", analysis.content.start);
@@ -2045,6 +2049,117 @@ static void test_smollm3_reasoning_detection(testing & t) {
     bool has_think_end = std::find(analysis.preserved_tokens.begin(), analysis.preserved_tokens.end(), "</think>") != analysis.preserved_tokens.end();
     t.assert_true("preserved_tokens should contain '<think>'", has_think_start);
     t.assert_true("preserved_tokens should contain '</think>'", has_think_end);
+}
+
+static void test_reasoning_capabilities(testing & t) {
+    const std::string messages = R"(
+{%- for message in messages %}
+    {%- if message['role'] == 'assistant' %}
+        {{- '<think>' + message.get('reasoning_content', '') + '</think>' + message.get('content', '') }}
+    {%- else %}
+        {{- message.get('content', '') }}
+    {%- endif %}
+{%- endfor %}
+)";
+
+    const auto analyze = [&](const std::string & generation_prompt) {
+        common_chat_template tmpl(messages + generation_prompt, "", "");
+        struct autoparser    analysis;
+        analysis.analyze_template(tmpl);
+        return std::make_pair(analysis.reasoning.supports_reasoning, analysis.reasoning.supports_reasoning_toggle);
+    };
+
+    const std::string controllable_generation_prompt = R"(
+{%- if add_generation_prompt %}
+    {{- '<think>' if enable_thinking else '<think></think>' }}
+{%- endif %}
+)";
+    const auto        controllable                   = analyze(controllable_generation_prompt);
+    t.assert_true("controllable template should support reasoning", controllable.first);
+    t.assert_true("controllable template should support reasoning toggle", controllable.second);
+    auto controllable_templates = common_chat_templates_init(nullptr, messages + controllable_generation_prompt);
+    t.assert_true("controllable template should support enable_thinking",
+                  common_chat_templates_support_enable_thinking(controllable_templates.get()));
+    t.assert_true("controllable template should support reasoning toggle",
+                  common_chat_templates_supports_reasoning_toggle(controllable_templates.get()));
+
+    const auto always_on = analyze(R"(
+{%- if add_generation_prompt %}{{- '<think>' }}{%- endif %}
+)");
+    t.assert_true("always-on template should support reasoning", always_on.first);
+    t.assert_true("always-on template should not support reasoning toggle", !always_on.second);
+
+    const std::string suppressed_generation_prompt = R"(
+{%- if add_generation_prompt %}{{- '<think></think>' }}{%- endif %}
+)";
+    const auto        suppressed                   = analyze(suppressed_generation_prompt);
+    t.assert_true("suppressed template should not support reasoning", !suppressed.first);
+    t.assert_true("suppressed template should not support reasoning toggle", !suppressed.second);
+
+    auto       suppressed_templates = common_chat_templates_init(nullptr, messages + suppressed_generation_prompt);
+    const auto suppressed_caps      = common_chat_templates_get_caps(suppressed_templates.get());
+    t.assert_true("common caps should reject suppressed reasoning", !suppressed_caps.at("supports_reasoning"));
+    t.assert_true("common caps should reject suppressed reasoning toggle",
+                  !suppressed_caps.at("supports_reasoning_toggle"));
+    t.assert_true("suppressed template should not support enable_thinking",
+                  !common_chat_templates_support_enable_thinking(suppressed_templates.get()));
+
+    const auto ministral_template = load_template(t, "models/templates/mistralai-Ministral-3-14B-Reasoning-2512.jinja");
+    struct autoparser ministral_reasoning;
+    ministral_reasoning.analyze_template(ministral_template);
+    t.assert_true("Ministral reasoning template should support reasoning",
+                  ministral_reasoning.reasoning.supports_reasoning);
+    t.assert_true("Ministral reasoning template should not support reasoning toggle",
+                  !ministral_reasoning.reasoning.supports_reasoning_toggle);
+    auto ministral_templates = common_chat_templates_init(nullptr, ministral_template.source());
+    t.assert_true("Ministral reasoning template should report thinking support",
+                  common_chat_templates_support_enable_thinking(ministral_templates.get()));
+
+    struct autoparser lfm_instruct;
+    lfm_instruct.analyze_template(load_template(t, "models/templates/LFM2.5-Instruct.jinja"));
+    t.assert_true("LFM2.5 instruct template should not support reasoning", !lfm_instruct.reasoning.supports_reasoning);
+    t.assert_true("LFM2.5 instruct template should not support reasoning toggle",
+                  !lfm_instruct.reasoning.supports_reasoning_toggle);
+
+    for (const char * path : {
+             "models/templates/HuggingFaceTB-SmolLM3-3B.jinja",
+             "models/templates/Qwen3.5-4B.jinja",
+             "models/templates/google-gemma-4-31B-it.jinja",
+             "models/templates/google-gemma-4-31B-it-interleaved.jinja",
+             "models/templates/Cohere2MoE.jinja",
+         }) {
+        struct autoparser controllable_model;
+        controllable_model.analyze_template(load_template(t, path));
+        t.assert_true(std::string(path) + " should support reasoning", controllable_model.reasoning.supports_reasoning);
+        t.assert_true(std::string(path) + " should support reasoning toggle",
+                      controllable_model.reasoning.supports_reasoning_toggle);
+    }
+
+    const auto cohere_template  = load_template(t, "models/templates/Cohere2MoE.jinja");
+    auto       cohere_templates = common_chat_templates_init(nullptr, cohere_template.source());
+    const auto cohere_caps      = common_chat_templates_get_caps(cohere_templates.get());
+    t.assert_true("Cohere2MoE caps should support reasoning", cohere_caps.at("supports_reasoning"));
+    t.assert_true("Cohere2MoE caps should support reasoning toggle", cohere_caps.at("supports_reasoning_toggle"));
+    t.assert_true("Cohere2MoE should support reasoning toggle",
+                  common_chat_templates_supports_reasoning_toggle(cohere_templates.get()));
+
+    struct autoparser gpt_oss;
+    gpt_oss.analyze_template(load_template(t, "models/templates/openai-gpt-oss-120b.jinja"));
+    t.assert_true("GPT-OSS should support reasoning", gpt_oss.reasoning.supports_reasoning);
+    t.assert_true("GPT-OSS should not support binary reasoning toggle", !gpt_oss.reasoning.supports_reasoning_toggle);
+
+    const auto control_marker = analyze(R"(
+{%- if enable_thinking %}{{- '<|think|>' }}{%- endif %}
+{%- if add_generation_prompt %}{{- '<assistant>' }}{%- endif %}
+)");
+    t.assert_true("control marker template should support reasoning", control_marker.first);
+    t.assert_true("control marker template should support reasoning toggle", control_marker.second);
+
+    const auto unrelated_difference = analyze(R"(
+{%- if add_generation_prompt %}{{- ('enabled' if enable_thinking else 'disabled') + '<think>' }}{%- endif %}
+)");
+    t.assert_true("unrelated difference should support reasoning", unrelated_difference.first);
+    t.assert_true("unrelated difference should not support reasoning toggle", !unrelated_difference.second);
 }
 
 // ============================================================================

@@ -11,7 +11,21 @@ struct ModelInfoTests {
         #expect(info.architecture == "")
         #expect(info.metadata.fileSize == 0)
         #expect(!info.capabilities.hasAnyCapability)
+        #expect(info.capabilities.supportsReasoningToggle == nil)
         #expect(info.projector == nil)
+    }
+
+    @Test func preservesKnownReasoningToggleSupport() throws {
+        let capabilities = ModelCapabilities(
+            supportsReasoning: true,
+            supportsReasoningToggle: false
+        )
+
+        let data = try JSONEncoder().encode(capabilities)
+        let decoded = try JSONDecoder().decode(ModelCapabilities.self, from: data)
+
+        #expect(decoded.supportsReasoning)
+        #expect(decoded.supportsReasoningToggle == false)
     }
 
     @Test func estimatesMemoryFromCompleteMetadata() {

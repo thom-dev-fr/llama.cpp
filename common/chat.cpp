@@ -355,18 +355,22 @@ common_chat_tool_choice common_chat_tool_choice_parse_oaicompat(const std::strin
 }
 
 bool common_chat_templates_support_enable_thinking(const common_chat_templates * chat_templates) {
-    common_chat_templates_inputs inputs;
-    inputs.reasoning_format = COMMON_REASONING_FORMAT_DEEPSEEK;
-    common_chat_msg msg;
-    msg.role    = "user";
-    msg.content = "test";
-    inputs.messages = { msg };
-    inputs.enable_thinking = true;
-    inputs.add_generation_prompt = true;
-    inputs.reasoning_format = COMMON_REASONING_FORMAT_DEEPSEEK;
+    const auto caps = common_chat_templates_get_caps(chat_templates);
+    const auto it   = caps.find("supports_reasoning");
+    return it != caps.end() && it->second;
+}
 
-    auto params = common_chat_templates_apply(chat_templates, inputs);
-    return params.supports_thinking;
+bool common_chat_templates_supports_reasoning_toggle(const common_chat_templates * chat_templates) {
+    GGML_ASSERT(chat_templates != nullptr);
+    GGML_ASSERT(chat_templates->template_default != nullptr);
+    const auto & tmpl = chat_templates->template_tool_use != nullptr ? *chat_templates->template_tool_use :
+                                                                       *chat_templates->template_default;
+    autoparser::autoparser analysis;
+    analysis.analyze_template(tmpl);
+    if (!analysis.reasoning.supports_reasoning_toggle_known) {
+        throw std::runtime_error("Could not determine reasoning toggle support");
+    }
+    return analysis.reasoning.supports_reasoning_toggle;
 }
 
 std::vector<common_chat_msg> common_chat_msgs_parse_oaicompat(const json & messages) {
@@ -938,12 +942,13 @@ static std::string common_chat_template_direct_apply_impl(
 
     // messages_override is already built for this template, do not touch its content parts
     json inp = json{
-        {"messages", messages_override.has_value()
-            ? *messages_override
-            : messages_inp_normalizer(tmpl.original_caps()).normalize(inputs.messages)},
-        {"bos_token", tmpl.bos_token()},
-        {"eos_token", tmpl.eos_token()},
-        {"enable_thinking", inputs.enable_thinking},
+        { "messages",
+         messages_override.has_value() ? *messages_override :
+          inputs.normalize_messages     ? messages_inp_normalizer(tmpl.original_caps()).normalize(inputs.messages) :
+                                          inputs.messages },
+        { "bos_token",       tmpl.bos_token()             },
+        { "eos_token",       tmpl.eos_token()             },
+        { "enable_thinking", inputs.enable_thinking       },
     };
     if (tools_override.has_value() || !inputs.tools.empty()) {
         inp["tools"] = tools_override.has_value() ? *tools_override : inputs.tools;
@@ -3907,9 +3912,20 @@ common_chat_msg common_chat_peg_parse(const common_peg_arena &          src_pars
 std::map<std::string, bool> common_chat_templates_get_caps(const common_chat_templates * chat_templates) {
     GGML_ASSERT(chat_templates != nullptr);
     GGML_ASSERT(chat_templates->template_default != nullptr);
-    if (chat_templates->template_tool_use != nullptr) {
-        // take the more expressive template when available
-        return chat_templates->template_tool_use->caps.to_map();
+    // take the more expressive template when available
+    const auto & tmpl   = chat_templates->template_tool_use != nullptr ? *chat_templates->template_tool_use :
+                                                                         *chat_templates->template_default;
+    auto         result = tmpl.caps.to_map();
+
+    result["supports_reasoning"]        = false;
+    result["supports_reasoning_toggle"] = false;
+    try {
+        autoparser::autoparser analysis;
+        analysis.analyze_template(tmpl);
+        result["supports_reasoning"]        = analysis.reasoning.supports_reasoning;
+        result["supports_reasoning_toggle"] = analysis.reasoning.supports_reasoning_toggle;
+    } catch (const std::exception & e) {
+        LOG_WRN("Failed to analyze reasoning capabilities: %s\n", e.what());
     }
-    return chat_templates->template_default->caps.to_map();
+    return result;
 }
