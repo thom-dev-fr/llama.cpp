@@ -137,10 +137,9 @@ typedef struct {
                                 // (clip.has_audio_encoder == true).
     bool supports_tool_calls;   // true if the GGUF-embedded chat template advertises
                                 // tool-call rendering (jinja caps).
-    bool supports_reasoning;    // true if the chat template can emit reasoning (thinking)
-                                // output, i.e. common_chat_templates_support_enable_thinking()
-                                // succeeds. Covers Gemma, Ministral, Qwen3, DeepSeek-R1
-                                // distills, gpt-oss, GLM, etc.
+    bool supports_reasoning;    // true if the chat template can emit reasoning (thinking) output as reasoning_content.
+    bool has_supports_reasoning_toggle; // true if supports_reasoning_toggle is known.
+    bool supports_reasoning_toggle; // meaningful only when has_supports_reasoning_toggle is true.
     bool supports_preserve_reasoning; // true if the chat template re-injects a prior assistant
                                       // `reasoning_content` field into the rendered prompt
                                       // on the next turn (rare: Qwen3 recent, GLM-4.5,
