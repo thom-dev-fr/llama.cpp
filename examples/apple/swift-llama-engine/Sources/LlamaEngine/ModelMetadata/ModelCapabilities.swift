@@ -22,10 +22,11 @@ public struct ModelCapabilities: Sendable, Hashable, Codable {
     /// (jinja caps `supports_tool_calls`).
     public var supportsToolCalls: Bool
 
-    /// True if the chat template can emit reasoning ("thinking") output, i.e.
-    /// `common_chat_templates_support_enable_thinking()` succeeds. Covers
-    /// Gemma, Ministral, Qwen3, DeepSeek-R1 distills, gpt-oss, GLM, etc.
+    /// True if the chat template can emit reasoning ("thinking") output as a separate `reasoning_content` field.
     public var supportsReasoning: Bool
+
+    /// Whether conventional reasoning inputs control reasoning output. `nil` means unknown.
+    public var supportsReasoningToggle: Bool?
 
     /// True if the chat template re-injects a prior assistant
     /// `reasoning_content` field into the rendered prompt on the next turn.
@@ -45,6 +46,7 @@ public struct ModelCapabilities: Sendable, Hashable, Codable {
                 supportsAudio: Bool = false,
                 supportsToolCalls: Bool = false,
                 supportsReasoning: Bool = false,
+                supportsReasoningToggle: Bool? = nil,
                 supportsPreserveReasoning: Bool = false,
                 supportsMTP: Bool = false) {
         self.hasMultimodal             = hasMultimodal
@@ -52,6 +54,7 @@ public struct ModelCapabilities: Sendable, Hashable, Codable {
         self.supportsAudio             = supportsAudio
         self.supportsToolCalls         = supportsToolCalls
         self.supportsReasoning         = supportsReasoning
+        self.supportsReasoningToggle   = supportsReasoningToggle
         self.supportsPreserveReasoning = supportsPreserveReasoning
         self.supportsMTP               = supportsMTP
     }
@@ -62,6 +65,7 @@ public struct ModelCapabilities: Sendable, Hashable, Codable {
         case supportsAudio
         case supportsToolCalls
         case supportsReasoning
+        case supportsReasoningToggle
         case supportsPreserveReasoning
         case supportsMTP
     }
@@ -74,6 +78,7 @@ public struct ModelCapabilities: Sendable, Hashable, Codable {
             supportsAudio:             try c.decodeIfPresent(Bool.self, forKey: .supportsAudio) ?? false,
             supportsToolCalls:         try c.decodeIfPresent(Bool.self, forKey: .supportsToolCalls) ?? false,
             supportsReasoning:         try c.decodeIfPresent(Bool.self, forKey: .supportsReasoning) ?? false,
+            supportsReasoningToggle:   try c.decodeIfPresent(Bool.self, forKey: .supportsReasoningToggle),
             supportsPreserveReasoning: try c.decodeIfPresent(Bool.self, forKey: .supportsPreserveReasoning) ?? false,
             supportsMTP:               try c.decodeIfPresent(Bool.self, forKey: .supportsMTP) ?? false
         )
@@ -86,6 +91,7 @@ public struct ModelCapabilities: Sendable, Hashable, Codable {
         try c.encode(supportsAudio, forKey: .supportsAudio)
         try c.encode(supportsToolCalls, forKey: .supportsToolCalls)
         try c.encode(supportsReasoning, forKey: .supportsReasoning)
+        try c.encodeIfPresent(supportsReasoningToggle, forKey: .supportsReasoningToggle)
         try c.encode(supportsPreserveReasoning, forKey: .supportsPreserveReasoning)
         try c.encode(supportsMTP, forKey: .supportsMTP)
     }
