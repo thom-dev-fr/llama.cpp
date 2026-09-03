@@ -35,6 +35,9 @@ enum ModelInfoProbe {
             supportsAudio:             cinfo.capabilities.supports_audio,
             supportsToolCalls:         cinfo.capabilities.supports_tool_calls,
             supportsReasoning:         cinfo.capabilities.supports_reasoning,
+            supportsReasoningToggle:   cinfo.capabilities.has_supports_reasoning_toggle
+                ? cinfo.capabilities.supports_reasoning_toggle
+                : nil,
             supportsPreserveReasoning: cinfo.capabilities.supports_preserve_reasoning,
             supportsMTP:               cinfo.capabilities.supports_mtp
         )

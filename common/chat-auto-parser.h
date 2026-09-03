@@ -24,6 +24,7 @@ struct template_params {
     json                tools;
     bool                add_generation_prompt = false;
     bool                enable_thinking       = true;
+    bool                normalize_messages    = true;
     std::optional<json> extra_context         = std::nullopt;
 };
 
@@ -71,6 +72,7 @@ struct generation_params {
     bool                                  is_inference  = true;
     bool                                  add_inference = false;
     bool                                  mark_input    = true;  // whether to mark input strings in the jinja context
+    bool                                  normalize_messages = true;
 
     bool has_continuation() const {
         return continue_final_message != COMMON_CHAT_CONTINUATION_NONE && !continue_msg.empty();
@@ -259,11 +261,16 @@ struct analyze_reasoning : analyze_base {
     std::string start;  // e.g., "<think>", "[THINK]", "<|START_THINKING|>", ""
     std::string end;    // e.g., "</think>", "[BEGIN FINAL RESPONSE]", "<|END_THINKING|>"
 
+    bool supports_reasoning              = false;
+    bool supports_reasoning_toggle       = false;
+    bool supports_reasoning_toggle_known = false;
+
     analyze_reasoning() = default;
     analyze_reasoning(const common_chat_template & tmpl, bool supports_tools);
     analyze_reasoning(std::string start_, std::string end_) : start(std::move(start_)), end(std::move(end_)) {}
 
     common_peg_parser build_parser(parser_build_context & ctx) const override;
+    void              detect_capabilities();
 
   private:
     // Look for reasoning markers in rendered content

@@ -315,6 +315,7 @@ std::string apply_template(const common_chat_template & tmpl, const template_par
     tmpl_params.tools                 = params.tools;
     tmpl_params.add_generation_prompt = params.add_generation_prompt;
     tmpl_params.enable_thinking       = params.enable_thinking;
+    tmpl_params.normalize_messages    = params.normalize_messages;
 
     if (params.extra_context) {
         tmpl_params.extra_context = *params.extra_context;
