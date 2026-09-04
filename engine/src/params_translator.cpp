@@ -167,6 +167,7 @@ common_params params_translator::translate(const llama_engine_config & cfg) {
     p.cache_prompt       = true;
     p.cont_batching      = true;
     p.kv_unified         = cfg.parallel_slots <= 1;
+    p.default_template_kwargs["preserve_reasoning"] = "true";
 
     if (cfg.extra_json != nullptr && cfg.extra_json[0] != '\0') {
         json extra;
