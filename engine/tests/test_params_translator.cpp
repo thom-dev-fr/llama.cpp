@@ -32,6 +32,8 @@ static void test_minimal_config() {
     EXPECT_EQ(p.n_parallel, 1);
     EXPECT_EQ(p.load_mode, LLAMA_LOAD_MODE_MMAP);
     EXPECT(p.cpuparams.n_threads > 0);
+    EXPECT_EQ(p.default_template_kwargs.at("preserve_reasoning"), std::string("true"));
+    EXPECT_EQ(p.preserve_reasoning_specified, false);
 }
 
 static void test_load_mode_mapping() {
