@@ -244,7 +244,7 @@ package enum LlamaOpenAICompatibleGenerationStreamProcessor {
             await channel.send(
                 .response(
                     entryID: responseEntryID,
-                    action: .updateMetadata(metadata.values)
+                    action: .updateMetadata(metadata.foundationModelsValues)
                 )
             )
         }
@@ -768,13 +768,6 @@ enum LlamaOpenAICompatibleChatTranscriptConverter {
                     imageURL: LlamaOpenAICompatibleChatMessageContent.ImageURL(url: dataURL)
                 )
             ]
-        case .custom:
-            throw LanguageModelError.unsupportedTranscriptContent(
-                LanguageModelError.UnsupportedTranscriptContent(
-                    unsupportedContent: [entry],
-                    debugDescription: "Custom segments are not supported by \(owner)"
-                )
-            )
         @unknown default:
             throw LanguageModelError.unsupportedTranscriptContent(
                 LanguageModelError.UnsupportedTranscriptContent(
