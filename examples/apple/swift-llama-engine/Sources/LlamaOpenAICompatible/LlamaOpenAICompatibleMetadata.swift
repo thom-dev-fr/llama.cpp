@@ -1,8 +1,13 @@
+public import FoundationModels
+
 /// Metadata values emitted through Foundation Models transcript-entry metadata updates.
-public typealias LlamaOpenAICompatibleMetadataValues = [String: any Sendable & Codable & Equatable]
+@available(iOS 27.0, macOS 27.0, *)
+public typealias LlamaOpenAICompatibleMetadataValues = [String: any Sendable & Codable & Equatable & ConvertibleToGeneratedContent]
 
 /// A typed key for llama.cpp-specific metadata values.
-public struct LlamaOpenAICompatibleMetadataKey<Value>: Sendable where Value: Sendable & Codable & Equatable {
+@available(iOS 27.0, macOS 27.0, *)
+public struct LlamaOpenAICompatibleMetadataKey<Value>: Sendable
+where Value: Sendable & Codable & Equatable & ConvertibleToGeneratedContent {
     public let rawValue: String
 
     public init(_ rawValue: String) {
@@ -11,6 +16,7 @@ public struct LlamaOpenAICompatibleMetadataKey<Value>: Sendable where Value: Sen
 }
 
 /// A small typed wrapper around Foundation Models metadata dictionaries.
+@available(iOS 27.0, macOS 27.0, *)
 public struct LlamaOpenAICompatibleMetadata: Sendable {
     public var values: LlamaOpenAICompatibleMetadataValues
 
@@ -21,8 +27,12 @@ public struct LlamaOpenAICompatibleMetadata: Sendable {
     public mutating func set<Value>(
         _ value: Value,
         for key: LlamaOpenAICompatibleMetadataKey<Value>
-    ) where Value: Sendable & Codable & Equatable {
+    ) where Value: Sendable & Codable & Equatable & ConvertibleToGeneratedContent {
         values[key.rawValue] = value
+    }
+
+    var foundationModelsValues: [String: any ConvertibleToGeneratedContent] {
+        values.mapValues { $0 }
     }
 }
 
@@ -157,7 +167,40 @@ public struct LlamaPromptProgress: Codable, Equatable, Sendable {
     }
 }
 
+@available(iOS 27.0, macOS 27.0, *)
+extension LlamaTimings: ConvertibleToGeneratedContent {
+    public var generatedContent: GeneratedContent {
+        var properties: [String: GeneratedContent] = [:]
+        if let cachedTokens { properties["cache_n"] = GeneratedContent(cachedTokens) }
+        if let promptMilliseconds { properties["prompt_ms"] = GeneratedContent(promptMilliseconds) }
+        if let promptTokens { properties["prompt_n"] = GeneratedContent(promptTokens) }
+        if let promptMillisecondsPerToken { properties["prompt_per_token_ms"] = GeneratedContent(promptMillisecondsPerToken) }
+        if let promptTokensPerSecond { properties["prompt_per_second"] = GeneratedContent(promptTokensPerSecond) }
+        if let predictedMilliseconds { properties["predicted_ms"] = GeneratedContent(predictedMilliseconds) }
+        if let predictedTokens { properties["predicted_n"] = GeneratedContent(predictedTokens) }
+        if let predictedMillisecondsPerToken { properties["predicted_per_token_ms"] = GeneratedContent(predictedMillisecondsPerToken) }
+        if let predictedTokensPerSecond { properties["predicted_per_second"] = GeneratedContent(predictedTokensPerSecond) }
+        if let draftTokens { properties["draft_n"] = GeneratedContent(draftTokens) }
+        if let acceptedDraftTokens { properties["draft_n_accepted"] = GeneratedContent(acceptedDraftTokens) }
+        return GeneratedContent(kind: .structure(properties: properties, orderedKeys: properties.keys.sorted()))
+    }
+}
+
+@available(iOS 27.0, macOS 27.0, *)
+extension LlamaPromptProgress: ConvertibleToGeneratedContent {
+    public var generatedContent: GeneratedContent {
+        var properties: [String: GeneratedContent] = [:]
+        if let processedTokens { properties["processed_tokens"] = GeneratedContent(processedTokens) }
+        if let totalTokens { properties["total_tokens"] = GeneratedContent(totalTokens) }
+        if let cachedTokens { properties["cached_tokens"] = GeneratedContent(cachedTokens) }
+        if let elapsedMilliseconds { properties["elapsed_ms"] = GeneratedContent(elapsedMilliseconds) }
+        if let fraction { properties["fraction"] = GeneratedContent(fraction) }
+        return GeneratedContent(kind: .structure(properties: properties, orderedKeys: properties.keys.sorted()))
+    }
+}
+
 /// Metadata keys emitted by the shared llama.cpp OpenAI-compatible stream codec.
+@available(iOS 27.0, macOS 27.0, *)
 public enum LlamaTelemetryMetadataKeys {
     public static let timings = LlamaOpenAICompatibleMetadataKey<LlamaTimings>(
         "llama.timings"
@@ -172,6 +215,7 @@ public typealias LlamaServerTimings = LlamaTimings
 public typealias LlamaServerPromptProgress = LlamaPromptProgress
 
 /// Compatibility namespace for callers that still use the server-specific name.
+@available(iOS 27.0, macOS 27.0, *)
 public enum LlamaServerMetadataKeys {
     public static let timings = LlamaTelemetryMetadataKeys.timings
     public static let promptProgress = LlamaTelemetryMetadataKeys.promptProgress
