@@ -6,6 +6,7 @@
 #include "server-common.h"
 #include "server-http.h"
 #include "server-queue.h"
+#include "server-process.h"
 
 #include <mutex>
 #include <condition_variable>

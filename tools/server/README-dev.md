@@ -45,6 +45,16 @@ The server supports two primary operating modes:
 
 The core architecture consists of the following components:
 
+The [embedded inference engine migration](../../docs/design/embedded-inference-engine-plan.md)
+is in progress. `llama-engine` now owns the shared task, queue, schema, chat and
+multimodal request-conversion implementations in `engine/`. The `server-*.h`
+headers here temporarily forward to those private headers; they are not a
+public embedding interface. The decoder loop, request lifetime management and
+HTTP handlers still live in `server-context.cpp` at this stage. See the
+[progress journal](../../docs/design/embedded-inference-engine-progress.md) for
+validated profiles and remaining work. SSE wire formatting and child-process IO
+stay in `server-wire.*` and `server-process.*`, outside the engine target.
+
 - `server_context`: Holds the primary inference state, including the main `llama_context` and all active slots.
 - `server_slot`: An abstraction over a single “sequence” in llama.cpp, responsible for managing individual parallel inference requests.
 - `server_routes`: Middleware layer between `server_context` and the HTTP interface; handles JSON parsing/formatting and request routing logic.
@@ -98,8 +108,9 @@ Each incoming HTTP request is handled by its own thread managed by the HTTP libr
 
 **Best practices to follow:**
 
-- All JSON formatting and chat template logic must stay in the HTTP layer.
-- Avoid passing raw JSON between the HTTP layer and `server_slot`. Instead, parse everything into native C++ types as early as possible.
+- Transport-independent JSON validation/conversion and chat template logic belong in the shared engine, **outside the decoder loop**. During extraction the HTTP workers still call these helpers; moving a source file must not move heavy processing onto the decode thread.
+- HTTP owns multipart adaptation, status/header mapping, SSE wire encoding, keep-alives and replay, not a second implementation of inference JSON contracts.
+- Avoid passing raw JSON into `server_slot`. Prepare native task data before admission to the decoder, while keeping the consumer-facing request/result contract JSON-based.
 
 ### Example trace of a request
 

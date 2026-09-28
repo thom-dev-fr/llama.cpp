@@ -7,7 +7,7 @@
 //
 #include "../src/llama-grammar.h"
 #include "../src/unicode.h"
-#include "../tools/server/server-chat.h"
+#include "../engine/server-chat.h"
 #include "chat-auto-parser.h"
 #include "chat.h"
 #include "common.h"
@@ -7491,6 +7491,27 @@ static void test_deepseek_v4_tool_result_ordering() {
     }
 }
 
+#ifdef LLAMA_TEST_NO_ACQUISITION
+static void test_remote_media_unavailable() {
+    server_chat_params opt{};
+    opt.tmpls = common_chat_templates_init(nullptr, "chatml");
+    opt.use_jinja = true;
+    opt.allow_image = true;
+    auto body = json::parse(R"({"messages":[{"role":"user","content":[
+        {"type":"image_url","image_url":{"url":"http://127.0.0.1:1/image.png"}}
+    ]}]})");
+    std::vector<raw_buffer> files;
+    bool rejected = false;
+    try {
+        oaicompat_chat_params_parse(body, opt, files);
+    } catch (const std::runtime_error & e) {
+        rejected = std::string(e.what()) == "Remote media requires network acquisition support";
+    }
+    GGML_ASSERT(rejected);
+    GGML_ASSERT(files.empty());
+}
+#endif
+
 static void test_reasoning_budget_tokens_per_request() {
     LOG_DBG("%s\n", __func__);
     // Use Qwen3 template which has <think>...</think> reasoning markers.
@@ -7734,6 +7755,9 @@ int main(int argc, char ** argv) {
         test_deepseek_v4_tool_result_ordering();
         test_template_generation_prompt();
         test_reasoning_effort_caps();
+#ifdef LLAMA_TEST_NO_ACQUISITION
+        test_remote_media_unavailable();
+#endif
         test_reasoning_budget_tokens_per_request();
         test_reasoning_budget_message_per_request();
         test_template_output_peg_parsers(detailed_debug);

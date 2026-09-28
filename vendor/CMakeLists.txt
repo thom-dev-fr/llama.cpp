@@ -5,7 +5,7 @@ add_subdirectory(nlohmann)
 add_subdirectory(sheredom)
 add_subdirectory(stb)
 
-# only used by common
-if (LLAMA_BUILD_COMMON)
+# Network acquisition is optional; local inference utilities do not need HTTP.
+if (LLAMA_BUILD_COMMON OR LLAMA_BUILD_COMMON_ACQUISITION)
     add_subdirectory(cpp-httplib)
 endif()

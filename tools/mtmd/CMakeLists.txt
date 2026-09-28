@@ -149,7 +149,7 @@ endif()
 # builds (LLAMA_BUILD_MTMD=ON with LLAMA_BUILD_TOOLS=OFF — e.g. Apple
 # XCFramework packaging) skip the executables entirely. LLAMA_BUILD_COMMON
 # defaults to ON in standalone builds, so we cannot rely on it for gating.
-if (LLAMA_BUILD_TOOLS)
+if (LLAMA_BUILD_COMMON AND LLAMA_BUILD_TOOLS)
     add_executable(llama-llava-cli    deprecation-warning.cpp)
     add_executable(llama-gemma3-cli   deprecation-warning.cpp)
     add_executable(llama-minicpmv-cli deprecation-warning.cpp)

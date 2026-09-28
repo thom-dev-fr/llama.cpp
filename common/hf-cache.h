@@ -18,7 +18,8 @@ struct hf_file {
 
 using hf_files = std::vector<hf_file>;
 
-// Get files from HF API
+// Get files from HF API (requires the optional llama-common-acquisition target).
+// The remaining operations below are local and provided by llama-common-local.
 hf_files get_repo_files(
     const std::string & repo_id,
     const std::string & token

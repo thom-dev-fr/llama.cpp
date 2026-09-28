@@ -1,5 +1,11 @@
 llama_add_compile_flags()
 
+if (LLAMA_BUILD_COMMON)
+    set(LLAMA_TEST_COMMON_TARGET llama-common)
+else()
+    set(LLAMA_TEST_COMMON_TARGET llama-common-local)
+endif()
+
 function(llama_build source)
     set(TEST_SOURCES ${source} ${ARGN})
 
@@ -10,7 +16,7 @@ function(llama_build source)
     endif()
 
     add_executable(${TEST_TARGET} ${TEST_SOURCES})
-    target_link_libraries(${TEST_TARGET} PRIVATE llama llama-common) # TODO: [TAG_TESTS_LLAMA_LINK]
+    target_link_libraries(${TEST_TARGET} PRIVATE llama ${LLAMA_TEST_COMMON_TARGET}) # TODO: [TAG_TESTS_LLAMA_LINK]
     if (LLAMA_TESTS_INSTALL)
         install(TARGETS ${TEST_TARGET} RUNTIME)
     endif()
@@ -105,7 +111,7 @@ function(llama_build_and_test source)
     if (LLAMA_TESTS_INSTALL)
         install(TARGETS ${TEST_TARGET} RUNTIME)
     endif()
-    target_link_libraries(${TEST_TARGET} PRIVATE llama-common)
+    target_link_libraries(${TEST_TARGET} PRIVATE ${LLAMA_TEST_COMMON_TARGET})
 
     add_test(
         NAME ${TEST_TARGET}
@@ -115,6 +121,58 @@ function(llama_build_and_test source)
 
     set_property(TEST ${TEST_TARGET} PROPERTY LABELS ${LLAMA_TEST_LABEL})
 endfunction()
+
+# This consumer must link only the local utilities, even in a full tools build.
+add_executable(test-common-local test-common-local.cpp)
+target_link_libraries(test-common-local PRIVATE llama-common-local)
+llama_test(test-common-local)
+
+add_executable(test-hf-cache test-hf-cache.cpp)
+target_link_libraries(test-hf-cache PRIVATE llama-common-local)
+llama_test(test-hf-cache)
+
+if (TARGET llama-common-acquisition)
+    add_executable(test-acquisition test-acquisition.cpp)
+    target_link_libraries(test-acquisition PRIVATE llama-common-acquisition cpp-httplib)
+    llama_test(test-acquisition)
+endif()
+
+if (TARGET llama-engine AND (NOT WIN32 OR NOT BUILD_SHARED_LIBS))
+    add_executable(test-chat test-chat.cpp)
+    target_link_libraries(test-chat PRIVATE llama-engine)
+    if (NOT TARGET llama-common-acquisition)
+        target_compile_definitions(test-chat PRIVATE LLAMA_TEST_NO_ACQUISITION)
+    endif()
+    if (LLAMA_TESTS_INSTALL)
+        install(TARGETS test-chat RUNTIME)
+    endif()
+    llama_test(test-chat WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
+else()
+    message(STATUS "test-chat requires llama-engine and support for internal test symbols")
+endif()
+
+if (NOT LLAMA_BUILD_COMMON)
+    # Explicit local-only suite. Do not pull argument parsing, downloads or
+    # server-context back into this profile through a test helper.
+    message(STATUS "Local utilities tests: excluding executable tests (network tests require acquisition)")
+    llama_build_and_test(test-chat-peg-parser.cpp peg-parser/simple-tokenize.cpp)
+    llama_build_and_test(test-chat-auto-parser.cpp WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
+    llama_build_and_test(test-chat-template.cpp)
+    llama_build_and_test(test-jinja.cpp)
+    llama_test(test-jinja NAME test-jinja-no-subprocess ARGS -py)
+    set_tests_properties(test-jinja-no-subprocess PROPERTIES WILL_FAIL TRUE)
+    llama_build_and_test(test-json-schema.cpp)
+    llama_build_and_test(test-log.cpp)
+    if (NOT WIN32 OR NOT BUILD_SHARED_LIBS)
+        llama_build_and_test(test-sampling.cpp)
+        llama_build_and_test(test-reasoning-budget.cpp)
+        llama_build_and_test(test-grammar-parser.cpp)
+        llama_build_and_test(test-grammar-integration.cpp)
+        llama_build_and_test(test-llama-grammar.cpp)
+        llama_build_and_test(test-json-schema-to-grammar.cpp)
+    endif()
+    return()
+endif()
 
 # build test-tokenizer-0 target once and add many tests
 llama_build(test-tokenizer-0.cpp)
@@ -160,9 +218,6 @@ if (NOT WIN32 OR NOT BUILD_SHARED_LIBS)
     llama_build_and_test(test-grammar-integration.cpp)
     llama_build_and_test(test-llama-grammar.cpp)
     llama_build_and_test(test-batch-alloc.cpp)
-    llama_build_and_test(test-chat.cpp WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
-    target_include_directories(test-chat PRIVATE ${PROJECT_SOURCE_DIR}/tools/server)
-    target_link_libraries(test-chat PRIVATE server-context)
     llama_build_and_test(test-json-schema-to-grammar.cpp)
 
     if (NOT GGML_BACKEND_DL)
@@ -228,7 +283,12 @@ endif()
 
 llama_build_and_test(test-chat-peg-parser.cpp peg-parser/simple-tokenize.cpp)
 llama_build_and_test(test-jinja.cpp)
-llama_test(test-jinja NAME test-jinja-py ARGS -py LABEL python)
+if (LLAMA_SUBPROCESS)
+    llama_test(test-jinja NAME test-jinja-py ARGS -py LABEL python)
+else()
+    llama_test(test-jinja NAME test-jinja-no-subprocess ARGS -py)
+    set_tests_properties(test-jinja-no-subprocess PROPERTIES WILL_FAIL TRUE)
+endif()
 llama_build_and_test(test-json-schema.cpp)
 llama_build_and_test(test-chat-auto-parser.cpp WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
 llama_build_and_test(test-chat-template.cpp)

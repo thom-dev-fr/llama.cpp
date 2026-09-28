@@ -1,5 +1,7 @@
 #include "common.h"
+#ifdef LLAMA_ENGINE_ACQUISITION
 #include "download.h"
+#endif
 #include "log.h"
 #include "llama.h"
 #include "mtmd.h"
@@ -15,23 +17,6 @@
 #include <limits>
 #include <cstring>
 #include <type_traits>
-#include <chrono>
-#include <thread>
-
-#ifdef _WIN32
-// windows.h defines min and max as macros, which breaks std::min and std::max
-#define WIN32_LEAN_AND_MEAN
-#ifndef NOMINMAX
-#   define NOMINMAX
-#endif
-#include <windows.h>
-#include <io.h>
-#else
-#include <errno.h>
-#include <fcntl.h>
-#include <poll.h>
-#include <unistd.h>
-#endif
 
 json format_error_response(const std::string & message, const enum error_type type) {
     std::string type_str;
@@ -1086,6 +1071,7 @@ static void handle_media(
     }
 
     if (string_starts_with(url, "http")) {
+#ifdef LLAMA_ENGINE_ACQUISITION
         // download remote image
         // TODO @ngxson : maybe make these params configurable
         common_remote_params params;
@@ -1101,6 +1087,9 @@ static void handle_media(
         } else {
             throw std::runtime_error("Failed to download image");
         }
+#else
+        throw std::runtime_error("Remote media requires network acquisition support");
+#endif
 
     } else if (string_starts_with(url, "file://")) {
         if (media_path.empty()) {
@@ -1639,68 +1628,6 @@ std::string tokens_to_output_formatted_string(const llama_context * ctx, const l
     return out;
 }
 
-// format server-sent event (SSE), return the formatted string to send
-// note: if data is a json array, it will be sent as multiple events, one per item
-std::string format_oai_sse(const json & data) {
-    std::ostringstream ss;
-    auto send_single = [&ss](const json & data) {
-        ss << "data: " <<
-            safe_json_to_str(data) <<
-            "\n\n"; // required by RFC 8895 - A message is terminated by a blank line (two line terminators in a row).
-    };
-
-    if (data.is_array()) {
-        for (const auto & item : data) {
-            send_single(item);
-        }
-    } else {
-        send_single(data);
-    }
-
-    return ss.str();
-}
-
-std::string format_oai_resp_sse(const json & data) {
-    std::ostringstream ss;
-    auto send_single = [&ss](const json & event_obj) {
-        ss << "event: " << event_obj.at("event").get<std::string>() << "\n";
-        ss << "data: " << safe_json_to_str(event_obj.at("data")) << "\n\n";
-    };
-
-    if (data.is_array()) {
-        for (const auto & item : data) {
-            send_single(item);
-        }
-    } else {
-        send_single(data);
-    }
-
-    return ss.str();
-}
-
-std::string format_anthropic_sse(const json & data) {
-    std::ostringstream ss;
-
-    auto send_event = [&ss](const json & event_obj) {
-        if (event_obj.contains("event") && event_obj.contains("data")) {
-            ss << "event: " << event_obj.at("event").get<std::string>() << "\n";
-            ss << "data: " << safe_json_to_str(event_obj.at("data")) << "\n\n";
-        } else {
-            ss << "data: " << safe_json_to_str(event_obj) << "\n\n";
-        }
-    };
-
-    if (data.is_array()) {
-        for (const auto & event : data) {
-            send_event(event);
-        }
-    } else {
-        send_event(data);
-    }
-
-    return ss.str();
-}
-
 bool is_valid_utf8(const std::string & str) {
     const unsigned char* bytes = reinterpret_cast<const unsigned char*>(str.data());
     const unsigned char* end = bytes + str.length();
@@ -1881,132 +1808,3 @@ server_tokens format_prompt_rerank(
     return result;
 }
 
-//
-// server_subproc
-//
-
-bool server_subproc::has_output() {
-    if (out_handle >= 0) {
-        return true;
-    }
-    FILE * f = sproc.stdout_file(); // combined stdout/stderr
-    if (!f) {
-        return false;
-    }
-#ifdef _WIN32
-    HANDLE h = (HANDLE) _get_osfhandle(_fileno(f));
-    if (h != INVALID_HANDLE_VALUE) {
-        out_handle = (intptr_t) h;
-    }
-#else
-    int fd = fileno(f);
-    if (fd >= 0) {
-        fcntl(fd, F_SETFL, fcntl(fd, F_GETFL, 0) | O_NONBLOCK);
-        out_handle = fd;
-    }
-#endif
-    return out_handle >= 0;
-}
-
-int server_subproc::read_output(char * buf, size_t len) {
-    if (!has_output()) {
-        return -1;
-    }
-#ifdef _WIN32
-    HANDLE h     = (HANDLE) out_handle;
-    DWORD  avail = 0;
-    if (!PeekNamedPipe(h, NULL, 0, NULL, &avail, NULL)) {
-        return -1; // pipe broken, child gone
-    }
-    if (avail == 0) {
-        return 0;
-    }
-    DWORD to_read = avail < (DWORD) len ? avail : (DWORD) len;
-    DWORD got     = 0;
-    if (!ReadFile(h, buf, to_read, &got, NULL) || got == 0) {
-        return -1;
-    }
-    return (int) got;
-#else
-    while (true) {
-        ssize_t r = read((int) out_handle, buf, len);
-        if (r > 0) {
-            return (int) r;
-        }
-        if (r == 0) {
-            return -1; // EOF
-        }
-        if (errno == EINTR) {
-            continue;
-        }
-        if (errno == EAGAIN || errno == EWOULDBLOCK) {
-            return 0;
-        }
-        return -1;
-    }
-#endif
-}
-
-server_subproc::waiter::waiter() {
-#ifndef _WIN32
-    int fds[2];
-    GGML_ASSERT(pipe(fds) == 0);
-    for (int fd : fds) {
-        fcntl(fd, F_SETFL, fcntl(fd, F_GETFL, 0) | O_NONBLOCK);
-    }
-    wake_fd[0] = fds[0];
-    wake_fd[1] = fds[1];
-#endif
-}
-
-server_subproc::waiter::~waiter() {
-#ifndef _WIN32
-    close((int) wake_fd[0]);
-    close((int) wake_fd[1]);
-#endif
-}
-
-void server_subproc::waiter::wake() {
-#ifndef _WIN32
-    char c = 1;
-    (void) !write((int) wake_fd[1], &c, 1);
-#endif
-}
-
-void server_subproc::waiter::wait(const std::vector<server_subproc *> & procs, std::vector<bool> & ready, int64_t timeout_ms) {
-    ready.assign(procs.size(), false);
-#ifdef _WIN32
-    // no waitable wait exists for anonymous pipes, so poll them in 50 ms steps
-    bool any = false;
-    for (size_t i = 0; i < procs.size(); i++) {
-        DWORD avail = 0;
-        if (!procs[i]->has_output() || !PeekNamedPipe((HANDLE) procs[i]->out_handle, NULL, 0, NULL, &avail, NULL) || avail > 0) {
-            ready[i] = true; // data or broken pipe, read_output() tells which
-            any = true;
-        }
-    }
-    if (!any) {
-        int64_t step = timeout_ms < 0 ? 50 : std::min<int64_t>(timeout_ms, 50);
-        std::this_thread::sleep_for(std::chrono::milliseconds(step));
-    }
-#else
-    std::vector<pollfd> pfds;
-    pfds.reserve(procs.size() + 1);
-    pfds.push_back({ (int) wake_fd[0], POLLIN, 0 });
-    for (auto * p : procs) {
-        pfds.push_back({ p->has_output() ? (int) p->out_handle : -1, POLLIN, 0 }); // poll() skips negative fds
-    }
-    int timeout = timeout_ms < 0 ? -1 : (int) std::min<int64_t>(timeout_ms, std::numeric_limits<int>::max());
-    int r = poll(pfds.data(), pfds.size(), timeout);
-    if (r < 0 && errno != EINTR) {
-        LOG_ERR("%s: poll() failed: %s\n", __func__, strerror(errno));
-    }
-    if (pfds[0].revents) {
-        char buf[64];
-        while (read((int) wake_fd[0], buf, sizeof(buf)) > 0) {}
-    }
-    for (size_t i = 0; i < procs.size(); i++) {
-        ready[i] = pfds[i + 1].fd < 0 || pfds[i + 1].revents != 0;
-    }
-#endif
-}

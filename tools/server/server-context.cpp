@@ -6,6 +6,7 @@
 #include "server-queue.h"
 #include "server-schema.h"
 #include "server-stream.h"
+#include "server-wire.h"
 
 #include "build-info.h"
 #include "common.h"

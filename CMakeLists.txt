@@ -127,8 +127,12 @@ option(LLAMA_SANITIZE_UNDEFINED "llama: enable undefined sanitizer" OFF)
 
 # utils
 option(LLAMA_BUILD_COMMON "llama: build common utils library" ${LLAMA_STANDALONE})
+option(LLAMA_BUILD_COMMON_LOCAL "llama: build local inference utilities without executable or network utilities" OFF)
+option(LLAMA_BUILD_COMMON_ACQUISITION "llama: build optional model acquisition without executable utilities" OFF)
 
 # extra artifacts
+option(LLAMA_BUILD_ENGINE    "llama: build transport-independent inference components" OFF)
+option(LLAMA_BUILD_MTMD      "llama: build tools/mtmd library standalone" OFF)
 option(LLAMA_BUILD_TESTS     "llama: build tests"                                                                ${LLAMA_STANDALONE})
 option(LLAMA_BUILD_TOOLS     "llama: build tools"                                                                ${LLAMA_STANDALONE})
 option(LLAMA_BUILD_EXAMPLES  "llama: build examples"                                                             ${LLAMA_STANDALONE})
@@ -236,11 +240,24 @@ add_subdirectory(src)
 
 add_subdirectory(vendor)
 
-if (LLAMA_BUILD_COMMON)
+set(LLAMA_ENGINE_ENABLED ${LLAMA_BUILD_ENGINE})
+if (LLAMA_BUILD_COMMON AND LLAMA_BUILD_TOOLS AND LLAMA_BUILD_SERVER AND NOT EMSCRIPTEN)
+    set(LLAMA_ENGINE_ENABLED ON)
+endif()
+
+if (LLAMA_BUILD_COMMON OR LLAMA_BUILD_COMMON_LOCAL OR LLAMA_BUILD_COMMON_ACQUISITION OR LLAMA_ENGINE_ENABLED)
     add_subdirectory(common)
 endif()
 
-if (LLAMA_BUILD_COMMON AND LLAMA_BUILD_TESTS AND NOT CMAKE_JS_VERSION)
+# Define mtmd exactly once, before its library and executable consumers.
+if (LLAMA_BUILD_MTMD OR LLAMA_ENGINE_ENABLED OR (LLAMA_BUILD_COMMON AND LLAMA_BUILD_TOOLS AND NOT EMSCRIPTEN))
+    add_subdirectory(tools/mtmd)
+endif()
+if (LLAMA_ENGINE_ENABLED)
+    add_subdirectory(engine)
+endif()
+
+if (TARGET llama-common-local AND LLAMA_BUILD_TESTS AND NOT CMAKE_JS_VERSION)
     include(CTest)
     add_subdirectory(tests)
 endif()
@@ -256,16 +273,6 @@ endif()
 
 if (LLAMA_BUILD_APP)
     add_subdirectory(app)
-endif()
-
-# Standalone libmtmd build without pulling in the rest of the tools/ tree.
-# Useful when packaging just the mtmd library for language bindings (e.g. an
-# Apple XCFramework, or a WASM build). When the full tools build is enabled,
-# mtmd is already built by the tools/ subdirectory above; this hook only fires
-# when LLAMA_BUILD_TOOLS is OFF to avoid double-adding the target.
-option(LLAMA_BUILD_MTMD "llama: build tools/mtmd library standalone" OFF)
-if (LLAMA_BUILD_MTMD AND NOT (LLAMA_BUILD_COMMON AND LLAMA_BUILD_TOOLS))
-    add_subdirectory(tools/mtmd)
 endif()
 
 #
@@ -289,6 +296,12 @@ set_target_properties(llama
 
 install(TARGETS llama LIBRARY PUBLIC_HEADER)
 
+if (TARGET llama-common-local)
+    install(TARGETS llama-common-local LIBRARY)
+endif()
+if (TARGET llama-common-acquisition)
+    install(TARGETS llama-common-acquisition LIBRARY)
+endif()
 if (LLAMA_BUILD_COMMON)
     install(TARGETS llama-common LIBRARY)
 endif()
