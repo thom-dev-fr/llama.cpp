@@ -48,17 +48,12 @@ struct server_routes {
     json get_model_info() const;
 
 private:
-    std::unique_ptr<server_res_generator> handle_completions_impl(
-            const server_http_req & req,
-            server_task_type type,
-            const json & data,
-            const std::vector<raw_buffer> & files,
-            task_response_type res_type);
+    std::unique_ptr<server_res_generator> handle_operation(const server_http_req & req,
+            llama_engine::operation op, const json & body = nullptr,
+            const std::vector<llama_engine::attachment> & files = {});
     std::unique_ptr<server_res_generator> handle_slots_save(const server_http_req & req, int id_slot);
     std::unique_ptr<server_res_generator> handle_slots_restore(const server_http_req & req, int id_slot);
     std::unique_ptr<server_res_generator> handle_slots_erase(const server_http_req &, int id_slot);
-    std::unique_ptr<server_res_generator> handle_embeddings_impl(const server_http_req & req, task_response_type res_type);
-    std::unique_ptr<server_res_generator> handle_count_tokens(const server_http_req & req, task_response_type res_type);
 
     // using unique_ptr to allow late initialization of const
     std::unique_ptr<const server_context_meta> meta;
@@ -67,16 +62,6 @@ private:
     server_context & ctx_server;
 
     server_queue & queue_tasks;
-    server_response & queue_results;
     std::unique_ptr<server_res_generator> create_response(bool bypass_sleep = false);
 
-    // cached responses, to be used during sleep
-    std::mutex     mutex_cache;
-    json           cached_models  = nullptr;
-    json           cached_props   = nullptr;
-    server_metrics cached_metrics;
-    // set when a scrape during sleep already reported the throughput buckets
-    bool           should_reset_buckets = false;
-    // call right before sleep to update the cached responses
-    void update_cached_responses(bool is_sleeping);
 };

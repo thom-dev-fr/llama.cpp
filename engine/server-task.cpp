@@ -1515,12 +1515,6 @@ json server_task_result_slots::to_json() {
 }
 
 json server_task_result_metrics::to_json() {
-    // not used, /metrics renders prometheus text via to_metrics()
-    return json{};
-}
-
-// metrics definition: https://prometheus.io/docs/practices/naming/#metric-names
-std::string server_task_result_metrics::to_metrics() {
     const std::vector<metric_item> counters = {
         {
             "prompt_tokens_total",
@@ -1589,31 +1583,16 @@ std::string server_task_result_metrics::to_metrics() {
         },
     };
 
-    std::stringstream prometheus;
-
-    auto add_items = [&prometheus](const char * type, const std::vector<metric_item> & items) {
+    json result = {{"t_start", metrics.t_start}, {"counters", json::array()}, {"gauges", json::array()},
+                   {"n_accepted_per_pos", metrics.n_accepted_per_pos}};
+    auto append = [&](const char * key, const std::vector<metric_item> & items) {
         for (const auto & item : items) {
-            prometheus << "# HELP llamacpp:" << item.name << " " << item.description << "\n"
-                       << "# TYPE llamacpp:" << item.name << " " << type             << "\n"
-                       << "llamacpp:"        << item.name << " " << item.value       << "\n";
+            result[key].push_back({{"name", item.name}, {"description", item.description}, {"value", item.value}});
         }
     };
-
-    add_items("counter", counters);
-    add_items("gauge",   gauges);
-
-    // labeled counter: one time series per draft position
-    if (!metrics.n_accepted_per_pos.empty()) {
-        prometheus << "# HELP llamacpp:spec_decode_num_accepted_tokens_per_pos_total"
-                      " Accepted tokens per draft position\n"
-                   << "# TYPE llamacpp:spec_decode_num_accepted_tokens_per_pos_total counter\n";
-        for (size_t i = 0; i < metrics.n_accepted_per_pos.size(); i++) {
-            prometheus << "llamacpp:spec_decode_num_accepted_tokens_per_pos_total{position=\""
-                       << i << "\"} " << metrics.n_accepted_per_pos[i] << "\n";
-        }
-    }
-
-    return prometheus.str();
+    append("counters", counters);
+    append("gauges", gauges);
+    return result;
 }
 
 //

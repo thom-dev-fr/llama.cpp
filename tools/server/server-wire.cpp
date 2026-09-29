@@ -63,3 +63,32 @@ std::string format_anthropic_sse(const json & data) {
 
     return ss.str();
 }
+
+std::string format_metrics(const json & data) {
+    const auto positions = data.at("n_accepted_per_pos");
+    std::stringstream prometheus;
+
+    auto add_items = [&prometheus](const char * type, const json & items) {
+        for (const auto & item : items) {
+            prometheus << "# HELP llamacpp:" << item.at("name").get<std::string>() << " " << item.at("description").get<std::string>() << "\n"
+                       << "# TYPE llamacpp:" << item.at("name").get<std::string>() << " " << type             << "\n"
+                       << "llamacpp:"        << item.at("name").get<std::string>() << " " << item.at("value").get<double>()       << "\n";
+        }
+    };
+
+    add_items("counter", data.at("counters"));
+    add_items("gauge",   data.at("gauges"));
+
+    // labeled counter: one time series per draft position
+    if (!positions.empty()) {
+        prometheus << "# HELP llamacpp:spec_decode_num_accepted_tokens_per_pos_total"
+                      " Accepted tokens per draft position\n"
+                   << "# TYPE llamacpp:spec_decode_num_accepted_tokens_per_pos_total counter\n";
+        for (size_t i = 0; i < positions.size(); i++) {
+            prometheus << "llamacpp:spec_decode_num_accepted_tokens_per_pos_total{position=\""
+                       << i << "\"} " << positions[i].get<uint64_t>() << "\n";
+        }
+    }
+
+    return prometheus.str();
+}

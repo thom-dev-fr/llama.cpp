@@ -1,52 +1,25 @@
 #include "server-context.h"
 #include "engine-runtime.h"
-#include "server-chat.h"
+#include "engine-operations.h"
 #include "server-common.h"
 #include "server-http.h"
 #include "server-task.h"
 #include "server-queue.h"
-#include "server-schema.h"
 #include "server-stream.h"
 #include "server-wire.h"
 
-#include "build-info.h"
-#include "common.h"
-#include "fit.h"
-#include "llama.h"
-#include "log.h"
-#include "sampling.h"
-#include "speculative.h"
-#include "mtmd.h"
-#include "mtmd-helper.h"
-
-#include <algorithm>
-#include <cstddef>
-#include <cinttypes>
+#include <chrono>
 #include <exception>
 #include <memory>
-#include <filesystem>
-#include <random>
 #include <utility>
-#include <fstream>
-
-// fix problem with std::min and std::max
-#if defined(_WIN32)
-#define WIN32_LEAN_AND_MEAN
-#ifndef NOMINMAX
-#   define NOMINMAX
-#endif
-#include <windows.h>
-#endif
 
 constexpr int HTTP_POLLING_SECONDS = 1;
 
 // generator-like API for HTTP response generation
 // may have bypass_sleep = true if the task does not use ctx_server
 struct server_res_generator : server_res_spipe {
-    server_response_reader rd;
     std::shared_ptr<llama_engine::request> engine_request;
-    server_res_generator(server_queue & queue_tasks, server_response & queue_results, int sleep_idle_seconds, bool bypass_sleep = false)
-            : rd(queue_tasks, queue_results, HTTP_POLLING_SECONDS) {
+    server_res_generator(server_queue & queue_tasks, int sleep_idle_seconds, bool bypass_sleep = false) {
         // fast path in case sleeping is disabled
         bypass_sleep |= sleep_idle_seconds < 0;
         if (!bypass_sleep) {
@@ -68,336 +41,161 @@ struct server_res_generator : server_res_spipe {
 // server_routes
 //
 
-std::unique_ptr<server_res_generator> server_routes::handle_completions_impl(
-            const server_http_req & req,
-            server_task_type type,
-            const json & data,
-            const std::vector<raw_buffer> & files,
-            task_response_type res_type) {
-    GGML_ASSERT(type == SERVER_TASK_TYPE_COMPLETION || type == SERVER_TASK_TYPE_INFILL);
-
-    auto res = create_response();
-    auto & rd = res->rd;
-    auto & params = this->params;
-
-    res->set_req(&req); // will also set spipe if needed
-
-    int32_t sse_ping_interval = params.sse_ping_interval;
-
+std::unique_ptr<server_res_generator> server_routes::handle_operation(
+        const server_http_req & req, llama_engine::operation op, const json & body,
+        const std::vector<llama_engine::attachment> & files) {
+    auto res = create_response(op == llama_engine::operation::metrics ||
+                               op == llama_engine::operation::properties || op == llama_engine::operation::models);
+    // Preserve support errors and sleep behavior before parsing the body. The
+    // capability rules themselves belong to the engine and use owned metadata.
     try {
-        auto tasks = ctx_server.prepare_completion(data, type, res_type, files);
-        if (!tasks.empty()) { sse_ping_interval = tasks.front().params.sse_ping_interval; }
-        rd.post_tasks(std::move(tasks));
-    } catch (const std::exception & e) {
-        res->error(format_error_response(e.what(), ERROR_TYPE_INVALID_REQUEST));
+        llama_engine::detail::validate_operation_support(*meta, params, op);
+    } catch (const llama_engine::detail::operation_error & error) {
+        res->error(error.data);
         return res;
     }
+    const json input = body.is_null() ? json::parse(req.body) : body;
+    res->set_req(&req);
 
-    bool stream = json_value(data, "stream", false);
-
-    if (!stream) {
-        // non-stream, wait for the results
-        auto all_results = rd.wait_for_all(req.should_stop);
-        if (all_results.is_terminated) {
-            return res; // connection is closed
-        } else if (all_results.error) {
-            res->error(all_results.error->to_json());
-            return res;
-        } else {
-            json arr = json::array();
-            for (auto & res : all_results.results) {
-                GGML_ASSERT(dynamic_cast<server_task_result_cmpl_final*>(res.get()) != nullptr);
-                arr.push_back(res->to_json());
+    auto state = std::make_shared<llama_engine::detail::request_state>();
+    res->engine_request = std::make_shared<llama_engine::request>(state); // cancels on destruction
+    llama_engine::detail::submit_native(ctx_server.runtime, state, input, op, files);
+    auto error_json = [](const llama_engine::event & item) {
+        if (item.data.is_object() && item.data.contains("code")) {
+            return json::parse(item.data.dump());
+        }
+        auto type = item.category == "invalid_request" ? ERROR_TYPE_INVALID_REQUEST : ERROR_TYPE_SERVER;
+        return format_error_response(item.message, type);
+    };
+    auto next = [state](const std::function<bool()> & should_stop) {
+        for (;;) {
+            if (should_stop()) {
+                return llama_engine::detail::native_item {{llama_engine::event_type::cancelled, nullptr, "closed", {}}, nullptr};
             }
-            GGML_ASSERT(!arr.empty() && "empty results");
-            if (arr.size() == 1) {
-                // if single request, return single object instead of array
-                res->ok(arr[0]);
-            } else if (res_type == TASK_RESPONSE_TYPE_OAI_CHAT || res_type == TASK_RESPONSE_TYPE_OAI_CMPL) {
-                // if multiple results in OAI format, we need to re-format them
-                json & choices = arr[0]["choices"];
-                for (size_t i = 1; i < arr.size(); i++) {
-                    choices.push_back(std::move(arr[i]["choices"][0]));
-                }
-                res->ok(arr[0]);
-            } else {
-                // multi-results, non-OAI compat
-                res->ok(arr);
-            }
+            auto item = state->read_native(std::chrono::seconds(HTTP_POLLING_SECONDS));
+            if (item.status.type != llama_engine::event_type::timeout) { return item; }
         }
-    } else {
-        // in streaming mode, the first error must be treated as non-stream response
-        // this is to match the OAI API behavior
-        // ref: https://github.com/ggml-org/llama.cpp/pull/16486#discussion_r2419657309
-        auto first_result = rd.next(req.should_stop);
-        if (first_result == nullptr) {
-            GGML_ASSERT(req.should_stop());
-            return res; // connection is closed
-        }
-
-        if (first_result->is_error()) {
-            res->error(first_result->to_json());
-            return res;
-        }
-
-        GGML_ASSERT(
-            dynamic_cast<server_task_result_cmpl_partial*>(first_result.get()) != nullptr ||
-            dynamic_cast<server_task_result_cmpl_final*>  (first_result.get()) != nullptr
-        );
-
-        // next responses are streamed
-        // to be sent immediately
-        json first_result_json = first_result->to_json();
-        if (first_result_json == nullptr) {
-            res->data = ""; // simply send HTTP headers and status code
-        } else if (res_type == TASK_RESPONSE_TYPE_ANTHROPIC) {
-            res->data = format_anthropic_sse(first_result_json);
-        } else if (res_type == TASK_RESPONSE_TYPE_OAI_RESP) {
-            res->data = format_oai_resp_sse(first_result_json);
-        } else {
-            res->data = format_oai_sse(first_result_json);
-        }
-        res->status = 200;
-        res->content_type = "text/event-stream";
-        res->set_next([res_this = res.get(), res_type, sse_ping_interval](std::string & output) -> bool {
-            static auto format_error = [](task_response_type res_type, const json & res_json) {
-                if (res_type == TASK_RESPONSE_TYPE_ANTHROPIC) {
-                    return format_anthropic_sse({
-                        {"event", "error"},
-                        {"data", res_json},
-                    });
-                } else {
-                    return format_oai_sse(json {{ "error", res_json }});
-                }
-            };
-
-            auto effective_should_stop = [&res_this]() {
-                return res_this->should_stop();
-            };
-
-            try {
-                if (effective_should_stop()) {
-                    SRV_DBG("%s", "stopping streaming due to should_stop condition\n");
-                    return false; // should_stop condition met
-                }
-
-                if (!res_this->data.empty()) {
-                    // flush the first chunk
-                    output = std::move(res_this->data);
-                    res_this->data.clear();
-                    return true;
-                }
-
-                server_response_reader & rd = res_this->rd;
-
-                // check if there is more data
-                if (!rd.has_next()) {
-                    switch (res_type) {
-                        case TASK_RESPONSE_TYPE_NONE:
-                        case TASK_RESPONSE_TYPE_OAI_RESP:
-                        case TASK_RESPONSE_TYPE_ANTHROPIC:
-                            output = "";
-                            break;
-
-                        default:
-                            output = "data: [DONE]\n\n";
-                            break;
-                    }
-                    SRV_DBG("%s", "all results received, terminating stream\n");
-                    return false; // no more data, terminate
-                }
-
-                // receive subsequent results
-                bool timeout = false;
-                int64_t start_time = ggml_time_ms();
-                auto result = rd.next([&timeout, &start_time, sse_ping_interval, &effective_should_stop]() {
-                    if (effective_should_stop()) {
-                        return true; // should_stop condition met
-                    } else if (sse_ping_interval > 0 && ggml_time_ms() - start_time > (int64_t)sse_ping_interval * 1000) {
-                        timeout = true;
-                        return true; // timeout
-                    }
-                    return false;
-                });
-
-                if (timeout) {
-                    // some clients may time out (e.g. undici) will time out if no data is received for a while, so we need to send a ping to keep the connection alive
-                    SRV_DBG("%s", "sending SSE ping\n");
-                    output = ":\n\n";
-                    return true;
-                }
-
-                if (result == nullptr) {
-                    SRV_DBG("%s", "stopping streaming due to should_stop condition\n");
-                    GGML_ASSERT(effective_should_stop());
-                    return false; // should_stop condition met
-                }
-
-                // send the results
-                if (result->is_error()) {
-                    json res_json = result->to_json();
-                    output = format_error(res_type, res_json);
-                    SRV_DBG("%s", "error received during streaming, terminating stream\n");
-                    return false; // terminate on error
-                } else {
-                    GGML_ASSERT(
-                        dynamic_cast<server_task_result_cmpl_partial*>(result.get()) != nullptr
-                        || dynamic_cast<server_task_result_cmpl_final*>(result.get()) != nullptr
-                    );
-                    json res_json = result->to_json();
-                    if (res_type == TASK_RESPONSE_TYPE_ANTHROPIC) {
-                        output = format_anthropic_sse(res_json);
-                    } else if (res_type == TASK_RESPONSE_TYPE_OAI_RESP) {
-                        output = format_oai_resp_sse(res_json);
-                    } else {
-                        output = format_oai_sse(res_json);
-                    }
-                }
-
-                // has next data, continue
-                return true;
-
-            } catch (const std::exception & e) {
-                json error_json = format_error_response(e.what(), ERROR_TYPE_SERVER);
-                output = format_error(res_type, error_json);
-
-                // terminate on exception
-                return false;
-            }
-        });
+    };
+    auto first = next(req.should_stop);
+    if (first.status.type == llama_engine::event_type::error) {
+        res->error(error_json(first.status));
+        return res;
+    }
+    if (!first.result && first.status.type != llama_engine::event_type::success) {
+        res->engine_request->cancel();
+        return res; // connection closed, cancelled or stopped
     }
 
+    if (!state->stream) {
+        std::vector<json> results(state->complete.size());
+        for (auto item = std::move(first);; item = next(req.should_stop)) {
+            if (item.result) {
+                results[item.result->index] = item.result->to_json();
+                continue;
+            }
+            if (item.status.type == llama_engine::event_type::error) {
+                res->error(error_json(item.status));
+            } else if (item.status.type == llama_engine::event_type::success) {
+                json arr = json::array();
+                for (auto & result : results) {
+                    arr.push_back(std::move(result));
+                }
+                // if single request, return single object instead of array
+                if (op == llama_engine::operation::metrics) {
+                    res->headers["Process-Start-Time-Unix"] = std::to_string(arr[0].at("t_start").get<int64_t>());
+                    res->content_type = "text/plain; version=0.0.4";
+                    res->status = 200;
+                    res->data = format_metrics(arr[0]);
+                } else {
+                    res->ok(state->assemble ? state->assemble(std::move(arr)) : (arr.size() == 1 ? arr[0] : arr));
+                }
+            } else {
+                res->engine_request->cancel(); // connection closed
+            }
+            return res;
+        }
+    }
+
+    const int32_t sse_ping_interval = state->sse_ping_interval;
+    auto format = [type = state->format](const json & value) {
+        if (type == TASK_RESPONSE_TYPE_ANTHROPIC) { return format_anthropic_sse(value); }
+        if (type == TASK_RESPONSE_TYPE_OAI_RESP) { return format_oai_resp_sse(value); }
+        return format_oai_sse(value);
+    };
+    auto format_error = [type = state->format](const json & value) {
+        return type == TASK_RESPONSE_TYPE_ANTHROPIC
+            ? format_anthropic_sse({{"event", "error"}, {"data", value}})
+            : format_oai_sse(json {{"error", value}});
+    };
+    json first_json = first.result ? first.result->to_json() : json();
+    res->data = first_json == nullptr ? "" : format(first_json);
+    res->status = 200;
+    res->content_type = "text/event-stream";
+    res->set_next([res_this = res.get(), state, error_json, sse_ping_interval, format, format_error](std::string & output) -> bool {
+        try {
+            if (res_this->should_stop()) {
+                res_this->engine_request->cancel();
+                return false;
+            }
+            if (!res_this->data.empty()) {
+                output = std::move(res_this->data);
+                res_this->data.clear();
+                return true;
+            }
+            const int64_t start_time = ggml_time_ms();
+            for (;;) {
+                if (res_this->should_stop()) {
+                    res_this->engine_request->cancel();
+                    return false;
+                }
+                auto item = state->read_native(std::chrono::seconds(HTTP_POLLING_SECONDS));
+                if (item.status.type == llama_engine::event_type::timeout) {
+                    if (sse_ping_interval > 0 && ggml_time_ms() - start_time > (int64_t) sse_ping_interval * 1000) {
+                        // keep clients with idle timeouts connected
+                        output = ":\n\n";
+                        return true;
+                    }
+                    continue;
+                }
+                if (item.result) {
+                    output = format(item.result->to_json());
+                    return true;
+                }
+                output = item.status.type == llama_engine::event_type::error
+                    ? format_error(error_json(item.status)) : "";
+                if (item.status.type == llama_engine::event_type::success &&
+                    state->format != TASK_RESPONSE_TYPE_NONE && state->format != TASK_RESPONSE_TYPE_OAI_RESP &&
+                    state->format != TASK_RESPONSE_TYPE_ANTHROPIC) { output = "data: [DONE]\n\n"; }
+                return false;
+            }
+        } catch (const std::exception & e) {
+            output = format_error(format_error_response(e.what(), ERROR_TYPE_SERVER));
+            return false;
+        }
+    });
     return res;
 }
 
 std::unique_ptr<server_res_generator> server_routes::create_response(bool bypass_sleep) {
-    return std::make_unique<server_res_generator>(queue_tasks, queue_results, params.sleep_idle_seconds, bypass_sleep);
+    return std::make_unique<server_res_generator>(queue_tasks, params.sleep_idle_seconds, bypass_sleep);
 }
 
 server_routes::server_routes(const common_params & params, server_context & ctx_server)
         : params(params),
           ctx_server(ctx_server),
-          queue_tasks(ctx_server.tasks()),
-          queue_results(ctx_server.responses()) {
+          queue_tasks(ctx_server.tasks()) {
     init_routes();
 
-    // note: this must be registered before load_model()
-    //       so that on sleep phase, the callback is called before ctx is destroyed
-    queue_tasks.on_sleeping_state([this](bool is_sleeping) {
-        update_cached_responses(is_sleeping);
-    });
-}
 
-static json get_res_model_info(const server_context_meta & meta) {
-    // note: do NOT use ctx_server here, otherwise it's not possible to use this during sleep
-
-    return {
-        {"id",       meta.model_name},
-        {"aliases",  meta.model_aliases},
-        {"tags",     meta.model_tags},
-        {"object",   "model"},
-        {"created",  std::time(0)},
-        {"owned_by", "llamacpp"},
-        {"meta",     {
-            {"vocab_type",  meta.model_vocab_type},
-            {"n_vocab",     meta.model_vocab_n_tokens},
-            {"n_ctx",       meta.slot_n_ctx},
-            {"n_ctx_train", meta.model_n_ctx_train},
-            {"n_embd",      meta.model_n_embd_inp},
-            {"n_params",    meta.model_n_params},
-            {"size",        meta.model_size},
-            {"ftype",       meta.model_ftype},
-        }},
-    };
-}
-
-static json get_res_models(const server_context_meta & meta) {
-    // note: do NOT use ctx_server here, otherwise it's not possible to use this during sleep
-
-    return json{
-        {"models", json::array({
-            {
-                {"name",  meta.model_name},
-                {"model", meta.model_name},
-                {"modified_at", ""},
-                {"size", ""},
-                {"digest", ""}, // dummy value, llama.cpp does not support managing model file's hash
-                {"type", "model"},
-                {"description", ""},
-                {"tags", json::array({""})},
-                {"capabilities", meta.has_mtmd ? json::array({"completion","multimodal"}) : json::array({"completion"})},
-                {"parameters", ""},
-                {"details", {
-                    {"parent_model", ""},
-                    {"format", "gguf"},
-                    {"family", ""},
-                    {"families", json::array({""})},
-                    {"parameter_size", ""},
-                    {"quantization_level", ""}
-                }}
-            }
-        })},
-        {"object", "list"},
-        {"data", json::array({
-            get_res_model_info(meta),
-        })}
-    };
-}
-
-static json get_res_props(const server_context_meta & meta, const common_params & params, bool is_sleeping) {
-    // note: do NOT use ctx_server here, otherwise it's not possible to use this during sleep
-
-    task_params tparams;
-    tparams.sampling = params.sampling;
-    json default_generation_settings_for_props = json {
-        { "params", tparams.to_json(true) },
-        { "n_ctx",  meta.slot_n_ctx },
-    };
-
-    std::string tmpl_default = common_chat_templates_source(meta.chat_params.tmpls.get(), "");
-    std::string tmpl_tools   = common_chat_templates_source(meta.chat_params.tmpls.get(), "tool_use");
-
-    json props = {
-        { "default_generation_settings", default_generation_settings_for_props },
-        { "total_slots",                 params.n_parallel },
-        { "model_alias",                 meta.model_name },
-        { "model_ftype",                 meta.model_ftype },
-        { "model_path",                  meta.model_path },
-        { "modalities",                  json {
-            {"vision", meta.has_inp_image},
-            {"video",  meta.has_inp_video},
-            {"audio",  meta.has_inp_audio},
-        } },
-        { "media_marker",                get_media_marker() },
-        { "endpoint_slots",              params.endpoint_slots },
-        { "endpoint_props",              params.endpoint_props },
-        { "endpoint_metrics",            params.endpoint_metrics },
-        { "ui",                          params.ui },
-        { "ui_settings",                 meta.json_ui_settings },
-        { "chat_template",               tmpl_default },
-        { "chat_template_caps",          meta.chat_template_caps },
-        { "bos_token",                   meta.bos_token_str },
-        { "eos_token",                   meta.eos_token_str },
-        { "build_info",                  meta.build_info },
-        { "is_sleeping",                 is_sleeping },
-        { "cors_proxy_enabled",          params.ui_mcp_proxy },
-    };
-    if (params.use_jinja) {
-        if (!tmpl_tools.empty()) {
-            props["chat_template_tool_use"] = tmpl_tools;
-        }
-    }
-
-    return props;
 }
 
 json server_routes::get_model_info() const {
-    return get_res_model_info(*meta);
+    return llama_engine::detail::engine_model_info(*meta);
 }
 
 void server_routes::init_routes() {
-    // IMPORTANT: all lambda functions must start with create_response()
-    // this is to ensure that the server_res_generator can handle sleeping case correctly
+    // handle_operation pins model resources through preparation and admission.
+    // Transport-only guards use create_response() with the historical sleep policy.
 
     this->get_health = [this](const server_http_req &) {
         // error and loading states are handled by middleware
@@ -413,107 +211,21 @@ void server_routes::init_routes() {
     };
 
     this->get_metrics = [this](const server_http_req & req) {
-        auto res = create_response(true);
         if (!params.endpoint_metrics) {
+            auto res = create_response(true);
             res->error(format_error_response("This server does not support metrics endpoint. Start it with `--metrics`", ERROR_TYPE_NOT_SUPPORTED));
             return res;
         }
-
-        // render response using cached_metrics
-        auto use_cached_metrics = [&]() {
-            std::unique_lock<std::mutex> lock(mutex_cache);
-            res->headers["Process-Start-Time-Unix"] = std::to_string(cached_metrics.t_start);
-            server_task_result_metrics tmp;
-            tmp.metrics = cached_metrics;
-            res->content_type = "text/plain; version=0.0.4";
-            res->status = 200;
-            res->data = tmp.to_metrics();
-            // the gauges are averaged over the window between two scrapes
-            cached_metrics.reset_bucket();
-            should_reset_buckets = true;
-        };
-
-        if (queue_tasks.is_sleeping()) {
-            use_cached_metrics();
-
-        } else {
-            // request slots data using task queue
-            {
-                server_task task(SERVER_TASK_TYPE_METRICS);
-                task.id = res->rd.get_new_id();
-                // the gauges are averaged over the window between two scrapes
-                task.metrics_reset_bucket = true;
-                res->rd.post_task(std::move(task), true); // high-priority task
-            }
-
-            // a task posted right before sleeping is never processed, do not wait for it
-            auto result = res->rd.next([&]{
-                return req.should_stop() || queue_tasks.is_sleeping();
-            });
-            if (!result) {
-                if (!req.should_stop()) {
-                    use_cached_metrics();
-                }
-                return res;
-            }
-
-            if (result->is_error()) {
-                res->error(result->to_json());
-                return res;
-            }
-
-            auto res_task = dynamic_cast<server_task_result_metrics*>(result.get());
-            GGML_ASSERT(res_task != nullptr);
-
-            res->headers["Process-Start-Time-Unix"] = std::to_string(res_task->metrics.t_start);
-            res->content_type = "text/plain; version=0.0.4";
-            res->status = 200;
-            res->data = res_task->to_metrics();
-        }
-
-        return res;
+        return handle_operation(req, llama_engine::operation::metrics, json::object());
     };
 
     this->get_slots = [this](const server_http_req & req) {
-        auto res = create_response();
         if (!params.endpoint_slots) {
+            auto res = create_response();
             res->error(format_error_response("This server does not support slots endpoint. Start it with `--slots`", ERROR_TYPE_NOT_SUPPORTED));
             return res;
         }
-
-        // request slots data using task queue
-        {
-            server_task task(SERVER_TASK_TYPE_SLOT_GET);
-            task.id = res->rd.get_new_id();
-            res->rd.post_task(std::move(task), true); // high-priority task
-        }
-
-        // get the result
-        auto result = res->rd.next(req.should_stop);
-        if (!result) {
-            // connection was closed
-            GGML_ASSERT(req.should_stop());
-            return res;
-        }
-
-        if (result->is_error()) {
-            res->error(result->to_json());
-            return res;
-        }
-
-        auto * res_task = dynamic_cast<server_task_result_slots*>(result.get());
-        GGML_ASSERT(res_task != nullptr);
-
-        // optionally return "fail_on_no_slot" error
-        if (!req.get_param("fail_on_no_slot").empty()) {
-            if (res_task->n_idle_slots == 0) {
-                res->error(format_error_response("no slot available", ERROR_TYPE_UNAVAILABLE));
-                return res;
-            }
-        }
-
-        res->ok(res_task->to_json());
-        return res;
+        return handle_operation(req, llama_engine::operation::slots, {{"fail_on_no_slot", !req.get_param("fail_on_no_slot").empty()}});
     };
 
     this->post_slots = [this](const server_http_req & req) {
@@ -549,872 +261,117 @@ void server_routes::init_routes() {
         return res;
     };
 
-    this->get_props = [this](const server_http_req &) {
-        auto res = create_response(true);
-        // note: do NOT use ctx_server here, this endpoint must be accessible during sleep
-        if (queue_tasks.is_sleeping()) {
-            std::unique_lock<std::mutex> lock(mutex_cache);
-            res->ok(cached_props);
-        } else {
-            res->ok(get_res_props(*meta, params, false));
-        }
-        return res;
+    this->get_props = [this](const server_http_req & req) {
+        return handle_operation(req, llama_engine::operation::properties, json::object());
     };
 
-    this->post_props = [this](const server_http_req &) {
+    this->post_props = [this](const server_http_req & req) {
         auto res = create_response();
         if (!params.endpoint_props) {
             res->error(format_error_response("This server does not support changing global properties. Start it with `--props`", ERROR_TYPE_NOT_SUPPORTED));
             return res;
         }
-        // update any props here
-
-        res->ok({{ "success", true }});
-        return res;
+        return handle_operation(req, llama_engine::operation::properties_update, json::object());
     };
 
     this->post_infill = [this](const server_http_req & req) {
-        auto res = create_response();
-        // check model compatibility
-        std::string err;
-        if (llama_vocab_fim_pre(ctx_server.vocabulary()) == LLAMA_TOKEN_NULL) {
-            err += "prefix token is missing. ";
-        }
-        if (llama_vocab_fim_suf(ctx_server.vocabulary()) == LLAMA_TOKEN_NULL) {
-            err += "suffix token is missing. ";
-        }
-        if (llama_vocab_fim_mid(ctx_server.vocabulary()) == LLAMA_TOKEN_NULL) {
-            err += "middle token is missing. ";
-        }
-        if (!err.empty()) {
-            res->error(format_error_response(string_format("Infill is not supported by this model: %s", err.c_str()), ERROR_TYPE_NOT_SUPPORTED));
-            return res;
-        }
-
-        // validate input
-        json data = json::parse(req.body);
-        if (data.contains("prompt") && !data.at("prompt").is_string()) {
-            // prompt is optional
-            res->error(format_error_response("\"prompt\" must be a string", ERROR_TYPE_INVALID_REQUEST));
-        }
-
-        if (!data.contains("input_prefix")) {
-            res->error(format_error_response("\"input_prefix\" is required", ERROR_TYPE_INVALID_REQUEST));
-        }
-
-        if (!data.contains("input_suffix")) {
-            res->error(format_error_response("\"input_suffix\" is required", ERROR_TYPE_INVALID_REQUEST));
-        }
-
-        if (data.contains("input_extra") && !data.at("input_extra").is_array()) {
-            // input_extra is optional
-            res->error(format_error_response("\"input_extra\" must be an array of {\"filename\": string, \"text\": string}", ERROR_TYPE_INVALID_REQUEST));
-            return res;
-        }
-
-        json input_extra = json_value(data, "input_extra", json::array());
-        for (const auto & chunk : input_extra) {
-            // { "text": string, "filename": string }
-            if (!chunk.contains("text") || !chunk.at("text").is_string()) {
-                res->error(format_error_response("extra_context chunk must contain a \"text\" field with a string value", ERROR_TYPE_INVALID_REQUEST));
-                return res;
-            }
-            // filename is optional
-            if (chunk.contains("filename") && !chunk.at("filename").is_string()) {
-                res->error(format_error_response("extra_context chunk's \"filename\" field must be a string", ERROR_TYPE_INVALID_REQUEST));
-                return res;
-            }
-        }
-        data["input_extra"] = input_extra; // default to empty array if it's not exist
-
-        std::string prompt = json_value(data, "prompt", std::string());
-        std::vector<server_tokens> tokenized_prompts = tokenize_input_prompts(ctx_server.vocabulary(), ctx_server.multimodal(), prompt, false, true, ctx_server.media_options());
-        SRV_DBG("creating infill tasks, n_prompts = %d\n", (int) tokenized_prompts.size());
-        data["prompt"] = format_prompt_infill(
-            ctx_server.vocabulary(),
-            data.at("input_prefix"),
-            data.at("input_suffix"),
-            data.at("input_extra"),
-            params.n_batch,
-            params.n_predict,
-            meta->slot_n_ctx,
-            params.spm_infill,
-            tokenized_prompts[0].get_tokens() // TODO: this could maybe be multimodal.
-        );
-
-        std::vector<raw_buffer> files; // dummy
-        return handle_completions_impl(
-            req,
-            SERVER_TASK_TYPE_INFILL,
-            data,
-            files,
-            TASK_RESPONSE_TYPE_NONE); // infill is not OAI compatible
+        return handle_operation(req, llama_engine::operation::infill);
     };
 
     this->post_completions = [this](const server_http_req & req) {
-        // Same observable behavior as handle_completions_impl for the native
-        // format; preparation and decoding are owned by the engine.
-        auto res = create_response();
-        res->set_req(&req);
-        const json body = json::parse(req.body);
-        auto state = std::make_shared<llama_engine::detail::request_state>();
-        res->engine_request = std::make_shared<llama_engine::request>(state); // cancels on destruction
-        llama_engine::detail::submit_native(ctx_server.runtime, state, body);
-        auto error_json = [](const llama_engine::event & item) {
-            if (item.data.is_object() && item.data.contains("code")) {
-                return json::parse(item.data.dump());
-            }
-            auto type = item.category == "invalid_request" ? ERROR_TYPE_INVALID_REQUEST : ERROR_TYPE_SERVER;
-            return format_error_response(item.message, type);
-        };
-        auto next = [state](const std::function<bool()> & should_stop) {
-            for (;;) {
-                if (should_stop()) {
-                    return llama_engine::detail::native_item {{llama_engine::event_type::cancelled, nullptr, "closed", {}}, nullptr};
-                }
-                auto item = state->read_native(std::chrono::seconds(HTTP_POLLING_SECONDS));
-                if (item.status.type != llama_engine::event_type::timeout) { return item; }
-            }
-        };
-        auto first = next(req.should_stop);
-        if (first.status.type == llama_engine::event_type::error) {
-            res->error(error_json(first.status));
-            return res;
-        }
-        if (!first.result && first.status.type != llama_engine::event_type::success) {
-            res->engine_request->cancel();
-            return res; // connection closed, cancelled or stopped
-        }
-
-        if (!state->stream) {
-            std::vector<json> results(state->complete.size());
-            for (auto item = std::move(first);; item = next(req.should_stop)) {
-                if (item.result) {
-                    results[item.result->index] = item.result->to_json();
-                    continue;
-                }
-                if (item.status.type == llama_engine::event_type::error) {
-                    res->error(error_json(item.status));
-                } else if (item.status.type == llama_engine::event_type::success) {
-                    json arr = json::array();
-                    for (auto & result : results) {
-                        arr.push_back(std::move(result));
-                    }
-                    // if single request, return single object instead of array
-                    res->ok(arr.size() == 1 ? arr[0] : arr);
-                } else {
-                    res->engine_request->cancel(); // connection closed
-                }
-                return res;
-            }
-        }
-
-        // validated by the task schema during submission
-        const int32_t sse_ping_interval = json_value(body, "sse_ping_interval", params.sse_ping_interval);
-        json first_json = first.result ? first.result->to_json() : json();
-        res->data = first_json == nullptr ? "" : format_oai_sse(first_json);
-        res->status = 200;
-        res->content_type = "text/event-stream";
-        res->set_next([res_this = res.get(), state, error_json, sse_ping_interval](std::string & output) -> bool {
-            try {
-                if (res_this->should_stop()) {
-                    res_this->engine_request->cancel();
-                    return false;
-                }
-                if (!res_this->data.empty()) {
-                    output = std::move(res_this->data);
-                    res_this->data.clear();
-                    return true;
-                }
-                const int64_t start_time = ggml_time_ms();
-                for (;;) {
-                    if (res_this->should_stop()) {
-                        res_this->engine_request->cancel();
-                        return false;
-                    }
-                    auto item = state->read_native(std::chrono::seconds(HTTP_POLLING_SECONDS));
-                    if (item.status.type == llama_engine::event_type::timeout) {
-                        if (sse_ping_interval > 0 && ggml_time_ms() - start_time > (int64_t) sse_ping_interval * 1000) {
-                            // keep clients with idle timeouts connected
-                            output = ":\n\n";
-                            return true;
-                        }
-                        continue;
-                    }
-                    if (item.result) {
-                        output = format_oai_sse(item.result->to_json());
-                        return true;
-                    }
-                    output = item.status.type == llama_engine::event_type::error
-                        ? format_oai_sse(json {{"error", error_json(item.status)}}) : "";
-                    return false;
-                }
-            } catch (const std::exception & e) {
-                output = format_oai_sse(json {{"error", format_error_response(e.what(), ERROR_TYPE_SERVER)}});
-                return false;
-            }
-        });
-        return res;
+        return handle_operation(req, llama_engine::operation::completion);
     };
 
     this->post_completions_oai = [this](const server_http_req & req) {
-        auto res = create_response();
-        std::vector<raw_buffer> files; // dummy
-        const json body = json::parse(req.body);
-        return handle_completions_impl(
-            req,
-            SERVER_TASK_TYPE_COMPLETION,
-            body,
-            files,
-            TASK_RESPONSE_TYPE_OAI_CMPL);
+        return handle_operation(req, llama_engine::operation::completions);
     };
 
     this->post_chat_completions = [this](const server_http_req & req) {
-        auto res = create_response();
-        std::vector<raw_buffer> files;
-        json body = json::parse(req.body);
-        json body_parsed = oaicompat_chat_params_parse(
-            body,
-            meta->chat_params,
-            files);
-        return handle_completions_impl(
-            req,
-            SERVER_TASK_TYPE_COMPLETION,
-            body_parsed,
-            files,
-            TASK_RESPONSE_TYPE_OAI_CHAT);
+        return handle_operation(req, llama_engine::operation::chat);
     };
 
     this->post_chat_completions_tok = [this](const server_http_req & req) {
-        return handle_count_tokens(req, TASK_RESPONSE_TYPE_OAI_CHAT);
+        return handle_operation(req, llama_engine::operation::chat_tokens);
     };
 
     this->post_control = [this](const server_http_req & req) {
-        auto res = create_response();
-        const json body = json::parse(req.body);
-
-        const std::string cmpl_id = json_value(body, "id", std::string());
-        const std::string action  = json_value(body, "action", std::string());
-        if (cmpl_id.empty()) {
-            res->error(format_error_response("missing completion id", ERROR_TYPE_INVALID_REQUEST));
-            return res;
-        }
-        if (action != "reasoning_end") {
-            res->error(format_error_response("unknown control action", ERROR_TYPE_INVALID_REQUEST));
-            return res;
-        }
-
-        auto & rd = res->rd;
-        {
-            server_task task(SERVER_TASK_TYPE_CONTROL);
-            task.id              = rd.get_new_id();
-            task.params.control_cmpl_id = cmpl_id;
-            task.params.control_action  = action;
-            rd.post_task(std::move(task));
-        }
-
-        auto result = rd.next(req.should_stop);
-        if (!result) {
-            GGML_ASSERT(req.should_stop());
-            return res;
-        }
-        if (result->is_error()) {
-            res->error(result->to_json());
-            return res;
-        }
-        res->ok(result->to_json());
-        return res;
+        return handle_operation(req, llama_engine::operation::control);
     };
 
     this->post_responses_oai = [this](const server_http_req & req) {
-        auto res = create_response();
-        std::vector<raw_buffer> files;
-        json body = server_chat_convert_responses_to_chatcmpl(json::parse(req.body));
-        SRV_DBG("%s\n", "Request converted: OpenAI Responses -> OpenAI Chat Completions");
-        SRV_DBG("converted request: %s\n", body.dump().c_str());
-        json body_parsed = oaicompat_chat_params_parse(
-            body,
-            meta->chat_params,
-            files);
-        return handle_completions_impl(
-            req,
-            SERVER_TASK_TYPE_COMPLETION,
-            body_parsed,
-            files,
-            TASK_RESPONSE_TYPE_OAI_RESP);
+        return handle_operation(req, llama_engine::operation::responses);
     };
 
     this->post_responses_tok_oai = [this](const server_http_req & req) {
-        return handle_count_tokens(req, TASK_RESPONSE_TYPE_OAI_RESP);
+        return handle_operation(req, llama_engine::operation::response_tokens);
     };
 
     this->post_transcriptions_oai = [this](const server_http_req & req) {
-        auto res = create_response();
-
-        if (!meta->has_mtmd || !meta->chat_params.allow_audio) {
-            res->error(format_error_response("The current model does not support audio input.", ERROR_TYPE_NOT_SUPPORTED));
-            return res;
-        }
-
-        std::vector<raw_buffer> files;
-        json body = convert_transcriptions_to_chatcmpl(
-            json::parse(req.body),
-            meta->chat_params.tmpls.get(),
-            req.files,
-            files);
-        SRV_DBG("%s\n", "Request converted: OpenAI Transcriptions -> OpenAI Chat Completions");
-        SRV_DBG("converted request: %s\n", body.dump().c_str());
-        json body_parsed = oaicompat_chat_params_parse(
-            body,
-            meta->chat_params,
-            files);
-        return handle_completions_impl(
-            req,
-            SERVER_TASK_TYPE_COMPLETION,
-            body_parsed,
-            files,
-            TASK_RESPONSE_TYPE_OAI_ASR);
+        std::vector<llama_engine::attachment> files;
+        for (const auto & file : req.files) { files.push_back({file.first, file.second.data}); }
+        return handle_operation(req, llama_engine::operation::transcription, nullptr, files);
     };
 
     this->post_anthropic_messages = [this](const server_http_req & req) {
-        auto res = create_response();
-        std::vector<raw_buffer> files;
-        json body = server_chat_convert_anthropic_to_oai(json::parse(req.body));
-        SRV_DBG("%s\n", "Request converted: Anthropic -> OpenAI Chat Completions");
-        SRV_DBG("converted request: %s\n", body.dump().c_str());
-        json body_parsed = oaicompat_chat_params_parse(
-            body,
-            meta->chat_params,
-            files);
-        return handle_completions_impl(
-            req,
-            SERVER_TASK_TYPE_COMPLETION,
-            body_parsed,
-            files,
-            TASK_RESPONSE_TYPE_ANTHROPIC);
+        return handle_operation(req, llama_engine::operation::messages);
     };
 
     this->post_anthropic_count_tokens = [this](const server_http_req & req) {
-        return handle_count_tokens(req, TASK_RESPONSE_TYPE_ANTHROPIC);
+        return handle_operation(req, llama_engine::operation::message_tokens);
     };
 
     // same with handle_chat_completions, but without inference part
     this->post_apply_template = [this](const server_http_req & req) {
-        auto res = create_response();
-        std::vector<raw_buffer> files; // dummy, unused
-        json body = json::parse(req.body);
-        json data = oaicompat_chat_params_parse(
-            body,
-            meta->chat_params,
-            files);
-        res->ok({{ "prompt", std::move(data.at("prompt")) }});
-        return res;
+        return handle_operation(req, llama_engine::operation::apply_template);
     };
 
-    this->get_models = [this](const server_http_req &) {
-        auto res = create_response(true);
-        // note: do NOT use ctx_server here, this endpoint must be accessible during sleep
-        if (queue_tasks.is_sleeping()) {
-            std::unique_lock<std::mutex> lock(mutex_cache);
-            res->ok(cached_models);
-        } else {
-            res->ok(get_res_models(*meta));
-        }
-        return res;
+    this->get_models = [this](const server_http_req & req) {
+        return handle_operation(req, llama_engine::operation::models, json::object());
     };
 
     this->post_tokenize = [this](const server_http_req & req) {
-        auto res = create_response();
-        const json body = json::parse(req.body);
-        json tokens_response = json::array();
-        if (body.count("content") != 0) {
-            const bool add_special = json_value(body, "add_special", false);
-            const bool parse_special = json_value(body, "parse_special", true);
-            const bool with_pieces = json_value(body, "with_pieces", false);
-
-            llama_tokens tokens = tokenize_mixed(ctx_server.vocabulary(), body.at("content"), add_special, parse_special);
-
-            if (with_pieces) {
-                for (const auto& token : tokens) {
-                    std::string piece = common_token_to_piece(ctx_server.vocabulary(), token);
-                    json piece_json;
-
-                    // Check if the piece is valid UTF-8
-                    if (is_valid_utf8(piece)) {
-                        piece_json = piece;
-                    } else {
-                        // If not valid UTF-8, store as array of byte values
-                        piece_json = json::array();
-                        for (unsigned char c : piece) {
-                            piece_json.push_back(static_cast<int>(c));
-                        }
-                    }
-
-                    tokens_response.push_back({
-                        {"id", token},
-                        {"piece", piece_json}
-                    });
-                }
-            } else {
-                tokens_response = tokens;
-            }
-        }
-
-        res->ok(json{{"tokens", std::move(tokens_response)}});
-        return res;
+        return handle_operation(req, llama_engine::operation::tokenize);
     };
 
     this->post_detokenize = [this](const server_http_req & req) {
-        auto res = create_response();
-        const json body = json::parse(req.body);
-
-        std::string content;
-        if (body.count("tokens") != 0) {
-            const llama_tokens tokens = body.at("tokens").get<llama_tokens>();
-            content = tokens_to_str(ctx_server.vocabulary(), tokens);
-        }
-
-        res->ok(json{{"content", std::move(content)}});
-        return res;
+        return handle_operation(req, llama_engine::operation::detokenize);
     };
 
     this->post_embeddings = [this](const server_http_req & req) {
-        return handle_embeddings_impl(req, TASK_RESPONSE_TYPE_NONE);
+        return handle_operation(req, llama_engine::operation::embeddings);
     };
 
     this->post_embeddings_oai = [this](const server_http_req & req) {
-        return handle_embeddings_impl(req, TASK_RESPONSE_TYPE_OAI_EMBD);
+        return handle_operation(req, llama_engine::operation::embeddings_openai);
     };
 
     this->post_rerank = [this](const server_http_req & req) {
-        auto res = create_response();
-        if (!params.embedding || params.pooling_type != LLAMA_POOLING_TYPE_RANK) {
-            res->error(format_error_response("This server does not support reranking. Start it with `--reranking`", ERROR_TYPE_NOT_SUPPORTED));
-            return res;
-        }
-
-        const json body = json::parse(req.body);
-
-        // if true, use TEI API format, otherwise use Jina API format
-        // Jina: https://jina.ai/reranker/
-        // TEI: https://huggingface.github.io/text-embeddings-inference/#/Text%20Embeddings%20Inference/rerank
-        bool is_tei_format = body.contains("texts");
-
-        json query;
-        if (body.count("query") == 1) {
-            query = body.at("query");
-            if (!query.is_string()) {
-                res->error(format_error_response("\"query\" must be a string", ERROR_TYPE_INVALID_REQUEST));
-                return res;
-            }
-        } else {
-            res->error(format_error_response("\"query\" must be provided", ERROR_TYPE_INVALID_REQUEST));
-            return res;
-        }
-
-        std::vector<std::string> documents = json_value(body, "documents",
-                                             json_value(body, "texts", std::vector<std::string>()));
-        if (documents.empty()) {
-            res->error(format_error_response("\"documents\" must be a non-empty string array", ERROR_TYPE_INVALID_REQUEST));
-            return res;
-        }
-
-        int top_n = json_value(body, "top_n", (int)documents.size());
-
-        // create and queue the task
-        json responses = json::array();
-        auto & rd = res->rd;
-        {
-            std::vector<server_task> tasks;
-            tasks.reserve(documents.size());
-            for (size_t i = 0; i < documents.size(); i++) {
-                auto tmp = format_prompt_rerank(ctx_server.model(), ctx_server.vocabulary(), ctx_server.multimodal(), query, documents[i], ctx_server.media_options());
-                server_task task = server_task(SERVER_TASK_TYPE_RERANK);
-                task.id     = rd.get_new_id();
-                task.tokens = std::move(tmp);
-                tasks.push_back(std::move(task));
-            }
-            rd.post_tasks(std::move(tasks));
-        }
-
-        // wait for the results
-        auto all_results = rd.wait_for_all(req.should_stop);
-
-        // collect results
-        if (all_results.is_terminated) {
-            return res; // connection is closed
-        } else if (all_results.error) {
-            res->error(all_results.error->to_json());
-            return res;
-        } else {
-            for (auto & res : all_results.results) {
-                GGML_ASSERT(dynamic_cast<server_task_result_rerank*>(res.get()) != nullptr);
-                responses.push_back(res->to_json());
-            }
-        }
-
-        // write JSON response
-        json root = format_response_rerank(
-            body,
-            meta->model_name,
-            responses,
-            is_tei_format,
-            documents,
-            top_n);
-
-        res->ok(root);
-        return res;
+        return handle_operation(req, llama_engine::operation::rerank);
     };
 
     this->get_lora_adapters = [this](const server_http_req & req) {
-        auto res = create_response();
-
-        auto & rd = res->rd;
-        {
-            server_task task(SERVER_TASK_TYPE_GET_LORA);
-            task.id = rd.get_new_id();
-            rd.post_task(std::move(task));
-        }
-
-        // get the result
-        auto result = rd.next(req.should_stop);
-        if (!result) {
-            // connection was closed
-            GGML_ASSERT(req.should_stop());
-            return res;
-        }
-
-        if (result->is_error()) {
-            res->error(result->to_json());
-            return res;
-        }
-
-        GGML_ASSERT(dynamic_cast<server_task_result_get_lora*>(result.get()) != nullptr);
-        res->ok(result->to_json());
-        return res;
+        return handle_operation(req, llama_engine::operation::lora_list, json::object());
     };
 
     this->post_lora_adapters = [this](const server_http_req & req) {
-        auto res = create_response();
-        const json body = json::parse(req.body);
-        if (!body.is_array()) {
-            res->error(format_error_response("Request body must be an array", ERROR_TYPE_INVALID_REQUEST));
-            return res;
-        }
-
-        auto & rd = res->rd;
-        {
-            server_task task(SERVER_TASK_TYPE_SET_LORA);
-            task.id = rd.get_new_id();
-            task.set_lora = parse_lora_request(body);
-            rd.post_task(std::move(task));
-        }
-
-        // get the result
-        auto result = rd.next(req.should_stop);
-        if (!result) {
-            // connection was closed
-            GGML_ASSERT(req.should_stop());
-            return res;
-        }
-
-        if (result->is_error()) {
-            res->error(result->to_json());
-            return res;
-        }
-
-        GGML_ASSERT(dynamic_cast<server_task_result_apply_lora*>(result.get()) != nullptr);
-        res->ok(result->to_json());
-        return res;
+        return handle_operation(req, llama_engine::operation::lora_apply);
     };
 }
 
 std::unique_ptr<server_res_generator> server_routes::handle_slots_save(const server_http_req & req, int id_slot) {
-    auto res = create_response();
-    const json request_data = json::parse(req.body);
-    std::string filename = request_data.at("filename");
-    if (!fs_validate_filename(filename)) {
-        res->error(format_error_response("Invalid filename", ERROR_TYPE_INVALID_REQUEST));
-        return res;
-    }
-    std::string filepath = params.slot_save_path + filename;
-
-    auto & rd = res->rd;
-    {
-        server_task task(SERVER_TASK_TYPE_SLOT_SAVE);
-        task.id = rd.get_new_id();
-        task.slot_action.id_slot  = id_slot;
-        task.slot_action.filename = filename;
-        task.slot_action.filepath = filepath;
-        rd.post_task(std::move(task));
-    }
-
-    auto result = rd.next(req.should_stop);
-    if (!result) {
-        // connection was closed
-        GGML_ASSERT(req.should_stop());
-        return res;
-    }
-
-    if (result->is_error()) {
-        res->error(result->to_json());
-        return res;
-    }
-
-    res->ok(result->to_json());
-    return res;
+    json body = json::parse(req.body);
+    body["id_slot"] = id_slot;
+    return handle_operation(req, llama_engine::operation::slot_save, body);
 }
 
 std::unique_ptr<server_res_generator> server_routes::handle_slots_restore(const server_http_req & req, int id_slot) {
-    auto res = create_response();
-    const json request_data = json::parse(req.body);
-    std::string filename = request_data.at("filename");
-    if (!fs_validate_filename(filename)) {
-        res->error(format_error_response("Invalid filename", ERROR_TYPE_INVALID_REQUEST));
-        return res;
-    }
-    std::string filepath = params.slot_save_path + filename;
-
-    auto & rd = res->rd;
-    {
-        server_task task(SERVER_TASK_TYPE_SLOT_RESTORE);
-        task.id = rd.get_new_id();
-        task.slot_action.id_slot  = id_slot;
-        task.slot_action.filename = filename;
-        task.slot_action.filepath = filepath;
-        rd.post_task(std::move(task));
-    }
-
-    auto result = rd.next(req.should_stop);
-    if (!result) {
-        // connection was closed
-        GGML_ASSERT(req.should_stop());
-        return res;
-    }
-
-    if (result->is_error()) {
-        res->error(result->to_json());
-        return res;
-    }
-
-    GGML_ASSERT(dynamic_cast<server_task_result_slot_save_load*>(result.get()) != nullptr);
-    res->ok(result->to_json());
-    return res;
+    json body = json::parse(req.body);
+    body["id_slot"] = id_slot;
+    return handle_operation(req, llama_engine::operation::slot_restore, body);
 }
 
 std::unique_ptr<server_res_generator> server_routes::handle_slots_erase(const server_http_req & req, int id_slot) {
-    auto res = create_response();
-    auto & rd = res->rd;
-    {
-        server_task task(SERVER_TASK_TYPE_SLOT_ERASE);
-        task.id = rd.get_new_id();
-        task.slot_action.id_slot = id_slot;
-        rd.post_task(std::move(task));
-    }
-
-    auto result = rd.next(req.should_stop);
-    if (!result) {
-        // connection was closed
-        GGML_ASSERT(req.should_stop());
-        return res;
-    }
-
-    if (result->is_error()) {
-        res->error(result->to_json());
-        return res;
-    }
-
-    GGML_ASSERT(dynamic_cast<server_task_result_slot_erase*>(result.get()) != nullptr);
-    res->ok(result->to_json());
-    return res;
-}
-
-std::unique_ptr<server_res_generator> server_routes::handle_embeddings_impl(const server_http_req & req, task_response_type res_type) {
-    auto res = create_response();
-    if (!params.embedding) {
-        res->error(format_error_response("This server does not support embeddings. Start it with `--embeddings`", ERROR_TYPE_NOT_SUPPORTED));
-        return res;
-    }
-
-    if (res_type != TASK_RESPONSE_TYPE_NONE && meta->pooling_type == LLAMA_POOLING_TYPE_NONE) {
-        res->error(format_error_response("Pooling type 'none' is not OAI compatible. Please use a different pooling type", ERROR_TYPE_INVALID_REQUEST));
-        return res;
-    }
-
-    const json body = json::parse(req.body);
-
-    // for the shape of input/content, see tokenize_input_prompts()
-    json prompt;
-    if (body.count("input") != 0) {
-        prompt = body.at("input");
-    } else if (body.contains("content")) {
-        res_type = TASK_RESPONSE_TYPE_NONE; // "content" field is not OAI compatible
-        prompt = body.at("content");
-    } else {
-        res->error(format_error_response("\"input\" or \"content\" must be provided", ERROR_TYPE_INVALID_REQUEST));
-        return res;
-    }
-
-    bool use_base64 = false;
-    if (body.count("encoding_format") != 0) {
-        const std::string & format = body.at("encoding_format");
-        if (format == "base64") {
-            use_base64 = true;
-        } else if (format != "float") {
-            res->error(format_error_response("The format to return the embeddings in. Can be either float or base64", ERROR_TYPE_INVALID_REQUEST));
-            return res;
-        }
-    }
-
-    // same shapes as tokenize_input_prompts(), plus OAI content: { "content": [ { "type": "text"|"image_url"|"input_audio"|"input_video", ... } ] }
-    auto tokenize_entry = [&](const json & p) {
-        if (p.is_object() && p.contains("content")) {
-            return tokenize_oai_content_array(ctx_server.vocabulary(), ctx_server.multimodal(), meta->chat_params, p.at("content"), true, true, ctx_server.media_options());
-        }
-        return tokenize_input_subprompt(ctx_server.vocabulary(), ctx_server.multimodal(), p, true, true, ctx_server.media_options());
-    };
-
-    std::vector<server_tokens> tokenized_prompts;
-    if (prompt.is_array() && !json_is_array_and_contains_numbers(prompt)) {
-        for (const auto & p : prompt) {
-            tokenized_prompts.push_back(tokenize_entry(p));
-        }
-    } else {
-        tokenized_prompts.push_back(tokenize_entry(prompt));
-    }
-    if (tokenized_prompts.empty()) {
-        res->error(format_error_response("\"input\" must not be empty", ERROR_TYPE_INVALID_REQUEST));
-        return res;
-    }
-
-    for (const auto & tokens : tokenized_prompts) {
-        // this check is necessary for models that do not add BOS token to the input
-        if (tokens.empty()) {
-            res->error(format_error_response("Input content cannot be empty", ERROR_TYPE_INVALID_REQUEST));
-            return res;
-        }
-    }
-
-    int embd_normalize = params.embd_normalize;
-    if (body.count("embd_normalize") != 0) {
-        embd_normalize = body.at("embd_normalize").get<int>();
-        if (meta->pooling_type == LLAMA_POOLING_TYPE_NONE) {
-            SRV_DBG("embd_normalize is not supported by pooling type %d, ignoring it\n", meta->pooling_type);
-        }
-    }
-
-    // create and queue the task
-    json responses = json::array();
-    auto & rd = res->rd;
-    {
-        std::vector<server_task> tasks;
-        for (size_t i = 0; i < tokenized_prompts.size(); i++) {
-            server_task task = server_task(SERVER_TASK_TYPE_EMBEDDING);
-
-            task.id     = rd.get_new_id();
-            task.tokens = std::move(tokenized_prompts[i]);
-
-            // OAI-compat
-            task.params.res_type = res_type;
-            task.params.embd_normalize = embd_normalize;
-
-            tasks.push_back(std::move(task));
-        }
-        rd.post_tasks(std::move(tasks));
-    }
-
-    // wait for the results
-    auto all_results = rd.wait_for_all(req.should_stop);
-
-    // collect results
-    if (all_results.is_terminated) {
-        return res; // connection is closed
-    } else if (all_results.error) {
-        res->error(all_results.error->to_json());
-        return res;
-    } else {
-        for (auto & res : all_results.results) {
-            GGML_ASSERT(dynamic_cast<server_task_result_embd*>(res.get()) != nullptr);
-            responses.push_back(res->to_json());
-        }
-    }
-
-    // write JSON response
-    json root = res_type == TASK_RESPONSE_TYPE_OAI_EMBD
-        ? format_embeddings_response_oaicompat(body, meta->model_name, responses, use_base64)
-        : json(responses);
-    res->ok(root);
-    return res;
-}
-
-std::unique_ptr<server_res_generator> server_routes::handle_count_tokens(const server_http_req & req, task_response_type res_type) {
-    auto res = create_response();
-    std::vector<raw_buffer> files;
-    json body = json::parse(req.body);
-    bool is_oai = false;
-
-    switch (res_type) {
-        case TASK_RESPONSE_TYPE_OAI_CHAT:
-            {
-                is_oai = true;
-            } break;
-        case TASK_RESPONSE_TYPE_OAI_RESP:
-            {
-                is_oai = true;
-                body = server_chat_convert_responses_to_chatcmpl(body);
-            } break;
-        case TASK_RESPONSE_TYPE_ANTHROPIC:
-            {
-                body = server_chat_convert_anthropic_to_oai(body);
-            } break;
-        default:
-            res->error(format_error_response("invalid res_type", ERROR_TYPE_INVALID_REQUEST));
-            return res;
-    }
-
-    json body_parsed = oaicompat_chat_params_parse(
-            body,
-            meta->chat_params,
-            files);
-    json prompt = body_parsed.at("prompt");
-    // SRV_DBG("prompt = %s\n", prompt.dump().c_str());
-
-    // TODO @ngxson : refactor this code block, move this to server-common and reuse it in other places
-    size_t n_tokens;
-    if (ctx_server.multimodal() != nullptr) {
-        if (!prompt.is_string()) {
-            throw std::runtime_error("for mtmd, input prompt must be a string.");
-        }
-        n_tokens = process_mtmd_prompt(ctx_server.multimodal(), prompt.get<std::string>(), files, ctx_server.media_options(), true).size();
-    } else {
-        n_tokens = tokenize_mixed(ctx_server.vocabulary(), prompt, true, true).size();
-    }
-
-    json response = {{"input_tokens", static_cast<int64_t>(n_tokens)}};
-    if (is_oai) {
-        response["object"] = "response.input_tokens";
-    }
-    res->ok(response);
-    return res;
-}
-
-void server_routes::update_cached_responses(bool is_sleeping) {
-    // caller is task_queue, so ctx_server can be accessed without holding locks
-    std::unique_lock<std::mutex> lock(mutex_cache);
-
-    if (is_sleeping) {
-        cached_models  = get_res_models(*meta);
-        cached_props   = get_res_props(*meta, params, true);
-        cached_metrics = ctx_server.get_metrics();
-
-        should_reset_buckets = false;
-
-        SRV_DBG("%s\n", "cached responses updated");
-
-    } else if (should_reset_buckets) {
-        // a scrape during sleep already reported these buckets
-        ctx_server.reset_metrics_bucket();
-
-        should_reset_buckets = false;
-    }
+    json body = json::object();
+    body["id_slot"] = id_slot;
+    return handle_operation(req, llama_engine::operation::slot_erase, body);
 }

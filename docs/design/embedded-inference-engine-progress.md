@@ -3,7 +3,7 @@
 ## Passation / état courant
 
 - Référence initiale : `e4c142c5765abf9e5e2285b4b7379e4e84edacea`. Reprise P2 sur `642c8ea7b`, avec P0/P1 commités et arbre propre.
-- **P2 finalisé le 29 septembre 2026 : completion native partagée entre moteur local et HTTP, avec API publique, threads possédés, files bornées et tests directs. Prochaine étape : P3.** Le drop complet P0–P9 n’est pas terminé.
+- **P3 implémenté le 29 septembre 2026 : tous les contrats mono-modèle utilisent le runtime moteur ; qualification et limites détaillées dans la section P3 ci-dessous. Prochaine étape d’implémentation : P4.** Le drop complet P0–P9 n’est pas terminé.
 - P0/P1 : inventaire, références et graphe recontrôlés ; 16/16 tests locaux dans chaque profil et 9/9 tests C++ ciblés repassés avant P2. Les réserves de performance et capacités consignées à P1 restent ouvertes.
 - P2 : `include/llama-engine.h`, décodeur unique dans `engine/`, handlers `/completion` et `/completions` migrés. Voir la section P2 et [le guide API](embedded-inference-engine-api.md). CLI local et routeur conservent leurs chemins legacy jusqu’à P6/P7.
 - Références obligatoires lues intégralement : CONTEXT, design, ADR 0001, CONTRIBUTING, README-dev serveur et README tests serveur.
@@ -16,7 +16,7 @@
 
 ## P0 — Matrice des opérations
 
-La completion native est **migrée à P2** ; les autres lignes restent ouvertes sauf responsabilités explicitement extérieures au moteur. Les tests cités sont existants, pas implicitement exécutés. Sauf mention contraire, les handlers sont dans `tools/server/server-context.cpp::server_routes::init_routes`. Les noms d’opérations moteur restent à fixer à P2/P3 ; les chemins HTTP ne seront pas l’interface moteur.
+La completion native est **migrée à P2** ; les contrats mono-modèle sont **migrés à P3** (correspondance opérations/tests dans la section P3). Les lignes multi-modèles, acquisition et CLI restent ouvertes selon leurs étapes. Les tests cités sont existants, pas implicitement exécutés. Sauf mention contraire, les handlers sont dans `tools/server/server-context.cpp::server_routes::init_routes`. Les opérations publiques sont nommées dans `llama_engine::operation`, sans chemins HTTP.
 
 | Opération / chemins et alias | Comportement actuel / configuration requise | Destination | Tests existants / à ajouter |
 | --- | --- | --- | --- |
@@ -572,7 +572,7 @@ PATH="$PWD/.venv-server-tests/bin:$PATH" \
   -m 'not slow' -q
 ```
 
-## Prochaine session — P3
+## Consignes de reprise P3 (historiques, exécutées ci-dessous)
 
 1. Lire le plan, le design/ADR, ce journal et le guide API. P2 est finalisé ; **ne pas recommencer l’extraction du décodeur ni créer un second moteur**. P2 est dans `da40e15ae` ; le correctif de revue (parité HTTP) peut être encore non commité. **Règle** : aucun handler migré ne doit changer le comportement observable. Tout runtime utilisé par HTTP reçoit `apply_http_compat_limits` ; les adapters HTTP lisent via `read_native`/`submit_native`. Étendre `scripts/diff-server-completion.py` à chaque famille migrée et exiger l’identité contre `e4c142c`.
 2. Revalider les trois tests moteur (`test-engine`, `test-engine-lifecycle`, `test-engine-model`) et les tests HTTP ciblés. `LLAMA_ENGINE_TEST_MODEL` doit désigner un vrai GGUF ; l’absence de fixture ne vaut pas PASS. Les logs P0/P1/P2 sont sous `build-agent-engine-evidence/`, ignoré par Git.
@@ -582,3 +582,99 @@ PATH="$PWD/.venv-server-tests/bin:$PATH" \
 6. Laisser reprise/replay/rétention/lookup/DELETE chez le serveur : il doit posséder et drainer la requête, sans reconstruire une file moteur illimitée. Tester déconnexion/reconnexion, offset perdu, remplacement de session, Stop pendant drainage et arrêt du serveur pendant replay.
 7. Terminer P3 avec snapshots indépendants des contextes/sommeil, tests de familles et vérification du profil local sans HTTP. P4 reste le cycle de vie multi-modèles ; ne pas le confondre avec le routeur actuel. P5 reste catalogue/configuration/acquisition ; P6/P7 les bascules routeur/CLI.
 8. Garder les réserves de performance P1, TSan/LeakSanitizer, autres plateformes et formats absents visibles jusqu’à leur qualification. La suite complète P9 n’est pas annoncée comme exécutée par les tests ciblés P2.
+
+
+## P3 — Contrats mono-modèle et streaming
+
+### Implémentation
+
+- `engine/engine-operations.{h,cpp}` contient la préparation extraite des handlers : chat/templates/tools/structured output, Responses, Anthropic, completion OpenAI, infill, transcription, embeddings, rerank, tokenisation/comptage, contrôle, slots, LoRA et snapshots. Les helpers et algorithmes historiques sont réutilisés ; aucune deuxième boucle d’inférence.
+- `engine::submit(operation, json, attachments)` expose ces familles. `completion()` reste compatible. Les derniers payloads métier et l’issue terminale restent distincts ; l’assemblage non streamé (`choices`, embeddings, rerank) est partagé entre lecteurs directs et HTTP. Les conversions incrémentales sont effectuées sur le lecteur, jamais dans le décodeur.
+- `server_routes::handle_operation` est l’unique adapter de ces requêtes. Plus de `server_response_reader`, tokenisation, parsing de chat ou construction de tâches dans les handlers mono-modèle. Les gardes d’accès, paramètres d’URL, parsing du corps, SSE et Prometheus restent HTTP. Le précontrôle de capacité utilise une fonction moteur partagée, avant parsing, pour conserver la priorité historique des erreurs (par exemple embeddings désactivés + JSON malformé).
+- Les events Responses/Anthropic sont des tableaux sémantiques `{event, data}`. Les sentinelles, commentaires keep-alive et encodages SSE restent dans le serveur. L’instance HTTP conserve ses limites non bornées upstream ; les autres instances restent bornées par défaut.
+- Les noms de pièces jointes sont uniques ; `attachment:nom` référence directement leurs octets dans les champs médias. La transcription reçoit `file`. Le multipart ne sort pas de l’adapter HTTP. Les tests vision vérifient une image réelle, le comptage, la durée de vie du buffer et les erreurs de référence/décodage.
+- Les métadonnées sont des valeurs possédées, avec templates partagés **const**, sans référence à `impl->chat_params`. Les snapshots sommeil et les buckets de statistiques appartiennent au moteur ; lecture sans réveil, reset reporté au réveil. La préparation garde son pin jusqu’à l’admission afin d’éviter qu’une tâche de statistiques soit postée après l’endormissement.
+- Configuration publique supplémentaire : template, projector local, embeddings/pooling, répertoire de slots, chemins LoRA. La matrice complète de configuration reste P5 ; tous les paramètres serveur privés existants restent disponibles.
+
+### Correspondance avec la matrice P0
+
+| Famille / alias de P0 | Opérations moteur / responsabilité conservée | Preuves |
+| --- | --- | --- |
+| Completion native, OpenAI, infill | `completion`, `completions`, `infill` | `test-engine-model`, `test-engine-operations`, `test-engine-infill`, HTTP completion/infill, comparaison upstream |
+| Chat, tools, JSON schema | `chat`, état incrémental par requête | direct génération/structured output, `test-engine-events` contrôlé (fragments tools/reasoning), `test-chat`, suites HTTP correspondantes |
+| Responses, Anthropic | `responses`, `messages` | directs complets/streamés et comptage, HTTP compat, events nommés contrôlés, comparaison upstream |
+| Transcription | `transcription`, pièce `file` | erreur de capacité directe ; conversion extraite à l’identique ; fixture audio positive **BLOCKED** |
+| Multimodal | Médias existants et pièces jointes nommées | `test-engine-vision`, HTTP vision et slots multimodaux ; audio/vidéo/WebP voir limites |
+| Embeddings et rerank | `embeddings`, `embeddings_openai`, `rerank` | directs batching/base64/pooling/ranking, HTTP, comparaison upstream |
+| Tokens, templates, comptages | `tokenize`, `detokenize`, `apply_template`, `chat_tokens`, `response_tokens`, `message_tokens` | directs et suites HTTP, comparaison upstream |
+| Contrôle de génération | `control` | succès/erreur directs, HTTP et comparaison upstream |
+| Slots et LoRA | `slots`, `slot_save/restore/erase`, `lora_list/apply` | directs persistence/validation/liste/application vide, HTTP slots/security/LoRA ; fixture LoRA réelle couverte par HTTP |
+| Props, modèles mono, métriques | `properties`, `properties_update`, `models`, `metrics` | directs, HTTP basic/metrics/sleep ; snapshots possédés, aucun réveil de lecture |
+| Health | Readiness/middleware HTTP ; états de modèles P4 | HTTP basic/sleep ; aucun chargement implicite |
+| Reprise SSE / lookup / DELETE | Serveur propriétaire de la requête, des octets et du replay | HTTP stream/routeur ; `test-engine-replay`, `test-engine-transport` |
+| Acquisition/catalogue multi-modèles, routeur, CLI local/distant | P4–P7, hors P3 | pas de revendication de migration supplémentaire |
+
+### Vérification et résultats
+
+Les logs sont dans `build-agent-engine-evidence/p3-*.log`. Les échecs initiaux de build/tests de développement ont été corrigés : type enum masqué par une fonction, spécialisation `common_json` manquante pour un vecteur, assertions de test traitant les chunks chat comme un objet au lieu d’un tableau, et emplacement des tests HTTP dans le graphe CMake. La table finale ci-dessous ne compte pas ces essais comme des PASS.
+
+| Vérification | Résultat |
+| --- | --- |
+| Build serveur/CLI/app et tests C++ ciblés | **PASS**, 13/13 après le dernier correctif de compatibilité |
+| Suite HTTP complète disponible `not slow` | **PASS**, 375 tests, **6 SKIP** (non qualifiés), avant le dernier correctif de précontrôle ; régression ciblée finale ci-dessous |
+| Régression HTTP finale après précontrôle | **PASS**, 169 tests, **2 SKIP**, dont les trois nouveaux cas JSON malformé / réveil / priorité des erreurs de capacité |
+| Comparaison upstream `e4c142c` | **PASS**, 32 cas native, 80 contrats, 6 infill, 16 embeddings, 6 rerank ; statut, type, corps et ordre des champs, valeurs temporelles/IDs masquées ; périmètre de dernière exécution précisé ci-dessous |
+| Profil local statique neuf, avec 4 GGUF/projector | **PASS**, 24/24 ; inférence réelle, infill, rerank et vision |
+| Profil local partagé | **PASS**, 21/21 ; pas de fixture infill/rerank/vision configurée dans ce profil |
+| ASan + UBSan | **PASS**, 5/5 ; LeakSanitizer désactivé sur cet hôte macOS |
+| TSan | **PASS**, 5/5 ; aucun rapport lors de la passe précédant le dernier correctif de précontrôle ; dernière relance bloquée, voir ci-dessous |
+| Replay déterministe | **PASS** : déconnexion/drainage, reconnexion par offset, offset perdu, remplacement, Stop pendant drainage et arrêt pendant replay |
+| Adapter HTTP avec décodeur contrôlé | **PASS** : keep-alive pendant attente bloquante, erreur avant headers (400), erreur après headers (SSE), arrêt avec lecteur en attente |
+
+La dernière passe C++ et les profils local statique, partagé et ASan/UBSan incluent le correctif final de précontrôle. La suite HTTP ciblée finale inclut sleep, metrics, completion, chat, Anthropic, Responses, embeddings et infill (`p3-http-last-change.log`). Le profil différentiel `contracts` contient désormais 89 cas ; seuls les 80 cas de la passe précédente ont été comparés. Le binaire upstream et le build TSan, stockés dans un répertoire temporaire externe, ont disparu avant la relance finale : ces deux relances sont **BLOCKED**, sans invalider ni étendre les résultats précédents. Les neuf cas différentiels ajoutés restent à rejouer contre upstream ; les trois régressions de réveil/priorité sont vérifiées par la suite HTTP finale.
+
+### Commandes reproductibles
+
+```sh
+MODEL="$PWD/tools/server/tests/tmp/models--ggml-org--test-model-stories260K/snapshots/479896ec924af6d40fd419ab8f4d1eb2101de00d/stories260K-f32.gguf"
+cmake -S . -B build-agent-engine-baseline -DLLAMA_ENGINE_TEST_MODEL="$MODEL"
+cmake --build build-agent-engine-baseline --parallel 6 --target \
+  llama-server llama-cli llama-app test-engine test-engine-lifecycle \
+  test-engine-events test-engine-operations test-engine-fixtures \
+  test-engine-replay test-engine-transport test-chat test-json-schema-to-grammar test-sampling
+ctest --test-dir build-agent-engine-baseline --output-on-failure \
+  -R '^(test-engine.*|test-chat|test-json-schema-to-grammar|test-sampling)$'
+PATH="$PWD/.venv-server-tests/bin:$PATH" \
+  SSL_CERT_FILE="$(.venv-server-tests/bin/python -c 'import certifi; print(certifi.where())')" \
+  LLAMA_SERVER_BIN_PATH="$PWD/build-agent-engine-baseline/bin/llama-server" \
+  N_GPU_LAYERS=0 PYTEST_WORKERS=1 ./tools/server/tests/tests.sh -m 'not slow' -q -x
+
+cmake -S . -B build-agent-engine-p3-local \
+  -DLLAMA_BUILD_ENGINE=ON -DLLAMA_BUILD_COMMON=OFF -DLLAMA_BUILD_TOOLS=OFF \
+  -DLLAMA_BUILD_EXAMPLES=OFF -DLLAMA_BUILD_SERVER=OFF -DLLAMA_BUILD_APP=OFF \
+  -DLLAMA_BUILD_TESTS=ON -DLLAMA_SUBPROCESS=OFF -DGGML_METAL=OFF \
+  -DBUILD_SHARED_LIBS=OFF -DCMAKE_BUILD_TYPE=Release -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
+  -DLLAMA_ENGINE_TEST_MODEL="$MODEL"
+# Pour les tests facultatifs avec GGUF :
+# -DLLAMA_ENGINE_TEST_INFILL_MODEL=/.../stories260K-infill-F32.gguf
+# -DLLAMA_ENGINE_TEST_RERANK_MODEL=/.../jina-reranker-v1-tiny-en/ggml-model-f16.gguf
+# -DLLAMA_ENGINE_TEST_VISION_MODEL=/.../tinygemma3-Q8_0.gguf
+# -DLLAMA_ENGINE_TEST_MMPROJ=/.../mmproj-tinygemma3.gguf
+cmake --build build-agent-engine-p3-local --parallel 6
+ctest --test-dir build-agent-engine-p3-local --output-on-failure
+# Profil partagé : mêmes options, BUILD_SHARED_LIBS=ON (build-agent-engine-core-shared).
+# Sanitizers : options et commandes P2, plus cibles test-engine-events/test-engine-operations.
+# Comparaison (utiliser le GGUF correspondant au profil) :
+python3 scripts/diff-server-completion.py "$UPSTREAM_SERVER" \
+  build-agent-engine-baseline/bin/llama-server "$MODEL" contracts
+# Profils supplémentaires : infill, embeddings, rerank.
+```
+
+### Limites et passation
+
+- **BLOCKED** : transcription/audio positif sans fixture de modèle audio locale ; les validations de capacité, la possession du buffer et la conversion existante sont implémentées, pas une qualification de transcription réelle. Les formats vidéo/WebP et les tests lourds restent ouverts comme à P0/P2.
+- Les tests de production d’outils/reasoning streamés utilisent des résultats de décodeur contrôlés avec les vrais parsers et le vrai lecteur public. Ils ne prouvent pas la qualité de génération d’appels d’outils par un modèle entraîné ; les tests lourds correspondants restent distincts.
+- Audit local : pas de source serveur/CLI/UI/acquisition, ni de référence HTTP/subprocess dans les archives moteur/common/mtmd ; dépendances partagées locales. **Précision par rapport aux audits P1/P2** : `ggml-base` conserve un chemin historique `fork`/`execlp` pour le debugger de backtrace fatale (optionnel sur macOS via `GGML_BACKTRACE_LLDB`). Il n’est pas appelé par l’inférence normale. Un binaire totalement dépourvu de tels symboles n’est pas revendiqué ; cette restriction de diagnostic reste à traiter dans la qualification stricte P9.
+- Pas de changement d’ordonnanceur, sampling, spéculation ou réutilisation du cache. Les suites correspondantes sont passées ; pas de nouvelle qualification de performances A/B, Metal, Linux/Windows/iOS ni LeakSanitizer dans P3.
+- Façades restantes : noms privés `server_context`/`server_task`, initialisation serveur via `common_params`, lecteur legacy pour consommateurs non migrés et forwarding headers. Nettoyage P8 après les bascules routeur P6 et CLI P7. Le moteur ne contient ni reprise SSE ni exécution d’outils/MCP.
+- Reprendre à **P4** pour le cycle de vie multi-modèles dans le processus. Ne pas réextraire le mono-modèle ; conserver la règle de parité HTTP et les bornes configurables. Le routeur/CLI actuels peuvent encore lancer/utiliser le serveur selon les chemins prévus à P6/P7.

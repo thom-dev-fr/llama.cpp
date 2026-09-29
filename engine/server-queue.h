@@ -77,7 +77,7 @@ public:
     }
 
     // Pin model resources during transport-independent request preparation.
-    bool acquire_context();
+    bool acquire_context(bool wake = true);
     void release_context();
 
     // end the start_loop routine

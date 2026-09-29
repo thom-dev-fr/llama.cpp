@@ -6,6 +6,8 @@ llama_add_compile_flags()
 add_library(llama-engine
     engine-context.cpp
     engine-context.h
+    engine-operations.cpp
+    engine-operations.h
     engine-runtime.h
     llama-engine.cpp
     ../include/llama-engine.h

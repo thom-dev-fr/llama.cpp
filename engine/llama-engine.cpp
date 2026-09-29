@@ -1,6 +1,7 @@
 #include "llama-engine.h"
 #include "engine-context.h"
 #include "engine-runtime.h"
+#include "engine-operations.h"
 #include "server-common.h"
 #include <algorithm>
 #include <limits>
@@ -40,6 +41,15 @@ void request_state::cancel() {
 }
 
 void request_state::push(server_task_result_ptr result) {
+    if (fail_on_no_slot) {
+        auto * slots = dynamic_cast<server_task_result_slots *>(result.get());
+        if (slots && slots->n_idle_slots == 0) {
+            auto error = std::make_unique<server_task_result_error>();
+            error->err_type = ERROR_TYPE_UNAVAILABLE;
+            error->err_msg = "no slot available";
+            result = std::move(error);
+        }
+    }
     std::function<void()> cancel_fn;
     {
         std::lock_guard<std::mutex> lock(mutex);
@@ -121,45 +131,43 @@ void apply_http_compat_limits(runtime & run) {
 }
 
 std::unique_ptr<request> submit(const std::shared_ptr<runtime> & run, json input,
-                              std::vector<attachment> files) {
-    return std::make_unique<request>(submit_state(run, std::move(input), std::move(files)));
+                              std::vector<attachment> files, operation op) {
+    return std::make_unique<request>(submit_state(run, std::move(input), std::move(files), op));
 }
 
 std::shared_ptr<request_state> submit_state(const std::shared_ptr<runtime> & run, json input,
-                                            std::vector<attachment> files) {
+                                            std::vector<attachment> files, operation op) {
     auto state = std::make_shared<request_state>();
     ::json data;
     try {
         const bool size_bounded = run->limits.max_request_bytes != std::numeric_limits<size_t>::max();
         auto bytes = size_bounded ? input.dump().size() : 0;
         for (const auto & file : files) {
-            if (file.bytes.size() > run->limits.max_request_bytes - std::min(bytes, run->limits.max_request_bytes)) {
-                throw std::invalid_argument("Request attachments exceed max_request_bytes");
+            for (size_t size : {file.name.size(), file.bytes.size()}) {
+                if (size > run->limits.max_request_bytes - std::min(bytes, run->limits.max_request_bytes)) {
+                    throw std::invalid_argument("Request attachments exceed max_request_bytes");
+                }
+                bytes += size;
             }
-            bytes += file.bytes.size();
         }
         if (bytes > run->limits.max_request_bytes) { throw std::invalid_argument("Request exceeds max_request_bytes"); }
-        if (!run->limits.generation_defaults.empty()) {
+        if (op <= operation::transcription && !run->limits.generation_defaults.empty()) {
             if (!input.is_object()) { throw std::invalid_argument("Expected a JSON object"); }
             json merged = run->limits.generation_defaults;
             merged.update(input);
             input = std::move(merged);
         }
-        // Binary buffers are owned by this invocation throughout preparation.
-        // Native completions embed media in their existing JSON schema; named
-        // attachments are reserved for the operations migrated in P3.
-        if (!files.empty()) { throw std::invalid_argument("Native completion uses multimodal_data; named attachments are not supported by this operation"); }
         data = ::json::parse(input.dump());
     } catch (const std::exception & error) {
         state->finish({event_type::error, nullptr, "invalid_request", error.what()});
         return state;
     }
-    submit_native(run, state, data);
+    submit_native(run, state, data, op, files);
     return state;
 }
 
 void submit_native(const std::shared_ptr<runtime> & run, const std::shared_ptr<request_state> & state,
-                   const ::json & data) {
+                   const ::json & data, operation op, const std::vector<attachment> & files) {
     {
         std::lock_guard<std::mutex> lock(run->mutex);
         if (run->stopped || !run->context) {
@@ -178,27 +186,58 @@ void submit_native(const std::shared_ptr<runtime> & run, const std::shared_ptr<r
     } preparing {*run};
     try {
         state->capacity = run->limits.max_events;
+        state->fail_on_no_slot = op == operation::slots && json_value(data, "fail_on_no_slot", false);
         auto & context = *run->context;
+        prepared_operation prepared;
         std::vector<server_task> tasks;
-        {
-            // Shape and field validation (including non-object input) is left to
-            // the task schema, so errors match the server's historical messages.
-            // Preparation runs concurrently on the submitting threads, as before.
-            struct context_pin {
-                server_queue & queue;
-                bool held;
-                explicit context_pin(server_queue & queue) : queue(queue), held(queue.acquire_context()) {}
-                ~context_pin() { if (held) { queue.release_context(); } }
-            } pin(context.tasks());
-            if (!pin.held) {
+        // Shape and field validation (including non-object input) is left to
+        // the task schema, so errors match the server's historical messages.
+        // Preparation runs concurrently on the submitting threads, as before.
+        struct context_pin {
+            server_queue & queue;
+            bool held;
+            explicit context_pin(server_queue & queue, bool wake) : queue(queue), held(queue.acquire_context(wake)) {}
+            ~context_pin() { if (held) { queue.release_context(); } }
+        } pin(context.tasks(), op != operation::metrics && op != operation::properties && op != operation::models);
+        if (!pin.held && op != operation::metrics && op != operation::properties && op != operation::models) {
+            state->finish({event_type::cancelled, nullptr, "stopped", "Engine stopped"});
+            return;
+        }
+        if (!pin.held && op == operation::metrics) {
+            std::lock_guard<std::mutex> lock(run->snapshot_mutex);
+            server_task_result_metrics result;
+            result.metrics = run->sleep_metrics;
+            prepared.immediate = result.to_json();
+            if (json_value(data, "reset", true)) {
+                run->sleep_metrics.reset_bucket();
+                run->reset_metrics_on_wake = true;
+            }
+        } else {
+            prepared = prepare_operation(context, op, data, files, run->limits.max_tasks);
+        }
+        tasks = std::move(prepared.tasks);
+        state->format = prepared.format;
+        state->assemble = std::move(prepared.assemble);
+        if (!prepared.immediate.is_null()) {
+            std::lock_guard<std::mutex> lock(run->mutex);
+            if (run->stopped) {
                 state->finish({event_type::cancelled, nullptr, "stopped", "Engine stopped"});
                 return;
             }
-            tasks = context.prepare_completion(data, SERVER_TASK_TYPE_COMPLETION,
-                                               TASK_RESPONSE_TYPE_NONE, {}, run->limits.max_tasks);
+            struct immediate_result : server_task_result {
+                ::json data;
+                ::json to_json() override { return data; }
+            };
+            auto result = std::make_unique<immediate_result>();
+            result->data = std::move(prepared.immediate);
+            state->remaining = 1;
+            state->complete.resize(1);
+            state->push(std::move(result));
+            return;
         }
         auto ids = server_task::get_list_id(tasks);
         if (ids.empty()) { throw std::invalid_argument("No prompts supplied"); }
+        state->sse_ping_interval = tasks.front().params.sse_ping_interval;
         state->stream = tasks.front().params.stream; // validated by the task schema
         state->remaining = ids.size();
         state->complete.resize(ids.size());
@@ -233,11 +272,15 @@ void submit_native(const std::shared_ptr<runtime> & run, const std::shared_ptr<r
                 return state->finished;
             }), run->requests.end());
         run->requests.push_back(state);
-        context.tasks().post(std::move(tasks));
+        context.tasks().post(std::move(tasks), prepared.priority);
+    } catch (const operation_error & error) {
+        state->finish({event_type::error, json::parse(error.data.dump()), "invalid_request", error.what()});
     } catch (const std::length_error & error) {
         state->finish({event_type::error, nullptr, "capacity_exceeded", error.what()});
-    } catch (const std::exception & error) {
+    } catch (const std::invalid_argument & error) {
         state->finish({event_type::error, nullptr, "invalid_request", error.what()});
+    } catch (const std::exception & error) {
+        state->finish({event_type::error, nullptr, "preparation_failed", error.what()});
     }
 }
 
@@ -286,7 +329,11 @@ event request::result() {
         if (item.terminal()) {
             if (item.type == event_type::success) {
                 std::lock_guard<std::mutex> reader(state->reader_mutex);
-                item.data = state->complete.size() == 1 ? state->complete.front() : json(state->complete);
+                if (state->assemble) {
+                    item.data = json::parse(safe_json_to_str(state->assemble(::json::parse(json(state->complete).dump()))));
+                } else {
+                    item.data = state->complete.size() == 1 ? state->complete.front() : json(state->complete);
+                }
             }
             return item;
         }
@@ -301,7 +348,8 @@ std::unique_ptr<engine> engine::create(const config & settings, event & error) {
         if (settings.model_path.empty() || settings.context_size <= 0 || settings.parallel <= 0 ||
             settings.threads <= 0 || settings.batch_size <= 0 || settings.micro_batch_size <= 0 ||
             !settings.max_tasks || !settings.max_events || !settings.max_request_bytes ||
-            !settings.generation_defaults.is_object()) {
+            !settings.generation_defaults.is_object() || settings.pooling_type < LLAMA_POOLING_TYPE_UNSPECIFIED ||
+            settings.pooling_type > LLAMA_POOLING_TYPE_RANK) {
             error = {event_type::error, nullptr, "invalid_config", "Invalid engine configuration"};
             return nullptr;
         }
@@ -316,6 +364,16 @@ std::unique_ptr<engine> engine::create(const config & settings, event & error) {
         params.n_gpu_layers = settings.gpu_layers;
         params.n_batch = settings.batch_size;
         params.n_ubatch = settings.micro_batch_size;
+        params.chat_template = settings.chat_template;
+        params.mmproj.path = settings.mmproj_path;
+        params.mmproj_use_gpu = settings.gpu_layers != 0;
+        params.embedding = settings.embeddings;
+        params.pooling_type = static_cast<enum llama_pooling_type>(settings.pooling_type);
+        params.slot_save_path = settings.slot_save_path;
+        if (!params.slot_save_path.empty() && params.slot_save_path.back() != DIRECTORY_SEPARATOR) {
+            params.slot_save_path += DIRECTORY_SEPARATOR;
+        }
+        for (const auto & path : settings.lora_paths) { params.lora_adapters.push_back({path, 1.0f, {}, {}, nullptr}); }
         params.fit_params = false;
         params.warmup = false;
         params.sleep_idle_seconds = -1;
@@ -329,6 +387,9 @@ std::unique_ptr<engine> engine::create(const config & settings, event & error) {
         error = {event_type::error, nullptr, "load_failed", ex.what()};
         return nullptr;
     }
+}
+std::unique_ptr<request> engine::submit(operation op, json input, std::vector<attachment> files) {
+    return detail::submit(impl->run, std::move(input), std::move(files), op);
 }
 std::unique_ptr<request> engine::completion(json input, std::vector<attachment> files) {
     return detail::submit(impl->run, std::move(input), std::move(files));

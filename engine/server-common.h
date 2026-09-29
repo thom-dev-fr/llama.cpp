@@ -317,7 +317,7 @@ struct server_chat_params {
     bool prefill_assistant;
     common_reasoning_format reasoning_format;
     std::map<std::string, std::string> chat_template_kwargs; // mapping key --> json value
-    common_chat_templates_ptr tmpls;
+    std::shared_ptr<const common_chat_templates> tmpls;
     bool allow_image;
     bool allow_audio;
     bool allow_video;
@@ -335,7 +335,8 @@ json oaicompat_completion_params_parse(const json & body);
 json oaicompat_chat_params_parse(
     json & body, /* openai api json semantics */
     const server_chat_params & opt,
-    std::vector<raw_buffer> & out_files);
+    std::vector<raw_buffer> & out_files,
+    const std::map<std::string, raw_buffer> & attachments = {});
 
 // used by /embeddings endpoint, content has the same format as a chat message content array
 server_tokens tokenize_oai_content_array(

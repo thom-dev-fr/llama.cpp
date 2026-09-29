@@ -17,6 +17,13 @@ struct attachment {
     std::vector<uint8_t> bytes;
 };
 
+enum class operation {
+    completion, completions, chat, responses, messages, infill, transcription,
+    embeddings, embeddings_openai, rerank, tokenize, detokenize, apply_template,
+    chat_tokens, response_tokens, message_tokens, control, slots, slot_save,
+    slot_restore, slot_erase, lora_list, lora_apply, properties, models, metrics, properties_update,
+};
+
 struct config {
     std::string model_path;
     int context_size = 512;
@@ -25,6 +32,12 @@ struct config {
     int gpu_layers = 0;
     int batch_size = 128;
     int micro_batch_size = 128;
+    std::string chat_template;
+    std::string mmproj_path;
+    bool embeddings = false;
+    int pooling_type = -1; // llama_pooling_type: -1 = model default
+    std::string slot_save_path; // empty disables persistent slot actions
+    std::vector<std::string> lora_paths;
     size_t max_tasks = 64;          // includes queued, active and cancelling tasks
     size_t max_events = 256;        // per request, before JSON conversion
     size_t max_request_bytes = 16 * 1024 * 1024;
@@ -75,6 +88,9 @@ public:
     // Synchronous preparation on the submitting thread, decoding on owned threads.
     // JSON and attachments are passed by value and consumed/owned before return.
     // Native /completion schema, including batch prompts and n, without HTTP.
+    // Existing JSON contracts, selected by operation, without HTTP paths.
+    std::unique_ptr<request> submit(operation op, json input = json::object(),
+                                    std::vector<attachment> files = {});
     std::unique_ptr<request> completion(json input, std::vector<attachment> files = {});
     // Concurrent, idempotent. Closes admissions, cancels, wakes readers and joins.
     // Surviving requests drain buffered payloads then see their sole terminal result;

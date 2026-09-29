@@ -129,9 +129,10 @@ void server_queue::wait_until_no_sleep() {
     }
 }
 
-bool server_queue::acquire_context() {
+bool server_queue::acquire_context(bool wake) {
     std::unique_lock<std::mutex> lock(mutex_tasks);
     if (sleeping) {
+        if (!wake) { return false; }
         req_stop_sleeping = true;
         condition_tasks.notify_all();
         condition_tasks.wait(lock, [&] { return !sleeping || !running; });

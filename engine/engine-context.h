@@ -30,7 +30,7 @@ struct server_context_meta {
     enum llama_pooling_type pooling_type;
 
     // chat params
-    server_chat_params & chat_params;
+    server_chat_params chat_params;
     std::map<std::string, bool> chat_template_caps;
 
     // tokens
@@ -86,6 +86,7 @@ using server_state_callback_t = std::function<void(server_state, json /* payload
 struct server_context {
     std::unique_ptr<server_context_impl> impl;
     std::shared_ptr<llama_engine::detail::runtime> runtime;
+    std::unique_ptr<const server_context_meta> metadata;
 
     server_queue & tasks();
     server_response & responses();
@@ -93,6 +94,7 @@ struct server_context {
     llama_model * model() const;
     mtmd_context * multimodal() const;
     mtmd_helper_init_opt media_options() const;
+    const common_params & parameters() const;
     server_metrics get_metrics() const;
     void reset_metrics_bucket();
     std::vector<server_task> prepare_completion(const json & data, server_task_type type,

@@ -26,6 +26,10 @@ struct request_state {
     size_t capacity = 256;
     size_t remaining = 0;
     bool stream = false;
+    bool fail_on_no_slot = false;
+    task_response_type format = TASK_RESPONSE_TYPE_NONE;
+    int32_t sse_ping_interval = 30;
+    std::function<::json(::json)> assemble;
     bool finished = false;
     event terminal;
     server_task_result_ptr native_error;
@@ -52,6 +56,11 @@ struct runtime {
     std::thread decoder;
     std::vector<std::weak_ptr<request_state>> requests;
     config limits;
+    std::mutex snapshot_mutex;
+    server_metrics sleep_metrics;
+    ::json sleep_models;
+    ::json sleep_properties;
+    bool reset_metrics_on_wake = false;
 
     void cancel(const std::unordered_set<int> & ids);
 };
@@ -59,16 +68,17 @@ struct runtime {
 // Limits of the legacy HTTP adapter. Before the engine, HTTP handlers queued
 // every request, buffered every result and left body size to the transport.
 // The public engine keeps bounded defaults; the server keeps this compatibility
-// until an arbitration gives it its own configurable bounds.
+// as a permanent compatibility policy, independent of the embedding defaults.
 void apply_http_compat_limits(runtime & run);
 
 std::unique_ptr<request> submit(const std::shared_ptr<runtime> & run, json input,
-                              std::vector<attachment> files = {});
+                              std::vector<attachment> files = {}, operation op = operation::completion);
 std::shared_ptr<request_state> submit_state(const std::shared_ptr<runtime> & run, json input,
-                                            std::vector<attachment> files = {});
+                                            std::vector<attachment> files = {}, operation op = operation::completion);
 // HTTP adapter entry point: native JSON already parsed by the transport.
 void submit_native(const std::shared_ptr<runtime> & run, const std::shared_ptr<request_state> & state,
-                   const ::json & data);
+                   const ::json & data, operation op = operation::completion,
+                   const std::vector<attachment> & files = {});
 void request_stop(const std::shared_ptr<runtime> & run);
 void stop(const std::shared_ptr<runtime> & run);
 } }

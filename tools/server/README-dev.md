@@ -46,25 +46,27 @@ The server supports two primary operating modes:
 The core architecture consists of the following components:
 
 The [embedded inference engine migration](../../docs/design/embedded-inference-engine-plan.md)
-is in progress. `llama-engine` owns the decoder, task preparation and bounded
-native completion requests in `engine/`. The public embedding interface is
-[`include/llama-engine.h`](../../include/llama-engine.h), documented in the
-[P2 API guide](../../docs/design/embedded-inference-engine-api.md). Native
-`/completion` and `/completions` use the same request runtime as direct callers.
-The remaining handlers still use private compatibility accessors/readers until
-P3; the `server-*.h` forwarding headers are not a public embedding interface.
-See the [progress journal](../../docs/design/embedded-inference-engine-progress.md)
-for tested profiles and remaining work. SSE wire formatting, replay and child
-process IO stay outside the engine. The legacy `start_loop()` now starts/joins
-the engine-owned thread; direct callers never supply a decode loop.
+is in progress. `llama-engine` owns the decoder, all single-model JSON operations,
+bounded request queues and per-request conversion state in `engine/`. The public
+embedding interface is [`include/llama-engine.h`](../../include/llama-engine.h),
+documented in the [API guide](../../docs/design/embedded-inference-engine-api.md).
+Single-model HTTP handlers call the same operation runtime as direct callers;
+the server configures upstream-compatible unbounded admission and buffering.
+Private `server-*.h` forwarding headers remain for the CLI/router transition and
+are not a public embedding interface. See the
+[progress journal](../../docs/design/embedded-inference-engine-progress.md) for
+qualified profiles and missing fixtures. SSE framing, keep-alives, replay,
+Prometheus text, HTTP guards and child process IO stay outside the engine.
+The legacy `start_loop()` starts/joins the engine-owned thread; direct callers
+never supply a decode loop.
 
 - `server_context`: Holds the primary inference state, including the main `llama_context` and all active slots.
 - `server_slot`: An abstraction over a single “sequence” in llama.cpp, responsible for managing individual parallel inference requests.
-- `server_routes`: Middleware layer between `server_context` and the HTTP interface; handles JSON parsing/formatting and request routing logic.
+- `server_routes`: Middleware layer between `server_context` and the HTTP interface; parses transport bodies, delegates operations and formats transport responses.
 - `server_http_context`: Implements the HTTP server using `cpp-httplib`.
 - `server_queue`: Thread-safe queue used by HTTP workers to submit new tasks to `server_context`.
 - `server_response`: Thread-safe queue used by `server_context` to return results to HTTP workers.
-- `server_response_reader`: Higher-level wrapper around the two queues above for cleaner code.
+- `server_response_reader`: Legacy private reader retained for consumers not yet migrated. HTTP uses engine request handles.
 - `server_task`: Unit of work pushed into `server_queue`.
 - `server_task_result`: Unit of result pushed into `server_response`.
 - `server_tokens`: Unified representation of token sequences (supports both text and multimodal tokens); used by `server_task` and `server_slot`.
@@ -111,7 +113,7 @@ Each incoming HTTP request is handled by its own thread managed by the HTTP libr
 
 **Best practices to follow:**
 
-- Transport-independent JSON validation/conversion and chat template logic belong in the shared engine, **outside the decoder loop**. During extraction the HTTP workers still call these helpers; moving a source file must not move heavy processing onto the decode thread.
+- Transport-independent JSON validation/conversion and chat template logic belong in the shared engine, **outside the decoder loop**. HTTP workers call the engine operation runtime; moving a source file must not move heavy processing onto the decode thread.
 - HTTP owns multipart adaptation, status/header mapping, SSE wire encoding, keep-alives and replay, not a second implementation of inference JSON contracts.
 - Avoid passing raw JSON into `server_slot`. Prepare native task data before admission to the decoder, while keeping the consumer-facing request/result contract JSON-based.
 
@@ -119,18 +121,15 @@ Each incoming HTTP request is handled by its own thread managed by the HTTP libr
 
 Here is an example trace of an API request for text completion:
 
-- A request arrives at the HTTP layer.
-- The request is routed to the corresponding handler inside `server_routes`. In this case, `handle_completions_impl` is invoked.
-- The handler parses the input request, constructs a new `server_task`, and passes it to `server_res_generator`.
-- `server_res_generator` creates a new `task_result_state` for each task:
-    - `task_result_state` stays in the HTTP layer, responsible for keeping track of the current state of the response (e.g., parsing tool calls or thinking messages).
-    - `server_task` is moved into `server_queue` inside `server_context`.
-- `server_context` launches the task by moving it into an available slot (see `launch_slot_with_task()`).
-- `update_slot()` processes the task as described in the "Batching" section above.
-- Results may be sent using `send_partial_response` or `send_final_response`, which creates a new `server_task_result` and pushes it to the response queue.
-- At the same time, `server_res_generator` listens to the response queue and retrieves this response.
-- As the response is stateless, `server_res_generator` calls `response->update()` to update the response with the current state.
-- `server_res_generator` then calls `response->to_json()` and passes the response to the HTTP layer.
+- HTTP parses the body and translates multipart files or URL parameters.
+- `server_routes::handle_operation` submits the named engine operation and owns its request handle.
+- `engine-operations.cpp` validates/converts the JSON and prepares tasks on the submitting thread, with model resources pinned through admission.
+- The engine registers bounded result sinks and posts the existing scheduler tasks. HTTP configures unbounded limits to preserve upstream behavior.
+- `server_context` moves the task into a slot and decodes using the existing batching, cache and sampling algorithms.
+- Results go directly to the request sink. Its `task_result_state` tracks tool/reasoning deltas on the reading thread, outside the decoder.
+- The reader receives all business payloads followed by one terminal outcome. Non-streamed assembly also belongs to the engine.
+- HTTP encodes SSE, including named Responses/Anthropic events and keep-alives during timed reads. Errors before streaming remain ordinary HTTP errors.
+- Metadata and sleeping metrics are owned snapshots. Reads of models, properties or metrics do not request a wake-up.
 
 ### Resumable streaming (SSE replay buffer)
 

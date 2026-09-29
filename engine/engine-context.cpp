@@ -1,5 +1,6 @@
 #include "engine-context.h"
 #include "engine-runtime.h"
+#include "engine-operations.h"
 #include "server-chat.h"
 #include "server-common.h"
 #include "server-task.h"
@@ -4157,11 +4158,25 @@ private:
 server_context::server_context() : impl(new server_context_impl()), runtime(new llama_engine::detail::runtime) {
     engine_backend_init();
     runtime->context = this;
+    impl->queue_tasks.on_sleeping_state([this](bool sleeping) {
+        std::lock_guard<std::mutex> lock(runtime->snapshot_mutex);
+        if (sleeping) {
+            runtime->sleep_metrics = impl->get_metrics();
+            runtime->sleep_models = llama_engine::detail::engine_models(*metadata);
+            runtime->sleep_properties = llama_engine::detail::engine_properties(*metadata, impl->params_base, true);
+            runtime->reset_metrics_on_wake = false;
+        } else if (runtime->reset_metrics_on_wake) {
+            impl->reset_metrics_bucket();
+            runtime->reset_metrics_on_wake = false;
+        }
+    });
 }
 server_context::~server_context() { llama_engine::detail::stop(runtime); }
 
 bool server_context::load_model(common_params & params) {
-    return impl->load_model(params);
+    if (!impl->load_model(params)) { return false; }
+    metadata = std::make_unique<const server_context_meta>(get_meta());
+    return true;
 }
 
 void server_context::start() {
@@ -4192,6 +4207,7 @@ server_response_reader server_context::get_response_reader() {
 }
 
 server_context_meta server_context::get_meta() const {
+    if (metadata) { return *metadata; }
     auto bos_id = llama_vocab_bos(impl->vocab);
     auto eos_id = llama_vocab_eos(impl->vocab);
     auto bos_token_str = bos_id != LLAMA_TOKEN_NULL ? common_token_to_piece(impl->ctx_tgt, bos_id, true) : "";
@@ -4247,6 +4263,7 @@ const llama_vocab * server_context::vocabulary() const { return impl->vocab; }
 llama_model * server_context::model() const { return impl->model_tgt; }
 mtmd_context * server_context::multimodal() const { return impl->mctx; }
 mtmd_helper_init_opt server_context::media_options() const { return impl->init_opt; }
+const common_params & server_context::parameters() const { return impl->params_base; }
 server_metrics server_context::get_metrics() const { return impl->get_metrics(); }
 void server_context::reset_metrics_bucket() { impl->reset_metrics_bucket(); }
 std::vector<server_task> server_context::prepare_completion(const json & data, server_task_type type,

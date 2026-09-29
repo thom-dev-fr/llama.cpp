@@ -1064,7 +1064,14 @@ json oaicompat_completion_params_parse(const json & body) {
 static void handle_media(
         std::vector<raw_buffer> & out_files,
         const std::string & url,
-        const std::string & media_path) {
+        const std::string & media_path,
+        const std::map<std::string, raw_buffer> & attachments) {
+    if (string_starts_with(url, "attachment:")) {
+        const auto it = attachments.find(url.substr(11));
+        if (it == attachments.end()) { throw std::invalid_argument("Unknown attachment: " + url.substr(11)); }
+        out_files.push_back(it->second);
+        return;
+    }
     if (!media_path.empty()) {
         // should already be enforced by arg.cpp, but checking just in case
         GGML_ASSERT(media_path.back() == DIRECTORY_SEPARATOR);
@@ -1137,7 +1144,11 @@ static void handle_media(
 }
 
 // load media files from an OAI content array, then replace each media part with a media marker text part
-static void oaicompat_content_load_media(json & content, const server_chat_params & opt, std::vector<raw_buffer> & out_files) {
+static void oaicompat_content_load_media(
+        json & content,
+        const server_chat_params & opt,
+        std::vector<raw_buffer> & out_files,
+        const std::map<std::string, raw_buffer> & attachments = {}) {
     for (auto & p : content) {
         std::string type = json_value(p, "type", std::string());
         if (type == "image_url") {
@@ -1147,7 +1158,7 @@ static void oaicompat_content_load_media(json & content, const server_chat_param
 
             json image_url = json_value(p, "image_url", json::object());
             std::string url = json_value(image_url, "url", std::string());
-            handle_media(out_files, url, opt.media_path);
+            handle_media(out_files, url, opt.media_path, attachments);
 
             p["type"] = "media_marker";
             p["text"] = get_media_marker();
@@ -1162,7 +1173,7 @@ static void oaicompat_content_load_media(json & content, const server_chat_param
             json input_audio = json_value(p, "input_audio", json::object());
             std::string url  = json_value(input_audio, "data",
                                     json_value(input_audio, "url", std::string()));
-            handle_media(out_files, url, opt.media_path);
+            handle_media(out_files, url, opt.media_path, attachments);
 
             p["type"] = "media_marker";
             p["text"] = get_media_marker();
@@ -1177,7 +1188,7 @@ static void oaicompat_content_load_media(json & content, const server_chat_param
             json input_video = json_value(p, type, json::object());
             std::string url  = json_value(input_video, "data",
                                     json_value(input_video, "url", std::string()));
-            handle_media(out_files, url, opt.media_path);
+            handle_media(out_files, url, opt.media_path, attachments);
 
             p["type"] = "media_marker";
             p["text"] = get_media_marker();
@@ -1213,7 +1224,8 @@ server_tokens tokenize_oai_content_array(const llama_vocab * vocab, mtmd_context
 json oaicompat_chat_params_parse(
     json & body, /* openai api json semantics */
     const server_chat_params & opt,
-    std::vector<raw_buffer> & out_files)
+    std::vector<raw_buffer> & out_files,
+    const std::map<std::string, raw_buffer> & attachments)
 {
     json llama_params;
 
@@ -1295,7 +1307,7 @@ json oaicompat_chat_params_parse(
             throw std::invalid_argument("Expected 'content' to be a string or an array");
         }
 
-        oaicompat_content_load_media(content, opt, out_files);
+        oaicompat_content_load_media(content, opt, out_files, attachments);
     }
 
     auto caps = common_chat_templates_get_caps(opt.tmpls.get());

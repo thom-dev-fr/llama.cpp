@@ -165,3 +165,22 @@ def test_server_sleep_token_counting_wake():
     assert res.status_code == 200
     assert res.body["input_tokens"] > 0
     assert is_sleeping(server) == False
+
+
+@pytest.mark.parametrize("path,status", [
+    ("/completion", 500),
+    ("/v1/chat/completions", 500),
+    ("/embeddings", 501),
+])
+def test_malformed_request_preserves_wake_and_capability_priority(path, status):
+    import requests
+
+    server.sleep_idle_seconds = 1
+    server.start()
+    wait_for_sleep(server)
+    response = requests.post(
+        f"http://{server.server_host}:{server.server_port}{path}",
+        data="{bad", headers={"Content-Type": "application/json"}, timeout=10,
+    )
+    assert response.status_code == status
+    assert not is_sleeping(server)
