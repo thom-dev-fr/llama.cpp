@@ -152,7 +152,7 @@ int main(int argc, char ** argv) {
         assert(submitters.front().valid());
         submitters.front().wait(); // at least one submitter ran its requests
         owner->stop();
-        for (auto & submitter : submitters) { submitter.get(); }
+        for (auto & submitter : submitters) { (void) submitter.get(); }
         owner.reset();
     }
 

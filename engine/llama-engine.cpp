@@ -2,8 +2,10 @@
 #include "engine-context.h"
 #include "engine-runtime.h"
 #include "engine-operations.h"
+#include "engine-models.h"
 #include "server-common.h"
 #include <algorithm>
+#include <filesystem>
 #include <limits>
 
 void engine_backend_init() {
@@ -19,25 +21,45 @@ namespace llama_engine {
 namespace detail {
 
 void request_state::finish(event end) {
-    std::lock_guard<std::mutex> lock(mutex);
-    if (!finished) {
+    std::function<void()> hook;
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        if (finished) { return; }
         terminal = std::move(end);
         finished = true;
+        hook = std::move(on_finish);
         ready.notify_all();
     }
+    if (hook) { hook(); }
+}
+
+bool request_state::attach_finish_hook(std::function<void()> hook) {
+    std::lock_guard<std::mutex> lock(mutex);
+    if (finished) { return false; }
+    on_finish = std::move(hook);
+    return true;
+}
+
+bool request_state::attach_cancel(std::function<void()> cancel) {
+    std::lock_guard<std::mutex> lock(mutex);
+    if (finished) { return false; }
+    cancel_work = std::move(cancel);
+    return true;
 }
 
 void request_state::cancel() {
-    std::function<void()> cancel_fn;
+    std::function<void()> cancel_fn, hook;
     {
         std::lock_guard<std::mutex> lock(mutex);
         if (finished) { return; }
         finished = true;
         terminal = {event_type::cancelled, nullptr, "cancelled", "Request cancelled"};
         cancel_fn = cancel_work;
+        hook = std::move(on_finish);
         ready.notify_all();
     }
     if (cancel_fn) { cancel_fn(); }
+    if (hook) { hook(); }
 }
 
 void request_state::push(server_task_result_ptr result) {
@@ -50,7 +72,7 @@ void request_state::push(server_task_result_ptr result) {
             result = std::move(error);
         }
     }
-    std::function<void()> cancel_fn;
+    std::function<void()> cancel_fn, hook;
     {
         std::lock_guard<std::mutex> lock(mutex);
         if (finished) { return; }
@@ -70,9 +92,11 @@ void request_state::push(server_task_result_ptr result) {
             }
             pending.push_back(std::move(result));
         }
+        if (finished) { hook = std::move(on_finish); }
         ready.notify_all();
     }
     if (cancel_fn) { cancel_fn(); }
+    if (hook) { hook(); }
 }
 
 native_item request_state::next_native(std::chrono::milliseconds timeout) {
@@ -135,34 +159,42 @@ std::unique_ptr<request> submit(const std::shared_ptr<runtime> & run, json input
     return std::make_unique<request>(submit_state(run, std::move(input), std::move(files), op));
 }
 
-std::shared_ptr<request_state> submit_state(const std::shared_ptr<runtime> & run, json input,
-                                            std::vector<attachment> files, operation op) {
-    auto state = std::make_shared<request_state>();
-    ::json data;
+bool prepare_input(const config & limits, request_state & state, const json & input_ref,
+                   const std::vector<attachment> & files, operation op, ::json & data) {
     try {
-        const bool size_bounded = run->limits.max_request_bytes != std::numeric_limits<size_t>::max();
+        json input = input_ref;
+        const bool size_bounded = limits.max_request_bytes != std::numeric_limits<size_t>::max();
         auto bytes = size_bounded ? input.dump().size() : 0;
         for (const auto & file : files) {
             for (size_t size : {file.name.size(), file.bytes.size()}) {
-                if (size > run->limits.max_request_bytes - std::min(bytes, run->limits.max_request_bytes)) {
+                if (size > limits.max_request_bytes - std::min(bytes, limits.max_request_bytes)) {
                     throw std::invalid_argument("Request attachments exceed max_request_bytes");
                 }
                 bytes += size;
             }
         }
-        if (bytes > run->limits.max_request_bytes) { throw std::invalid_argument("Request exceeds max_request_bytes"); }
-        if (op <= operation::transcription && !run->limits.generation_defaults.empty()) {
+        if (bytes > limits.max_request_bytes) { throw std::invalid_argument("Request exceeds max_request_bytes"); }
+        if (op <= operation::transcription && !limits.generation_defaults.empty()) {
             if (!input.is_object()) { throw std::invalid_argument("Expected a JSON object"); }
-            json merged = run->limits.generation_defaults;
+            json merged = limits.generation_defaults;
             merged.update(input);
             input = std::move(merged);
         }
         data = ::json::parse(input.dump());
     } catch (const std::exception & error) {
-        state->finish({event_type::error, nullptr, "invalid_request", error.what()});
-        return state;
+        state.finish({event_type::error, nullptr, "invalid_request", error.what()});
+        return false;
     }
-    submit_native(run, state, data, op, files);
+    return true;
+}
+
+std::shared_ptr<request_state> submit_state(const std::shared_ptr<runtime> & run, json input,
+                                            std::vector<attachment> files, operation op) {
+    auto state = std::make_shared<request_state>();
+    ::json data;
+    if (prepare_input(run->limits, *state, input, files, op, data)) {
+        submit_native(run, state, data, op, files);
+    }
     return state;
 }
 
@@ -200,7 +232,12 @@ void submit_native(const std::shared_ptr<runtime> & run, const std::shared_ptr<r
             ~context_pin() { if (held) { queue.release_context(); } }
         } pin(context.tasks(), op != operation::metrics && op != operation::properties && op != operation::models);
         if (!pin.held && op != operation::metrics && op != operation::properties && op != operation::models) {
-            state->finish({event_type::cancelled, nullptr, "stopped", "Engine stopped"});
+            std::string wake_error;
+            if (context.tasks().wake_failed(wake_error)) {
+                state->finish({event_type::error, nullptr, "wake_failed", wake_error});
+            } else {
+                state->finish({event_type::cancelled, nullptr, "stopped", "Engine stopped"});
+            }
             return;
         }
         if (!pin.held && op == operation::metrics) {
@@ -251,11 +288,15 @@ void submit_native(const std::shared_ptr<runtime> & run, const std::shared_ptr<r
             }
         }
         std::weak_ptr<runtime> weak = run;
-        state->cancel_work = [weak, ids] { if (auto owner = weak.lock()) { owner->cancel(ids); } };
-
         std::lock_guard<std::mutex> lock(run->mutex);
         if (run->stopped) {
             state->finish({event_type::cancelled, nullptr, "stopped", "Engine stopped"});
+            return;
+        }
+        // The handle may already be visible to its reader (requests queued for
+        // a model load): a cancellation before this point posts nothing, and a
+        // later one waits for run->mutex, so it always sees registered sinks.
+        if (!state->attach_cancel([weak, ids] { if (auto owner = weak.lock()) { owner->cancel(ids); } })) {
             return;
         }
         if (!context.responses().add_sinks(ids, run->limits.max_tasks,
@@ -284,14 +325,14 @@ void submit_native(const std::shared_ptr<runtime> & run, const std::shared_ptr<r
     }
 }
 
-void request_stop(const std::shared_ptr<runtime> & run) {
+void request_stop(const std::shared_ptr<runtime> & run, const event & reason) {
     {
         std::lock_guard<std::mutex> lock(run->mutex);
         if (!run->stopped) {
             run->stopped = true;
             for (auto & weak : run->requests) {
                 if (auto state = weak.lock()) {
-                    state->finish({event_type::cancelled, nullptr, "stopped", "Engine stopped"});
+                    state->finish(reason);
                 }
             }
             if (run->context) { run->context->tasks().terminate(); }
@@ -310,10 +351,44 @@ void stop(const std::shared_ptr<runtime> & run) {
     if (run->decoder.joinable()) { run->decoder.join(); }
 }
 
+bool valid_config(const config & settings) {
+    return !settings.model_path.empty() && settings.context_size > 0 && settings.parallel > 0 &&
+        settings.threads > 0 && settings.batch_size > 0 && settings.micro_batch_size > 0 &&
+        settings.max_tasks && settings.max_events && settings.max_request_bytes &&
+        settings.generation_defaults.is_object() && settings.pooling_type >= LLAMA_POOLING_TYPE_UNSPECIFIED &&
+        settings.pooling_type <= LLAMA_POOLING_TYPE_RANK && settings.sleep_idle_seconds >= -1 &&
+        settings.sleep_idle_seconds != 0;
+}
+
+common_params to_common_params(const config & settings) {
+    common_params params;
+    params.model.path = settings.model_path;
+    params.n_ctx = settings.context_size;
+    params.n_parallel = settings.parallel;
+    params.cpuparams.n_threads = settings.threads;
+    params.cpuparams_batch.n_threads = settings.threads;
+    params.n_gpu_layers = settings.gpu_layers;
+    params.n_batch = settings.batch_size;
+    params.n_ubatch = settings.micro_batch_size;
+    params.chat_template = settings.chat_template;
+    params.mmproj.path = settings.mmproj_path;
+    params.mmproj_use_gpu = settings.gpu_layers != 0;
+    params.embedding = settings.embeddings;
+    params.pooling_type = static_cast<enum llama_pooling_type>(settings.pooling_type);
+    params.slot_save_path = settings.slot_save_path;
+    if (!params.slot_save_path.empty() && params.slot_save_path.back() != DIRECTORY_SEPARATOR) {
+        params.slot_save_path += DIRECTORY_SEPARATOR;
+    }
+    for (const auto & path : settings.lora_paths) { params.lora_adapters.push_back({path, 1.0f, {}, {}, nullptr}); }
+    params.fit_params = false;
+    params.warmup = false;
+    params.sleep_idle_seconds = settings.sleep_idle_seconds;
+    return params;
+}
+
 struct engine_impl {
     std::mutex shutdown_mutex;
-    std::unique_ptr<server_context> context {new server_context};
-    std::shared_ptr<runtime> run = context->runtime;
+    std::shared_ptr<model_manager> models;
 };
 } // namespace detail
 
@@ -340,63 +415,75 @@ event request::result() {
     }
 }
 
+subscription::subscription(std::shared_ptr<detail::subscriber_state> state) : state(std::move(state)) {}
+subscription::~subscription() { state->close({event_type::cancelled, nullptr, "unsubscribed", "Unsubscribed"}); }
+event subscription::next() { return state->read(std::chrono::milliseconds::max()); }
+event subscription::next_for(std::chrono::milliseconds timeout) { return state->read(timeout); }
+
 engine::engine() : impl(new detail::engine_impl) {}
 engine::~engine() { stop(); }
+
 std::unique_ptr<engine> engine::create(const config & settings, event & error) {
     error = {};
     try {
-        if (settings.model_path.empty() || settings.context_size <= 0 || settings.parallel <= 0 ||
-            settings.threads <= 0 || settings.batch_size <= 0 || settings.micro_batch_size <= 0 ||
-            !settings.max_tasks || !settings.max_events || !settings.max_request_bytes ||
-            !settings.generation_defaults.is_object() || settings.pooling_type < LLAMA_POOLING_TYPE_UNSPECIFIED ||
-            settings.pooling_type > LLAMA_POOLING_TYPE_RANK) {
+        if (!detail::valid_config(settings)) {
             error = {event_type::error, nullptr, "invalid_config", "Invalid engine configuration"};
             return nullptr;
         }
+        // One catalog entry, loaded now; its model field is not used for selection.
+        catalog_config catalog;
+        catalog.models.push_back({std::filesystem::path(settings.model_path).filename().string(), {}, {}, settings});
+        catalog.max_loaded  = 1;
+        catalog.max_waiting = std::max<size_t>(settings.max_tasks, 1);
         auto owner = std::unique_ptr<engine>(new engine);
-        owner->impl->run->limits = settings;
-        common_params params;
-        params.model.path = settings.model_path;
-        params.n_ctx = settings.context_size;
-        params.n_parallel = settings.parallel;
-        params.cpuparams.n_threads = settings.threads;
-        params.cpuparams_batch.n_threads = settings.threads;
-        params.n_gpu_layers = settings.gpu_layers;
-        params.n_batch = settings.batch_size;
-        params.n_ubatch = settings.micro_batch_size;
-        params.chat_template = settings.chat_template;
-        params.mmproj.path = settings.mmproj_path;
-        params.mmproj_use_gpu = settings.gpu_layers != 0;
-        params.embedding = settings.embeddings;
-        params.pooling_type = static_cast<enum llama_pooling_type>(settings.pooling_type);
-        params.slot_save_path = settings.slot_save_path;
-        if (!params.slot_save_path.empty() && params.slot_save_path.back() != DIRECTORY_SEPARATOR) {
-            params.slot_save_path += DIRECTORY_SEPARATOR;
-        }
-        for (const auto & path : settings.lora_paths) { params.lora_adapters.push_back({path, 1.0f, {}, {}, nullptr}); }
-        params.fit_params = false;
-        params.warmup = false;
-        params.sleep_idle_seconds = -1;
-        if (!owner->impl->context->load_model(params)) {
-            error = {event_type::error, nullptr, "load_failed", "Failed to load model: " + settings.model_path};
+        owner->impl->models = std::make_shared<detail::model_manager>(catalog, true, detail::make_context_backend);
+        owner->impl->models->start();
+        auto loaded = owner->impl->models->load(catalog.models.front().id)->read(std::chrono::milliseconds::max());
+        if (loaded.type != event_type::success) {
+            error = loaded.category == "load_failed"
+                ? event {event_type::error, nullptr, "load_failed", "Failed to load model: " + settings.model_path}
+                : loaded;
             return nullptr;
         }
-        owner->impl->context->start();
         return owner;
     } catch (const std::exception & ex) {
         error = {event_type::error, nullptr, "load_failed", ex.what()};
         return nullptr;
     }
 }
+
+std::unique_ptr<engine> engine::create_catalog(const catalog_config & settings, event & error) {
+    error = {};
+    try {
+        std::string message;
+        if (!detail::model_manager::validate(settings, message)) {
+            error = {event_type::error, nullptr, "invalid_config", message};
+            return nullptr;
+        }
+        auto owner = std::unique_ptr<engine>(new engine);
+        owner->impl->models = std::make_shared<detail::model_manager>(settings, false, detail::make_context_backend);
+        owner->impl->models->start();
+        return owner;
+    } catch (const std::exception & ex) {
+        error = {event_type::error, nullptr, "invalid_config", ex.what()};
+        return nullptr;
+    }
+}
+
 std::unique_ptr<request> engine::submit(operation op, json input, std::vector<attachment> files) {
-    return detail::submit(impl->run, std::move(input), std::move(files), op);
+    return std::make_unique<request>(impl->models->submit(op, input, std::move(files)));
 }
 std::unique_ptr<request> engine::completion(json input, std::vector<attachment> files) {
-    return detail::submit(impl->run, std::move(input), std::move(files));
+    return submit(operation::completion, std::move(input), std::move(files));
 }
+json engine::catalog() const { return impl->models->catalog(); }
+std::unique_ptr<subscription> engine::subscribe() { return std::make_unique<subscription>(impl->models->subscribe()); }
+std::unique_ptr<request> engine::load(const std::string & model) {
+    return std::make_unique<request>(impl->models->load(model));
+}
+event engine::unload(const std::string & model) { return impl->models->unload(model); }
 void engine::stop() {
     std::lock_guard<std::mutex> lock(impl->shutdown_mutex);
-    detail::stop(impl->run);
-    impl->context.reset();
+    if (impl->models) { impl->models->stop(); }
 }
 } // namespace llama_engine

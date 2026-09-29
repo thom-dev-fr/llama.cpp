@@ -1,4 +1,4 @@
-# API C++ du moteur — mono-modèle P3
+# API C++ du moteur — mono-modèle P3, multi-modèles P4
 
 L’interface expérimentale est `include/llama-engine.h`, dans le namespace
 `llama_engine`. Lier `llama-engine` suffit dans le graphe CMake du dépôt ; le
@@ -56,7 +56,8 @@ publique. P3 ajoute `chat_template` (nom ou source Jinja), `mmproj_path`,
 4 rank), `slot_save_path` et `lora_paths`. Un chemin de slots vide interdit les
 écritures ; un chemin non vide reçoit automatiquement son séparateur final.
 Les adapters LoRA configurés sont chargés à l’échelle 1, modifiable par requête.
-Le multi-modèles/catalogue arrive en P4/P5.
+Le multi-modèles est décrit plus bas (P4) ; les sources de catalogue
+(presets, répertoires, cache) et l’acquisition arrivent en P5.
 
 Les pièces jointes sont des valeurs possédées (`name`, `bytes`), sans type HTTP.
 La completion native conserve son schéma `multimodal_data`. Pour chat, Responses,
@@ -164,12 +165,88 @@ La validation de forme de la requête (objet, champs, types) est celle du schém
 de tâche existant ; les messages d’erreur sont ceux du serveur historique.
 
 Catégories d’erreur actuelles : `invalid_config`, `load_failed`, `invalid_request`,
-`capacity_exceeded`, `queue_full`, `inference_error`, `preparation_failed`.
+`capacity_exceeded`, `queue_full`, `inference_error`, `preparation_failed`,
+`model_not_found`, `model_not_loaded`, `wait_timeout`, `wake_failed`. Catégories
+d’annulation : `cancelled`, `stopped`, `unloaded`, `evicted`.
 Appeler `result()` sur un stream est une erreur de programmation
 (`std::logic_error`), pas une deuxième issue terminale.
 Les erreurs du décodeur conservent leurs détails JSON natifs. `cancelled` et
 `stopped` accompagnent une issue d’annulation. Les erreurs fatales natives des
 backends restent soumises aux limites du design.
+
+## Plusieurs modèles dans le processus (P4)
+
+`engine::create_catalog(catalog_config, error)` crée un moteur sans rien charger.
+Chaque `model_entry` a un identifiant, des alias, des tags informatifs et sa
+propre `config` (chargement et bornes par modèle). Les identifiants et alias
+doivent être uniques entre eux (`invalid_config` sinon). `engine::create(config)`
+reste le raccourci mono-modèle : même gestionnaire avec une seule entrée,
+chargée avant le retour, et le champ `model` des requêtes n’est pas utilisé.
+
+```cpp
+llama_engine::catalog_config catalog;
+catalog.max_loaded = 1;                       // chargements en cours inclus ; <= 0 : pas de limite
+catalog.models = {{"small", {"s"}, {}, small_config}, {"large", {}, {}, large_config}};
+auto engine = llama_engine::engine::create_catalog(catalog, error);
+auto events = engine->subscribe();            // premier événement : "snapshot"
+auto reply = engine->submit(llama_engine::operation::chat, {
+    {"model", "s"}, {"messages", {{{"role", "user"}, {"content", "Bonjour"}}}},
+})->result();                                 // charge "small" si nécessaire
+engine->unload("small");                      // bloquant : admissions fermées, travaux annulés, ressources libérées
+```
+
+- **Sélection** : champ `model` (nom exact, puis alias), comme le routeur.
+  Absent : `invalid_request` ; inconnu : `model_not_found` ; `autoload=false`
+  et modèle ni chargé ni en chargement : `model_not_loaded`.
+- **États** (`catalog()`, événements) : `unloaded`, `loading`, `loaded`,
+  `sleeping`, `unloading`, `failed` (+ `error`). Présence au catalogue,
+  résidence (`status`), attentes (`waiting`) et requêtes admises (`active`)
+  sont distinctes. Un échec de chargement est récupérable : la demande suivante
+  relance le chargement.
+- **Limite et éviction** : `max_loaded` compte les modèles en chargement,
+  chargés, endormis et en cours de déchargement. Seul un modèle sans requête
+  admise ni attente peut être évincé, le moins récemment utilisé d’abord. La
+  politique (`engine/engine-scheduler.h`) est celle du routeur, partagée avec lui
+  jusqu’à P6.
+- **Attente** : une requête pour un modèle non résident est mise en file et le
+  handle est rendu immédiatement ; `cancel()`/destruction la retire. Les demandes
+  pour un même modèle partagent une entrée et **un seul chargement**. Ordre de
+  service : premier arrivé, premier servi par modèle ; seule la tête de file
+  démarre un chargement. Bornes : `max_waiting` (`capacity_exceeded`) et
+  `wait_timeout` (`wait_timeout`, 5 min par défaut, temps de chargement compris).
+  Un modèle maintenu occupé en continu ne provoque donc pas de famine silencieuse :
+  l’attente échoue explicitement à l’échéance.
+- **Préparation différée** : une requête en attente est préparée par le thread
+  de chargement une fois le modèle résident, dans l’ordre d’arrivée. Un
+  `request` peut donc être lu avant sa préparation ; `stream` reflète la
+  demande dès la soumission.
+- **Chargement explicite** : `load(model)` suit la même file et renvoie un
+  `request` qui réussit quand le modèle est résident. L’annuler retire
+  l’attente, sans interrompre un chargement déjà démarré.
+- **Déchargement explicite** : `unload(model)` ferme les admissions (les
+  nouvelles requêtes attendent l’instance suivante), termine les attentes et les
+  requêtes en cours avec `cancelled`/`unloaded`, attend l’arrêt du décodeur puis
+  libère le modèle. Pendant un chargement, celui-ci est interrompu à son prochain
+  rapport de progression. Modèle non résident : `model_not_loaded`.
+- **Sommeil** : `sleep_idle_seconds` par modèle. Un modèle endormi reste compté
+  et reçoit directement les requêtes, qui le réveillent. Un réveil qui échoue
+  (fichier absent, allocation) termine la requête avec `wake_failed` ; le modèle
+  reste endormi et le réveil est retenté à la requête suivante. Propriétés,
+  modèles et statistiques restent lisibles sans réveil.
+- **Abonnements** : `subscribe()` fournit un instantané `snapshot`, puis des
+  événements `status` (`model`, `status`, `waiting`, `error`) et `progress`
+  (`stages`, `current`, `value`, au plus toutes les 200 ms). Au-delà de
+  `max_subscriber_events` non lus, les événements en file sont remplacés par
+  un seul `resync` contenant le catalogue courant. `stop()` termine l’abonnement
+  (`cancelled`/`stopped`) ; le détruire n’affecte aucun modèle.
+- **Arrêt** : `stop()` ferme les admissions, termine les attentes, interrompt
+  les chargements, arrête chaque modèle puis joint tous les threads (chargement,
+  entretien, décodeurs). Aucun sous-processus ni port n’est utilisé.
+
+Threads possédés par un moteur multi-modèles : un thread d’entretien (délais,
+déchargements, jointures), un thread de chargement par chargement en cours
+(borné par `max_loaded`), et pour chaque modèle résident son décodeur et son
+worker. Aucun thread par requête.
 
 ## Ressources globales et transition
 

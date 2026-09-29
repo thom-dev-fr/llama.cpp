@@ -7,6 +7,7 @@
 #include "server-http.h"
 #include "server-queue.h"
 #include "server-process.h"
+#include "engine-scheduler.h"
 
 #include <mutex>
 #include <condition_variable>
@@ -213,6 +214,9 @@ private:
     bool debug_fake_timing = false;
 
     void update_meta(const std::string & name, const server_model_meta & meta);
+
+    // exact name, then aliases; caller must hold mutex
+    std::map<std::string, instance_t>::iterator find_instance(const std::string & name);
 
     // unload least recently used models if the limit is reached
     void unload_lru();

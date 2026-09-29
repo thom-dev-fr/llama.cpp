@@ -123,8 +123,9 @@ void server_queue::wait_until_no_sleep() {
             condition_tasks.notify_one(); // only main thread is waiting on this
         }
         QUE_DBG("%s", "waiting until no sleep\n");
+        const uint64_t failures = wake_failures;
         condition_tasks.wait(lock, [&]{
-            return !sleeping || !running;
+            return !sleeping || !running || wake_failures != failures;
         });
     }
 }
@@ -133,12 +134,21 @@ bool server_queue::acquire_context(bool wake) {
     std::unique_lock<std::mutex> lock(mutex_tasks);
     if (sleeping) {
         if (!wake) { return false; }
+        const uint64_t failures = wake_failures;
         req_stop_sleeping = true;
         condition_tasks.notify_all();
-        condition_tasks.wait(lock, [&] { return !sleeping || !running; });
+        condition_tasks.wait(lock, [&] { return !sleeping || !running || wake_failures != failures; });
+        if (sleeping) { return false; } // stopped, or the reload failed
     }
     if (!running) { return false; }
     ++preparation_readers;
+    return true;
+}
+
+bool server_queue::wake_failed(std::string & error) {
+    std::lock_guard<std::mutex> lock(mutex_tasks);
+    if (!running || !sleeping || wake_failures == 0) { return false; }
+    error = last_wake_error;
     return true;
 }
 
@@ -353,18 +363,33 @@ void server_queue::start_loop(int64_t idle_sleep_ms) {
                     cb(true);
                 }
                 req_stop_sleeping = false;
-                // wait until we are requested to exit sleeping state
-                condition_tasks.wait(lock, [&]{
-                    return (!running || req_stop_sleeping);
-                });
-                if (!running) { // may changed during sleep
-                    break; // terminate
+                bool woken = false;
+                while (!woken) {
+                    // wait until we are requested to exit sleeping state
+                    condition_tasks.wait(lock, [&]{
+                        return (!running || req_stop_sleeping);
+                    });
+                    if (!running) { // may changed during sleep
+                        break;
+                    }
+                    QUE_INF("%s", "exiting sleeping state\n");
+                    req_stop_sleeping = false;
+                    try {
+                        // Call order cb{N} -> cb1 -> cb0
+                        for (size_t i = callback_sleeping_state.size(); i > 0; i--) {
+                            callback_sleeping_state[i - 1](false);
+                        }
+                        woken = true;
+                    } catch (const std::exception & e) {
+                        // recoverable: stay asleep, report to the waiters, retry on the next request
+                        QUE_ERR("failed to exit sleeping state: %s\n", e.what());
+                        last_wake_error = e.what();
+                        wake_failures++;
+                        condition_tasks.notify_all();
+                    }
                 }
-                QUE_INF("%s", "exiting sleeping state\n");
-                req_stop_sleeping = false;
-                // Call order cb{N} -> cb1 -> cb0
-                for (size_t i = callback_sleeping_state.size(); i > 0; i--) {
-                    callback_sleeping_state[i - 1](false);
+                if (!woken) {
+                    break; // terminate
                 }
                 sleeping = false;
                 time_last_task = ggml_time_ms();

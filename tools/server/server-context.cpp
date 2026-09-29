@@ -64,7 +64,8 @@ std::unique_ptr<server_res_generator> server_routes::handle_operation(
         if (item.data.is_object() && item.data.contains("code")) {
             return json::parse(item.data.dump());
         }
-        auto type = item.category == "invalid_request" ? ERROR_TYPE_INVALID_REQUEST : ERROR_TYPE_SERVER;
+        auto type = item.category == "invalid_request" ? ERROR_TYPE_INVALID_REQUEST
+                  : item.category == "wake_failed"     ? ERROR_TYPE_UNAVAILABLE : ERROR_TYPE_SERVER;
         return format_error_response(item.message, type);
     };
     auto next = [state](const std::function<bool()> & should_stop) {

@@ -256,169 +256,37 @@ private:
     std::thread th;
 };
 
-struct server_lru_sched {
-    server_lru_sched(server_models & models) : models(models) {}
-
-    bool has_capacity(std::unique_lock<std::mutex> & lk) {
-        check_lock(lk);
-        return models.base_params.models_max <= 0
-            || count_running() < (size_t) models.base_params.models_max;
-    }
-
-    // returns "" if no model can be given up
-    std::string pick_victim(std::unique_lock<std::mutex> & lk) {
-        check_lock(lk);
-        std::string victim;
-        int64_t victim_last_used = 0;
-        for (const auto & m : models.mapping) {
-            // a busy model is mid-request, one still coming up has no request to finish
-            if (m.second.req_count != 0 || !m.second.meta.is_ready_or_sleep()) {
-                continue;
+// The load queue and LRU policy are shared with the in-process engine
+// (engine/engine-scheduler.h); this adapter exposes the router's children to it.
+// Removed with the process router in P6.
+struct server_lru_sched : llama_engine::detail::load_queue {
+    server_lru_sched(server_models & models) : load_queue(models.mutex) {
+        max_models = [&models]() { return models.base_params.models_max; };
+        each_model = [&models](const usage_visitor & visit) {
+            for (const auto & m : models.mapping) {
+                llama_engine::detail::model_usage usage;
+                usage.running        = m.second.meta.is_running();
+                usage.ready_or_sleep = m.second.meta.is_ready_or_sleep();
+                usage.busy           = m.second.req_count != 0;
+                usage.stopping       = models.stopping_models.count(m.first) > 0;
+                usage.last_used      = m.second.meta.last_used;
+                visit(m.first, usage);
             }
-            // already on its way out, or a queued request wants it
-            if (models.stopping_models.count(m.first) || find(m.first)) {
-                continue;
-            }
-            if (victim.empty() || m.second.meta.last_used < victim_last_used) {
-                victim           = m.first;
-                victim_last_used = m.second.meta.last_used;
-            }
-        }
-        return victim;
-    }
-
-    // requests wanting the same model share one entry, so they all need only one slot
-    // and all get unblocked by the single load that entry performs
-    void join(std::unique_lock<std::mutex> & lk, const std::string & model_id) {
-        check_lock(lk);
-        if (entry_t * e = find(model_id)) {
-            e->n_waiters++;
-            SRV_INF("request for name=%s joined the queue, %d waiting\n", model_id.c_str(), e->n_waiters);
-            return;
-        }
-        queue.push_back({ model_id, 1, false });
-        SRV_INF("request for name=%s queued at position %zu\n",
-                model_id.c_str(), queue.size());
-    }
-
-    void leave(std::unique_lock<std::mutex> & lk, const std::string & model_id) {
-        check_lock(lk);
-        for (auto it = queue.begin(); it != queue.end(); ++it) {
-            if (it->model_id == model_id) {
-                if (--it->n_waiters <= 0) {
-                    queue.erase(it); // last one waiting for this model went away
-                }
-                return;
-            }
-        }
-    }
-
-    bool queue_empty(std::unique_lock<std::mutex> & lk) {
-        check_lock(lk);
-        return queue.empty();
-    }
-
-    // true if it is this model's turn to load, and nobody is loading it yet
-    bool try_claim(std::unique_lock<std::mutex> & lk, const std::string & model_id) {
-        check_lock(lk);
-        if (queue.empty() || queue.front().model_id != model_id || queue.front().loading) {
-            return false;
-        }
-        if (!has_capacity(lk)) {
-            return false;
-        }
-        queue.front().loading = true;
-        return true;
-    }
-
-    // on failure the entry is back in line; on success it stays until its waiters leave,
-    // so the model coming up is never picked as a victim before they use it
-    void claim_done(std::unique_lock<std::mutex> & lk, const std::string & model_id, bool ok) {
-        check_lock(lk);
-        if (ok) {
-            return;
-        }
-        for (auto it = queue.begin(); it != queue.end(); ++it) {
-            if (it->model_id == model_id) {
-                it->loading = false;
-                return;
-            }
-        }
-    }
-
-    // evict idle models while queued requests outnumber the slots that are free or being freed
-    // caller must hold models.mutex; never blocks, so it is safe from any thread
-    void tick(std::unique_lock<std::mutex> & lk) {
-        check_lock(lk);
-        if (models.base_params.models_max <= 0 || queue.empty()) {
-            return;
-        }
-        int n_running  = 0;
-        int n_stopping = 0;
-        for (const auto & m : models.mapping) {
-            if (m.second.meta.is_running()) {
-                n_running++;
-                if (models.stopping_models.count(m.first)) {
-                    n_stopping++;
-                }
-            }
-        }
-        int n_needed  = 0;
-        int n_claimed = 0; // claimed the slot, but load() has not spawned yet
-        for (const auto & e : queue) {
-            if (!e.loading) {
-                n_needed++;
-                continue;
-            }
-            auto it = models.mapping.find(e.model_id);
-            if (it != models.mapping.end() && !it->second.meta.is_running()) {
-                n_claimed++;
-            }
-        }
-        int n_free = models.base_params.models_max - n_running + n_stopping - n_claimed;
-        while (n_free < n_needed) {
-            std::string victim = pick_victim(lk);
-            if (victim.empty()) {
-                return; // all remaining models are busy, wait for a request to end
-            }
+        };
+        evict = [&models](const std::string & victim) {
             SRV_INF("evicting idle LRU name=%s for a queued request\n", victim.c_str());
             models.request_stop(victim);
-            n_free++;
+        };
+    }
+
+    void join(std::unique_lock<std::mutex> & lk, const std::string & model_id) {
+        int n_waiters = load_queue::join(lk, model_id);
+        if (n_waiters > 1) {
+            SRV_INF("request for name=%s joined the queue, %d waiting\n", model_id.c_str(), n_waiters);
+        } else {
+            SRV_INF("request for name=%s queued at position %zu\n", model_id.c_str(), position(lk, model_id));
         }
     }
-
-  private:
-    struct entry_t {
-        std::string model_id;
-        int  n_waiters; // requests waiting for this model
-        bool loading;   // one of the waiters is doing the load right now
-    };
-
-    entry_t * find(const std::string & model_id) {
-        for (auto & e : queue) {
-            if (e.model_id == model_id) {
-                return &e;
-            }
-        }
-        return nullptr;
-    }
-
-    void check_lock(std::unique_lock<std::mutex> & lk) {
-        GGML_ASSERT(lk.owns_lock() && lk.mutex() == &models.mutex);
-    }
-
-    size_t count_running() {
-        size_t count = 0;
-        for (const auto & m : models.mapping) {
-            if (m.second.meta.is_running()) {
-                count++;
-            }
-        }
-        return count;
-    }
-
-    server_models & models;
-    std::deque<entry_t> queue;
 };
 
 // short loopback budget for the resumable stream router to child JSON calls (probe, lookup,
@@ -584,6 +452,12 @@ server_models::server_models(
 }
 
 server_models::~server_models() = default;
+
+std::map<std::string, server_models::instance_t>::iterator server_models::find_instance(const std::string & name) {
+    return llama_engine::detail::find_model(mapping, name, [](const instance_t & inst) -> const std::set<std::string> & {
+        return inst.meta.aliases;
+    });
+}
 
 void server_models::instance_t::request_exit() const {
     request_child_exit(*subproc);
@@ -1019,15 +893,7 @@ void server_models::update_meta(const std::string & name, const server_model_met
 
 bool server_models::has_model(const std::string & name) {
     std::lock_guard<std::mutex> lk(mutex);
-    if (mapping.find(name) != mapping.end()) {
-        return true;
-    }
-    for (const auto & [key, inst] : mapping) {
-        if (inst.meta.aliases.count(name)) {
-            return true;
-        }
-    }
-    return false;
+    return find_instance(name) != mapping.end();
 }
 
 std::optional<server_model_meta> server_models::get_meta(const std::string & name) {
@@ -1038,14 +904,9 @@ std::optional<server_model_meta> server_models::get_meta(const std::string & nam
         lk.lock();
     }
 
-    auto it = mapping.find(name);
+    auto it = find_instance(name);
     if (it != mapping.end()) {
         return it->second.meta;
-    }
-    for (const auto & [key, inst] : mapping) {
-        if (inst.meta.aliases.count(name)) {
-            return inst.meta;
-        }
     }
     return std::nullopt;
 }

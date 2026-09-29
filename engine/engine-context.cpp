@@ -914,6 +914,8 @@ private:
 
     bool sleeping = false;
 
+    std::atomic<bool> load_cancelled {false};
+
     int64_t t_last_load_progress_ms = 0;
 
     void destroy() {
@@ -944,7 +946,10 @@ private:
         } else {
             SRV_INF("%s", "server is exiting sleeping state\n");
             if (!load_model(params_base)) {
-                GGML_ABORT("failed to reload model after sleeping");
+                // recoverable: release what the partial reload got, stay asleep and
+                // let the queue report the failure (it retries on the next request)
+                destroy();
+                throw std::runtime_error("failed to reload model after sleeping");
             }
         }
         sleeping = new_state;
@@ -960,6 +965,9 @@ private:
     static bool load_progress_callback(float progress, void * user_data) {
         auto * d = static_cast<load_progress_data *>(user_data);
         GGML_ASSERT(d);
+        if (d->ctx->load_cancelled.load()) {
+            return false; // cooperative cancellation of the load (explicit unload/stop)
+        }
         // always emit the first and final sample; throttle the rest to one per 200ms
         {
             auto & t_last = d->t_last_load_progress_ms;
@@ -4251,6 +4259,10 @@ server_context_meta server_context::get_meta() const {
         /* model_size             */ llama_model_size(impl->model_tgt),
         /* model_ftype            */ ftype_name,
     };
+}
+
+void server_context::cancel_load() {
+    impl->load_cancelled = true;
 }
 
 void server_context::set_state_callback(server_state_callback_t callback) {

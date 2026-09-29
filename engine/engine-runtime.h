@@ -1,6 +1,7 @@
 #pragma once
 #include "llama-engine.h"
 #include "server-queue.h"
+#include <atomic>
 #include <map>
 
 struct server_context;
@@ -25,7 +26,7 @@ struct request_state {
     std::vector<json> complete;
     size_t capacity = 256;
     size_t remaining = 0;
-    bool stream = false;
+    std::atomic<bool> stream {false}; // readers may check it while a queued request is prepared
     bool fail_on_no_slot = false;
     task_response_type format = TASK_RESPONSE_TYPE_NONE;
     int32_t sse_ping_interval = 30;
@@ -34,7 +35,13 @@ struct request_state {
     event terminal;
     server_task_result_ptr native_error;
     std::function<void()> cancel_work;
+    // Called once, outside the state lock, when the terminal result is decided.
+    std::function<void()> on_finish;
 
+    // Installs on_finish unless the request is already finished.
+    bool attach_finish_hook(std::function<void()> hook);
+    // Replaces cancel_work unless the request is already finished.
+    bool attach_cancel(std::function<void()> cancel);
     void push(server_task_result_ptr result);
     void finish(event end);
     void cancel();
@@ -79,6 +86,14 @@ std::shared_ptr<request_state> submit_state(const std::shared_ptr<runtime> & run
 void submit_native(const std::shared_ptr<runtime> & run, const std::shared_ptr<request_state> & state,
                    const ::json & data, operation op = operation::completion,
                    const std::vector<attachment> & files = {});
-void request_stop(const std::shared_ptr<runtime> & run);
+// Surviving requests end with reason (cancelled/stopped by default).
+void request_stop(const std::shared_ptr<runtime> & run, const event & reason = {event_type::cancelled, nullptr, "stopped", "Engine stopped"});
+// Prepares public JSON for submit_native: size limit, generation defaults.
+// Returns false after finishing state with an invalid_request error.
+bool prepare_input(const config & limits, request_state & state, const json & input,
+                   const std::vector<attachment> & files, operation op, ::json & data);
+// The common_params equivalent of the public configuration (single source).
+common_params to_common_params(const config & settings);
+bool valid_config(const config & settings);
 void stop(const std::shared_ptr<runtime> & run);
 } }

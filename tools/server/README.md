@@ -2097,7 +2097,7 @@ Example of an error:
 
 The server supports an automatic sleep mode that activates after a specified period of inactivity (no incoming tasks). This feature, introduced in [PR #18228](https://github.com/ggml-org/llama.cpp/pull/18228), can be enabled using the `--sleep-idle-seconds` command-line argument. It works seamlessly in both single-model and multi-model configurations.
 
-When the server enters sleep mode, the model and its associated memory (including the KV cache) are unloaded from RAM to conserve resources. Any new incoming task will automatically trigger the model to reload.
+When the server enters sleep mode, the model and its associated memory (including the KV cache) are unloaded from RAM to conserve resources. Any new incoming task will automatically trigger the model to reload. If the reload fails, the request receives a `503` error, the server stays asleep and the next request tries again.
 
 The sleeping status can be retrieved from the `GET /props` endpoint (or `/props?model=(model_name)` in router mode).
 

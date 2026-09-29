@@ -332,6 +332,8 @@ Call stack on waking up:
     - nothing to do, the cache is only read during sleep
 - `sleeping = false` --> `notify_all` unblocks the HTTP thread, the request is handled as usual
 
+If the reload fails (for example the model file disappeared), `handle_sleeping_state` frees the partial reload and throws instead of aborting the process. `start_loop` stays asleep, records the error and wakes the waiters: the request fails with `503` (`wake_failed` in the engine API) and the next request retries the reload.
+
 Endpoints created with `create_response(true)` (`/health`, `/props`, `/models`, `/metrics`) skip `wait_until_no_sleep`, so they answer from the cached responses instead of waking the server.
 
 ### Notable Related PRs

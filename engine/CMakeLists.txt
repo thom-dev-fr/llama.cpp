@@ -6,9 +6,12 @@ llama_add_compile_flags()
 add_library(llama-engine
     engine-context.cpp
     engine-context.h
+    engine-models.cpp
+    engine-models.h
     engine-operations.cpp
     engine-operations.h
     engine-runtime.h
+    engine-scheduler.h
     llama-engine.cpp
     ../include/llama-engine.h
     server-attachment.h

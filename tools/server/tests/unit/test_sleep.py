@@ -184,3 +184,32 @@ def test_malformed_request_preserves_wake_and_capability_priority(path, status):
     )
     assert response.status_code == status
     assert not is_sleeping(server)
+
+
+def test_failed_wake_up_is_reported_and_recoverable(tmp_path):
+    # before the engine, a failed reload after sleeping aborted the process
+    import glob
+    import shutil
+    cached = glob.glob(os.path.join(TMP_DIR, "models--ggml-org--test-model-stories260K", "snapshots", "*", "*.gguf"))
+    assert cached, "stories260K fixture is not cached"
+    model = tmp_path / "model.gguf"
+    shutil.copyfile(cached[0], model)
+
+    server.model_hf_repo = None
+    server.model_file = str(model)
+    server.sleep_idle_seconds = 1
+    server.start()
+    wait_for_sleep(server)
+
+    model.rename(tmp_path / "moved.gguf")
+    res = server.make_request("POST", "/completion", data={"n_predict": 1, "prompt": "Hello"})
+    assert res.status_code == 503
+    assert "failed to reload model after sleeping" in res.body["error"]["message"]
+    assert is_sleeping(server)
+    res = server.make_request("GET", "/health")
+    assert res.status_code == 200
+
+    (tmp_path / "moved.gguf").rename(model)
+    res = server.make_request("POST", "/completion", data={"n_predict": 1, "prompt": "Hello"})
+    assert res.status_code == 200
+    assert not is_sleeping(server)

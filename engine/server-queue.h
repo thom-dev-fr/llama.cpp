@@ -19,6 +19,8 @@ private:
     bool running  = true;
     bool sleeping = false;
     bool req_stop_sleeping = false;
+    uint64_t wake_failures = 0;   // failed attempts to exit the sleeping state
+    std::string last_wake_error;
     size_t preparation_readers = 0;
     int64_t time_last_task = 0;
 
@@ -68,7 +70,7 @@ public:
     void pop_deferred_task(int id_slot);
 
     // if sleeping, request exiting sleep state and wait until it is done
-    // returns immediately if not sleeping
+    // returns immediately if not sleeping, and after a failed attempt
     void wait_until_no_sleep();
 
     bool is_sleeping() {
@@ -77,8 +79,11 @@ public:
     }
 
     // Pin model resources during transport-independent request preparation.
+    // Returns false if stopped, or if waking up failed (the queue stays asleep).
     bool acquire_context(bool wake = true);
     void release_context();
+    // True, with the error, while asleep after a failed attempt to wake up.
+    bool wake_failed(std::string & error);
 
     // end the start_loop routine
     void terminate();

@@ -129,6 +129,10 @@ struct server_context {
 
     // note: must be set before load_model() is called
     void set_state_callback(server_state_callback_t callback);
+
+    // Makes a load_model() in progress on another thread fail at its next
+    // progress report. Thread-safe; there is no strict interruption delay.
+    void cancel_load();
 };
 
 
