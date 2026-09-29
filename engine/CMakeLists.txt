@@ -1,10 +1,14 @@
 find_package(Threads REQUIRED)
 llama_add_compile_flags()
 
-# First extraction lot: request conversion, tasks and queues. The decoder loop
-# and the public lifetime/request interface follow in P2; these headers remain
-# private compatibility interfaces for the existing HTTP adapter until P8.
+# Shared decoder, request conversion and public lifetime API. Historical server_*
+# names remain private compatibility interfaces for the HTTP adapter until P8.
 add_library(llama-engine
+    engine-context.cpp
+    engine-context.h
+    engine-runtime.h
+    llama-engine.cpp
+    ../include/llama-engine.h
     server-attachment.h
     server-chat.cpp
     server-chat.h
@@ -24,9 +28,9 @@ set_target_properties(llama-engine PROPERTIES
     MACHO_CURRENT_VERSION 0
 )
 # Temporary visibility for the legacy adapter's private types, not installed as
-# public headers. The limited public interface is introduced separately in P2.
+# public headers. Only include/llama-engine.h is the embedding interface.
 target_include_directories(llama-engine PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
-target_link_libraries(llama-engine PUBLIC llama-common-local mtmd Threads::Threads)
+target_link_libraries(llama-engine PUBLIC llama-common-local mtmd Threads::Threads vendor::nlohmann)
 target_compile_features(llama-engine PUBLIC cxx_std_17)
 
 if (TARGET llama-common-acquisition)
@@ -42,3 +46,5 @@ if (BUILD_SHARED_LIBS)
 endif()
 
 install(TARGETS llama-engine LIBRARY)
+
+install(FILES ../include/llama-engine.h DESTINATION include)

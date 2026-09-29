@@ -46,14 +46,17 @@ The server supports two primary operating modes:
 The core architecture consists of the following components:
 
 The [embedded inference engine migration](../../docs/design/embedded-inference-engine-plan.md)
-is in progress. `llama-engine` now owns the shared task, queue, schema, chat and
-multimodal request-conversion implementations in `engine/`. The `server-*.h`
-headers here temporarily forward to those private headers; they are not a
-public embedding interface. The decoder loop, request lifetime management and
-HTTP handlers still live in `server-context.cpp` at this stage. See the
-[progress journal](../../docs/design/embedded-inference-engine-progress.md) for
-validated profiles and remaining work. SSE wire formatting and child-process IO
-stay in `server-wire.*` and `server-process.*`, outside the engine target.
+is in progress. `llama-engine` owns the decoder, task preparation and bounded
+native completion requests in `engine/`. The public embedding interface is
+[`include/llama-engine.h`](../../include/llama-engine.h), documented in the
+[P2 API guide](../../docs/design/embedded-inference-engine-api.md). Native
+`/completion` and `/completions` use the same request runtime as direct callers.
+The remaining handlers still use private compatibility accessors/readers until
+P3; the `server-*.h` forwarding headers are not a public embedding interface.
+See the [progress journal](../../docs/design/embedded-inference-engine-progress.md)
+for tested profiles and remaining work. SSE wire formatting, replay and child
+process IO stay outside the engine. The legacy `start_loop()` now starts/joins
+the engine-owned thread; direct callers never supply a decode loop.
 
 - `server_context`: Holds the primary inference state, including the main `llama_context` and all active slots.
 - `server_slot`: An abstraction over a single “sequence” in llama.cpp, responsible for managing individual parallel inference requests.

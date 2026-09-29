@@ -9,15 +9,17 @@
 #include <thread>
 #include <vector>
 #include <unordered_set>
+#include <unordered_map>
 
 // struct for managing server tasks
 // in most cases, use server_response_reader to post new tasks and retrieve results
 struct server_queue {
 private:
     int id = 0;
-    bool running  = false;
+    bool running  = true;
     bool sleeping = false;
     bool req_stop_sleeping = false;
+    size_t preparation_readers = 0;
     int64_t time_last_task = 0;
 
     // queues
@@ -73,6 +75,10 @@ public:
         std::unique_lock<std::mutex> lock(mutex_tasks);
         return sleeping;
     }
+
+    // Pin model resources during transport-independent request preparation.
+    bool acquire_context();
+    void release_context();
 
     // end the start_loop routine
     void terminate();
@@ -152,8 +158,12 @@ private:
 // struct for managing server responses
 // in most cases, use server_response_reader to retrieve results
 struct server_response {
+public:
+    using sink_t = std::function<void(server_task_result_ptr)>;
 private:
     bool running = true;
+    std::unordered_map<int, sink_t> sinks;
+    std::unordered_set<int> cancelling_sinks;
 
     // for keeping track of all tasks waiting for the result
     std::unordered_set<int> waiting_task_ids;
@@ -165,6 +175,12 @@ private:
     std::condition_variable condition_results;
 
 public:
+    // Direct bounded engine delivery. Sink registrations are admission leases:
+    // released only by decoder completion or acknowledgement of cancellation.
+    bool add_sinks(const std::unordered_set<int> & ids, size_t limit, sink_t sink);
+    void finish_sink(int id);
+    void cancel_sinks(const std::unordered_set<int> & ids, server_queue & tasks);
+
     // add the id_task to the list of tasks waiting for response
     void add_waiting_task_id(int id_task);
 

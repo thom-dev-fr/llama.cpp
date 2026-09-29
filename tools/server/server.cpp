@@ -1,4 +1,5 @@
 #include "server-context.h"
+#include "engine-runtime.h"
 #include "server-http.h"
 #include "server-models.h"
 #include "server-cors-proxy.h"
@@ -112,7 +113,7 @@ int llama_server(int argc, char ** argv) {
 
     SRV_INF("%s", "initializing ...\n");
 
-    llama_backend_init();
+    engine_backend_init();
     llama_numa_init(params.numa);
 
     const int result = llama_server(params, argc, argv);
@@ -421,7 +422,7 @@ int llama_server(common_params & params, int argc, char ** argv) {
                 models_routes->models.unload_all();
             }
             mcp_mgr.shutdown();
-            llama_backend_free();
+
         };
 
         if (!ctx_http.start()) {
@@ -459,7 +460,7 @@ int llama_server(common_params & params, int argc, char ** argv) {
             ctx_http.stop();
             ctx_server.terminate();
             mcp_mgr.shutdown();
-            llama_backend_free();
+
         };
 
         // start the HTTP server before loading the model to be able to serve /health requests

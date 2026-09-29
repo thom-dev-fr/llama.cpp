@@ -124,9 +124,27 @@ void server_queue::wait_until_no_sleep() {
         }
         QUE_DBG("%s", "waiting until no sleep\n");
         condition_tasks.wait(lock, [&]{
-            return !sleeping;
+            return !sleeping || !running;
         });
     }
+}
+
+bool server_queue::acquire_context() {
+    std::unique_lock<std::mutex> lock(mutex_tasks);
+    if (sleeping) {
+        req_stop_sleeping = true;
+        condition_tasks.notify_all();
+        condition_tasks.wait(lock, [&] { return !sleeping || !running; });
+    }
+    if (!running) { return false; }
+    ++preparation_readers;
+    return true;
+}
+
+void server_queue::release_context() {
+    std::lock_guard<std::mutex> lock(mutex_tasks);
+    --preparation_readers;
+    condition_tasks.notify_all();
 }
 
 void server_queue::terminate() {
@@ -276,8 +294,10 @@ void server_queue::yield_to_queue(std::function<void()> && work) {
 }
 
 void server_queue::start_loop(int64_t idle_sleep_ms) {
-    running = true;
-    time_last_task = ggml_time_ms();
+    {
+        std::lock_guard<std::mutex> lock(mutex_tasks);
+        time_last_task = ggml_time_ms();
+    }
 
     // spawn the worker thread used by yield_to_queue()
     GGML_ASSERT(!worker.thread.joinable() && "start_loop() is already running");
@@ -289,7 +309,7 @@ void server_queue::start_loop(int64_t idle_sleep_ms) {
     constexpr auto max_wait_time = std::chrono::seconds(1);
     auto should_sleep = [&]() -> bool {
         // caller must hold mutex_tasks
-        if (idle_sleep_ms < 0) {
+        if (idle_sleep_ms < 0 || preparation_readers != 0) {
             return false;
         }
         int64_t now = ggml_time_ms();
@@ -481,6 +501,17 @@ void server_response::send(server_task_result_ptr && result) {
     RES_DBG("sending result for task id = %d\n", result->id);
 
     std::unique_lock<std::mutex> lock(mutex_results);
+    auto found = sinks.find(result->id);
+    if (found != sinks.end()) {
+        auto sink = found->second;
+        if ((result->is_stop() || result->is_error()) && !cancelling_sinks.count(result->id)) {
+            cancelling_sinks.erase(result->id);
+            sinks.erase(found);
+        }
+        lock.unlock();
+        sink(std::move(result));
+        return;
+    }
     for (const auto & id_task : waiting_task_ids) {
         if (result->id == id_task) {
             RES_DBG("task id = %d pushed to result queue\n", result->id);
@@ -618,4 +649,30 @@ void server_response_reader::stop() {
     } else {
         SRV_DBG("%s", "all tasks already finished, no need to cancel\n");
     }
+}
+
+bool server_response::add_sinks(const std::unordered_set<int> & ids, size_t limit, sink_t sink) {
+    std::lock_guard<std::mutex> lock(mutex_results);
+    if (ids.size() > limit || sinks.size() > limit - ids.size()) { return false; }
+    for (int id : ids) { sinks.emplace(id, sink); }
+    return true;
+}
+
+void server_response::finish_sink(int id) {
+    std::lock_guard<std::mutex> lock(mutex_results);
+    sinks.erase(id);
+    cancelling_sinks.erase(id);
+}
+
+void server_response::cancel_sinks(const std::unordered_set<int> & ids, server_queue & tasks) {
+    std::lock_guard<std::mutex> lock(mutex_results);
+    std::vector<server_task> cancellations;
+    for (int id : ids) {
+        if (sinks.count(id) && cancelling_sinks.insert(id).second) {
+            server_task task(SERVER_TASK_TYPE_CANCEL);
+            task.id_target = id;
+            cancellations.push_back(std::move(task));
+        }
+    }
+    if (!cancellations.empty()) { tasks.post(std::move(cancellations), true); }
 }
