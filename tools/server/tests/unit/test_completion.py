@@ -2,6 +2,8 @@ import pytest
 import requests
 import time
 import random
+import re
+import threading
 
 from openai import OpenAI
 from utils import *
@@ -370,6 +372,52 @@ def test_completion_parallel_slots(n_slots: int, n_requests: int):
         assert len(res.body["content"]) > 10
         # FIXME: the result is not deterministic when using other slot than slot 0
         # assert match_regex(re_content, res.body["content"])
+
+
+def test_completion_queues_many_concurrent_requests():
+    # More requests than the public engine's default admission limit (64) must
+    # still be queued behind a busy slot, as before the engine migration.
+    global server
+    server.n_slots = 1
+    server.server_metrics = True
+    server.start()
+    n_requests = 70
+
+    blocker = requests.post(server.make_url("/completion"), stream=True, json={
+        "prompt": "Once upon a time", "n_predict": -1, "ignore_eos": True, "stream": True,
+    })
+    assert blocker.status_code == 200
+    lines = blocker.iter_lines()
+    assert next(line for line in lines if line.startswith(b"data: "))
+
+    results = [None] * n_requests
+    def send(i: int):
+        results[i] = server.make_request("POST", "/completion", data={
+            "prompt": "Once upon a time", "n_predict": 4,
+        })
+    threads = [threading.Thread(target=send, args=(i,)) for i in range(n_requests)]
+    for thread in threads:
+        thread.start()
+
+    def n_deferred() -> float:
+        text = server.make_request("GET", "/metrics").body
+        match = re.search(r"^llamacpp:requests_deferred ([0-9.e+]+)$", text, re.MULTILINE)
+        assert match
+        return float(match.group(1))
+
+    # Synchronise on the server's own queue state rather than on model speed.
+    deadline = time.time() + 60
+    while n_deferred() < n_requests and any(t.is_alive() for t in threads):
+        assert time.time() < deadline
+        time.sleep(0.05)
+    blocker.close()
+
+    for thread in threads:
+        thread.join(timeout=60)
+        assert not thread.is_alive()
+    for res in results:
+        assert res is not None and res.status_code == 200, res and res.body
+        assert type(res.body["content"]) == str
 
 
 @pytest.mark.parametrize(

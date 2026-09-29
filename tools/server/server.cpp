@@ -189,6 +189,7 @@ int llama_server(common_params & params, int argc, char ** argv) {
 
     // struct that contains llama context and inference
     server_context ctx_server;
+    llama_engine::detail::apply_http_compat_limits(*ctx_server.runtime);
 
     //
     // Router

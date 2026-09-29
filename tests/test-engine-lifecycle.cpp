@@ -66,6 +66,21 @@ int main() {
     { request handle(abandoned); }
     assert(cancelled == 1 && abandoned->terminal.type == event_type::cancelled);
 
+    // HTTP compatibility: the legacy handlers queued any number of requests and
+    // buffered every result. Public engine defaults stay bounded.
+    runtime http;
+    assert(http.limits.max_tasks == config().max_tasks && http.limits.max_events == config().max_events);
+    apply_http_compat_limits(http);
+    server_response http_responses;
+    std::unordered_set<int> many_ids;
+    for (int id = 100; id < 100 + 1000; ++id) { many_ids.insert(id); }
+    assert(http_responses.add_sinks(many_ids, http.limits.max_tasks, sink));
+    auto buffered = std::make_shared<request_state>();
+    buffered->capacity = http.limits.max_events;
+    buffered->remaining = 1;
+    for (int i = 0; i < 1000; ++i) { buffered->push(payload(100)); }
+    assert(!buffered->finished && buffered->pending.size() == 1000);
+
     // A controlled decoder stands in for a backend call. It stays blocked until
     // explicitly released, so cancellation/stop do not depend on model speed.
     server_context context;

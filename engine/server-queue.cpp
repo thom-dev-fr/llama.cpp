@@ -504,8 +504,8 @@ void server_response::send(server_task_result_ptr && result) {
     auto found = sinks.find(result->id);
     if (found != sinks.end()) {
         auto sink = found->second;
+        // a cancelling sink stays reserved until the decoder acknowledges the cancel
         if ((result->is_stop() || result->is_error()) && !cancelling_sinks.count(result->id)) {
-            cancelling_sinks.erase(result->id);
             sinks.erase(found);
         }
         lock.unlock();

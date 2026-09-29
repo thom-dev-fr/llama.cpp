@@ -65,8 +65,8 @@ void request_state::push(server_task_result_ptr result) {
     if (cancel_fn) { cancel_fn(); }
 }
 
-event request_state::read(std::chrono::milliseconds timeout) {
-    std::lock_guard<std::mutex> reader(reader_mutex);
+native_item request_state::next_native(std::chrono::milliseconds timeout) {
+    // caller holds reader_mutex
     server_task_result_ptr result;
     {
         std::unique_lock<std::mutex> lock(mutex);
@@ -74,7 +74,7 @@ event request_state::read(std::chrono::milliseconds timeout) {
         if (timeout == std::chrono::milliseconds::max()) {
             ready.wait(lock, available);
         } else if (!ready.wait_for(lock, timeout, available)) {
-            return {event_type::timeout, nullptr, {}, {}};
+            return {{event_type::timeout, nullptr, {}, {}}, nullptr};
         }
         if (pending.empty()) {
             if (native_error) {
@@ -82,7 +82,7 @@ event request_state::read(std::chrono::milliseconds timeout) {
                 terminal.message = terminal.data.value("message", terminal.message);
                 native_error.reset();
             }
-            return terminal;
+            return {terminal, nullptr};
         }
         result = std::move(pending.front());
         pending.pop_front();
@@ -90,8 +90,20 @@ event request_state::read(std::chrono::milliseconds timeout) {
     // Conversion runs on the caller, never the decode thread. In particular,
     // the last business payload is delivered before the separate terminal event.
     if (result->index < conversion.size()) { result->update(conversion[result->index]); }
-    auto data = json::parse(safe_json_to_str(result->to_json()));
-    if (!stream && result->index < complete.size()) { complete[result->index] = data; }
+    return {{event_type::payload, nullptr, {}, {}}, std::move(result)};
+}
+
+native_item request_state::read_native(std::chrono::milliseconds timeout) {
+    std::lock_guard<std::mutex> reader(reader_mutex);
+    return next_native(timeout);
+}
+
+event request_state::read(std::chrono::milliseconds timeout) {
+    std::lock_guard<std::mutex> reader(reader_mutex);
+    auto item = next_native(timeout);
+    if (!item.result) { return item.status; }
+    auto data = json::parse(safe_json_to_str(item.result->to_json()));
+    if (!stream && item.result->index < complete.size()) { complete[item.result->index] = data; }
     return {event_type::payload, std::move(data), {}, {}};
 }
 
@@ -100,18 +112,26 @@ void runtime::cancel(const std::unordered_set<int> & ids) {
     if (!stopped && context) { context->responses().cancel_sinks(ids, context->tasks()); }
 }
 
+void apply_http_compat_limits(runtime & run) {
+    constexpr size_t unbounded = std::numeric_limits<size_t>::max();
+    std::lock_guard<std::mutex> lock(run.mutex);
+    run.limits.max_tasks = unbounded;
+    run.limits.max_events = unbounded;
+    run.limits.max_request_bytes = unbounded;
+}
+
 std::unique_ptr<request> submit(const std::shared_ptr<runtime> & run, json input,
                               std::vector<attachment> files) {
+    return std::make_unique<request>(submit_state(run, std::move(input), std::move(files)));
+}
+
+std::shared_ptr<request_state> submit_state(const std::shared_ptr<runtime> & run, json input,
+                                            std::vector<attachment> files) {
     auto state = std::make_shared<request_state>();
-    auto handle = std::make_unique<request>(state);
-    std::lock_guard<std::mutex> lock(run->mutex);
-    if (run->stopped || !run->context) {
-        state->finish({event_type::cancelled, nullptr, "stopped", "Engine stopped"});
-        return handle;
-    }
+    ::json data;
     try {
-        if (!input.is_object()) { throw std::invalid_argument("Expected a JSON object"); }
-        auto bytes = input.dump().size();
+        const bool size_bounded = run->limits.max_request_bytes != std::numeric_limits<size_t>::max();
+        auto bytes = size_bounded ? input.dump().size() : 0;
         for (const auto & file : files) {
             if (file.bytes.size() > run->limits.max_request_bytes - std::min(bytes, run->limits.max_request_bytes)) {
                 throw std::invalid_argument("Request attachments exceed max_request_bytes");
@@ -119,29 +139,67 @@ std::unique_ptr<request> submit(const std::shared_ptr<runtime> & run, json input
             bytes += file.bytes.size();
         }
         if (bytes > run->limits.max_request_bytes) { throw std::invalid_argument("Request exceeds max_request_bytes"); }
-        json merged = run->limits.generation_defaults;
-        merged.update(input);
-        state->stream = merged.value("stream", false);
-        state->capacity = run->limits.max_events;
+        if (!run->limits.generation_defaults.empty()) {
+            if (!input.is_object()) { throw std::invalid_argument("Expected a JSON object"); }
+            json merged = run->limits.generation_defaults;
+            merged.update(input);
+            input = std::move(merged);
+        }
         // Binary buffers are owned by this invocation throughout preparation.
         // Native completions embed media in their existing JSON schema; named
         // attachments are reserved for the operations migrated in P3.
         if (!files.empty()) { throw std::invalid_argument("Native completion uses multimodal_data; named attachments are not supported by this operation"); }
-        auto & context = *run->context;
-        struct context_pin {
-            server_queue & queue;
-            bool held;
-            explicit context_pin(server_queue & queue) : queue(queue), held(queue.acquire_context()) {}
-            ~context_pin() { if (held) { queue.release_context(); } }
-        } pin(context.tasks());
-        if (!pin.held) {
+        data = ::json::parse(input.dump());
+    } catch (const std::exception & error) {
+        state->finish({event_type::error, nullptr, "invalid_request", error.what()});
+        return state;
+    }
+    submit_native(run, state, data);
+    return state;
+}
+
+void submit_native(const std::shared_ptr<runtime> & run, const std::shared_ptr<request_state> & state,
+                   const ::json & data) {
+    {
+        std::lock_guard<std::mutex> lock(run->mutex);
+        if (run->stopped || !run->context) {
             state->finish({event_type::cancelled, nullptr, "stopped", "Engine stopped"});
-            return handle;
+            return;
         }
-        auto tasks = context.prepare_completion(::json::parse(merged.dump()), SERVER_TASK_TYPE_COMPLETION,
-                                                TASK_RESPONSE_TYPE_NONE, {}, run->limits.max_tasks);
+        ++run->preparing; // stop() waits for this before the context can be released
+    }
+    struct preparation {
+        runtime & run;
+        ~preparation() {
+            std::lock_guard<std::mutex> lock(run.mutex);
+            --run.preparing;
+            run.prepared.notify_all();
+        }
+    } preparing {*run};
+    try {
+        state->capacity = run->limits.max_events;
+        auto & context = *run->context;
+        std::vector<server_task> tasks;
+        {
+            // Shape and field validation (including non-object input) is left to
+            // the task schema, so errors match the server's historical messages.
+            // Preparation runs concurrently on the submitting threads, as before.
+            struct context_pin {
+                server_queue & queue;
+                bool held;
+                explicit context_pin(server_queue & queue) : queue(queue), held(queue.acquire_context()) {}
+                ~context_pin() { if (held) { queue.release_context(); } }
+            } pin(context.tasks());
+            if (!pin.held) {
+                state->finish({event_type::cancelled, nullptr, "stopped", "Engine stopped"});
+                return;
+            }
+            tasks = context.prepare_completion(data, SERVER_TASK_TYPE_COMPLETION,
+                                               TASK_RESPONSE_TYPE_NONE, {}, run->limits.max_tasks);
+        }
         auto ids = server_task::get_list_id(tasks);
         if (ids.empty()) { throw std::invalid_argument("No prompts supplied"); }
+        state->stream = tasks.front().params.stream; // validated by the task schema
         state->remaining = ids.size();
         state->complete.resize(ids.size());
         size_t index = 0;
@@ -155,10 +213,16 @@ std::unique_ptr<request> submit(const std::shared_ptr<runtime> & run, json input
         }
         std::weak_ptr<runtime> weak = run;
         state->cancel_work = [weak, ids] { if (auto owner = weak.lock()) { owner->cancel(ids); } };
+
+        std::lock_guard<std::mutex> lock(run->mutex);
+        if (run->stopped) {
+            state->finish({event_type::cancelled, nullptr, "stopped", "Engine stopped"});
+            return;
+        }
         if (!context.responses().add_sinks(ids, run->limits.max_tasks,
                 [state](server_task_result_ptr result) { state->push(std::move(result)); })) {
             state->finish({event_type::error, nullptr, "capacity_exceeded", "Engine task limit reached"});
-            return handle;
+            return;
         }
         // Expired handles never cause an unbounded bookkeeping list.
         run->requests.erase(std::remove_if(run->requests.begin(), run->requests.end(),
@@ -175,7 +239,6 @@ std::unique_ptr<request> submit(const std::shared_ptr<runtime> & run, json input
     } catch (const std::exception & error) {
         state->finish({event_type::error, nullptr, "invalid_request", error.what()});
     }
-    return handle;
 }
 
 void request_stop(const std::shared_ptr<runtime> & run) {
@@ -195,6 +258,11 @@ void request_stop(const std::shared_ptr<runtime> & run) {
 
 void stop(const std::shared_ptr<runtime> & run) {
     request_stop(run);
+    {
+        // Submitting threads may still be preparing against the context.
+        std::unique_lock<std::mutex> lock(run->mutex);
+        run->prepared.wait(lock, [&] { return run->preparing == 0; });
+    }
     std::lock_guard<std::mutex> join(run->join_mutex);
     if (run->decoder.joinable()) { run->decoder.join(); }
 }

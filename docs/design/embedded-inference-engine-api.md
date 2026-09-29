@@ -2,7 +2,8 @@
 
 L’interface expérimentale est `include/llama-engine.h`, dans le namespace
 `llama_engine`. Lier `llama-engine` suffit dans le graphe CMake du dépôt ; le
-header public utilise le `nlohmann::json` fourni par la cible `vendor::nlohmann`.
+header public utilise `nlohmann::ordered_json` (alias `llama_engine::json`), fourni par
+la cible `vendor::nlohmann`, afin de conserver l’ordre natif des champs.
 Aucune stabilité ABI ni installation autonome complète n’est promise à P2.
 Le consommateur compilé et testé est `tests/test-engine.cpp`.
 
@@ -63,8 +64,10 @@ supplémentaire n’est revendiquée.
 ## Concurrence, durée de vie et bornes
 
 - `completion()` et `stop()` peuvent être appelés concurremment. La préparation
-  est sérialisée par moteur, exécutée sur le thread appelant et protégée contre
-  le sommeil du contexte. Le moteur possède le thread de décodage et le worker
+  (validation, tokenisation, médias) s’exécute sur le thread appelant, en
+  parallèle entre appelants comme dans le serveur historique, hors du verrou du
+  moteur et protégée contre le sommeil du contexte. `stop()` attend la fin des
+  préparations en cours avant de libérer le modèle. Le moteur possède le thread de décodage et le worker
   déjà utilisé par l’ordonnanceur ; aucun thread par requête n’est créé.
 - `next()`/`next_for()`/`result()` utilisent un lecteur sérialisé. Utiliser un seul
   lecteur logique par requête ; `cancel()` peut être appelé depuis un autre
@@ -89,9 +92,17 @@ supplémentaire n’est revendiquée.
   conserve son issue dans un emplacement séparé de la file. Les autres
   requêtes continuent. `max_request_bytes` (16 MiB) borne l’entrée sérialisée.
   Ces limites ne constituent pas un budget global de mémoire CPU/GPU.
+- Ces valeurs sont les défauts d’un consommateur embarqué. Le serveur HTTP
+  applique `detail::apply_http_compat_limits` à son instance : aucune limite
+  d’admission, de file ni de taille propre au moteur, comme le serveur upstream.
+  Son adapter lit les résultats natifs (`read_native`) et les sérialise une seule
+  fois, sans passer par le type JSON public.
 - La conversion des résultats et le remplacement des octets UTF-8 invalides
   ont lieu sur le lecteur. Le moteur ne produit pas de SSE. Le serveur garde
   le statut HTTP, l’encodage SSE, les keep-alives et la déconnexion.
+
+La validation de forme de la requête (objet, champs, types) est celle du schéma
+de tâche existant ; les messages d’erreur sont ceux du serveur historique.
 
 Catégories d’erreur actuelles : `invalid_config`, `load_failed`, `invalid_request`,
 `capacity_exceeded`, `queue_full`, `inference_error`.

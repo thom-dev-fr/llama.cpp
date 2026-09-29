@@ -7,9 +7,10 @@
 - P0/P1 : inventaire, références et graphe recontrôlés ; 16/16 tests locaux dans chaque profil et 9/9 tests C++ ciblés repassés avant P2. Les réserves de performance et capacités consignées à P1 restent ouvertes.
 - P2 : `include/llama-engine.h`, décodeur unique dans `engine/`, handlers `/completion` et `/completions` migrés. Voir la section P2 et [le guide API](embedded-inference-engine-api.md). CLI local et routeur conservent leurs chemins legacy jusqu’à P6/P7.
 - Références obligatoires lues intégralement : CONTEXT, design, ADR 0001, CONTRIBUTING, README-dev serveur et README tests serveur.
-- P2 : changements non commités, aucun staging automatique. Les notes « non suivis » des lots P0/P1 décrivent leur état historique ; ces lots figurent désormais dans HEAD.
+- P2 commité dans `da40e15ae`. Les notes « non suivis » des lots P0/P1 décrivent leur état historique ; ces lots figurent désormais dans HEAD.
+- **Revue P0–P2 du 29 septembre 2026** : régressions HTTP de `/completion` trouvées puis corrigées (voir « P2 — Correctif de revue »). **Décision** : le serveur conserve la sémantique upstream, sans aucune régression observable ; les bornes restent le défaut de l’API embarquée. Parité vérifiée octet par octet et en performance contre `e4c142c`. Correctif non commité à la fin de cette session.
 - Swift / XCFramework : hors périmètre.
-- Passation : tous les builds/tests lancés sont terminés ; aucun travail de fond laissé à reprendre. `git diff --check` final passe. Aucun commit ni staging automatique effectué.
+- Passation : tous les builds/tests lancés sont terminés ; aucun travail de fond laissé à reprendre. `git diff --check` final passe.
 - Légende : PASS = exécuté et vérifié ; FAIL = exécuté, assertion/build échoué ; BLOCKED = prérequis indisponible ; OUVERT = non encore implémenté/vérifié. Un test sauté n’est jamais PASS.
 - Preuves locales : `build-agent-engine-evidence/` (répertoire ignoré par Git, commandes et synthèses ci-dessous pour reproduction).
 
@@ -482,9 +483,98 @@ ASAN_OPTIONS=detect_leaks=0 UBSAN_OPTIONS=halt_on_error=1 \
 - Le réveil legacy qui échoue contient encore un `GGML_ABORT` : P4 doit le remplacer par un état d’échec récupérable. Le moteur public P2 n’active pas de sommeil automatique. Les assertions fatales natives restantes sont conservées, conformément aux limites du design.
 - Les capacités desktop du routeur, du CLI et des outils ne sont pas réécrites par P2. La suppression des processus d’inférence reste P6/P7 ; Swift demeure hors périmètre.
 
+## P2 — Correctif de revue : parité HTTP avec upstream
+
+### Constat
+
+Le runtime créé par `server.cpp` gardait les valeurs par défaut de `llama_engine::config` (`max_tasks=64`, `max_events=256`, `max_request_bytes=16 MiB`), non configurables côté serveur et non documentées comme écart. Mesure avec `llama-server -np 1` et 80 requêtes simultanées de 32 tokens : `/completion` **65 × 200 et 15 × 500** (« Engine task limit reached »), tandis que le chemin legacy `/v1/completions` répondait **80 × 200**. Avant P2, `/completion` mettait ces requêtes en file sans limite. Le critère P2 « le handler HTTP migré passe ses tests existants » était satisfait, mais le comportement n’était pas préservé : **FAIL** de compatibilité, non détecté par les suites existantes. Un lecteur SSE lent pouvait aussi atteindre `max_events=256` ; ce cas n’a pas été reproduit sur cet hôte, car les buffers socket loopback ont absorbé 2047 événements.
+
+### Correctif
+
+- `llama_engine::detail::apply_http_compat_limits(runtime &)` (`engine/engine-runtime.h`, `engine/llama-engine.cpp`) rend explicites les limites de l’adapter HTTP : admissions, événements et taille des requêtes sans borne, comme avant P2. La taille des corps reste gouvernée par la couche HTTP. `server.cpp` l’applique à la construction du contexte, avant tout handler ou démarrage du décodeur ; le serveur local du CLI legacy passe par le même chemin.
+- **L’API publique garde ses bornes par défaut** (`engine::create` remplace les limites par `config`). Aucun changement de l’ordonnanceur ni des sinks.
+- Quand `max_request_bytes` n’est pas borné, `submit` ne resérialise plus le JSON d’entrée juste pour le mesurer.
+
+### Décision (29 septembre 2026)
+
+Consigne : se rapprocher au plus près d’upstream ; une ré-architecture ne doit introduire **aucune régression**. En conséquence :
+
+- Le serveur garde la sémantique upstream : admissions en file sans limite, résultats bufferisés sans limite, taille des corps gouvernée par HTTP. `apply_http_compat_limits` n’est plus une façade provisoire mais la configuration **définitive** de l’instance serveur. Aucune option serveur nouvelle n’est ajoutée.
+- Les bornes (`max_tasks`, `max_events`, `max_request_bytes`) restent les défauts de l’API embarquée, configurables par instance. Design, ADR et guide API mis à jour en ce sens.
+- Le handler `/completion` doit être **identique à upstream** sur le fil (statuts, types de contenu, messages d’erreur, ordre des champs, SSE, keep-alives). Cette exigence vaut pour chaque handler migré en P3.
+
+### Régressions supplémentaires trouvées par comparaison avec upstream, et corrigées
+
+| Écart | Correction |
+| --- | --- |
+| Ordre des champs JSON (`nlohmann::json` trie les clés) | `llama_engine::json` = `nlohmann::ordered_json` ; le chemin HTTP ne passe plus par le type public |
+| Deux sérialisations + deux parsings supplémentaires par événement streamé, et une conversion supplémentaire du corps de requête | `request_state::read_native` et `detail::submit_native` : l’adapter HTTP parse le corps une fois et sérialise chaque résultat natif une fois, comme upstream |
+| Préparation (tokenisation, médias) sérialisée sous le verrou du runtime ; les annulations attendaient une préparation longue | Préparation hors verrou, en parallèle sur les threads appelants comme upstream ; compteur `preparing` attendu par `stop()` avant la libération du contexte |
+| Messages d’erreur différents : `"stream": "yes"` (message sans préfixe `Field 'stream':`) et corps non-objet (`Expected a JSON object`) | Validation déléguée au schéma de tâche existant ; `stream` lu depuis les paramètres validés de la tâche |
+| `body.value(...)` pouvait lever avant la soumission (500 au lieu de 400) | `stream` issu de la tâche, `sse_ping_interval` via `json_value` comme upstream |
+| Pas de `try/catch` dans le générateur SSE | Rétabli, même format d’erreur qu’upstream |
+| Ligne sans effet dans `server_response::send` | Supprimée |
+
+Le handler reproduit désormais la structure d’upstream : premier résultat hors flux (erreur → réponse non streamée), `data: ""` pour le signal de début, polling `HTTP_POLLING_SECONDS`, keep-alive `:\n\n` après `sse_ping_interval`, fin de flux native sans `[DONE]`, annulation à la déconnexion.
+
+### Validation réellement exécutée
+
+| Vérification | Résultat |
+| --- | --- |
+| Comparaison différentielle `scripts/diff-server-completion.py`, serveur upstream `e4c142c` compilé dans un worktree contre le serveur moteur, 32 cas (`/completion`, `/completions`, stream, lots, `n=2`, tokens, `n_probs`, stop, `response_fields`, `id_slot`, grammaire, JSON schema, `multimodal_data`, `n_predict=0`, erreurs de type/forme/JSON) | **32/32 identiques** : statut, type de contenu, corps et ordre des champs, champs de timing/id masqués. Avant ces corrections : 30/32 |
+| Nouveau test HTTP `test_completion_queues_many_concurrent_requests` sur le binaire **sans** correctif | **FAIL attendu**, 500 « Engine task limit reached » |
+| Même test avec correctif, 6 exécutions | **PASS** 6/6, synchronisé sur `llamacpp:requests_deferred` |
+| Sonde 80 requêtes simultanées, `-np 1` | `/completion` 80 × 200, `/v1/completions` 80 × 200 |
+| Suite HTTP complète `not slow` | **375 PASS, 6 SKIP** (P1 : 374 + 6 ; +1 = nouveau test). Même nombre de skips, liste non réexaminée individuellement |
+| Build serveur/CLI/app + 12 tests C++ ciblés | **PASS** 12/12, aucun warning |
+| Profil local statique neuf (sans HTTP, vrai GGUF) | **PASS** 19/19 ; audit compile_commands/`nm -u` sans HTTP/subprocess |
+| Profil local partagé (avec `LLAMA_ENGINE_TEST_MODEL`) | **PASS** 19/19 ; `otool -L` sans dépendance interdite |
+| Nouveau test : soumissions concurrentes sur 4 threads pendant `stop()` (4 tours) | **PASS**, 30 exécutions consécutives |
+| `test-engine-model` + `test-engine-lifecycle` répétés 50 fois | **PASS** 100/100 |
+| ASan + UBSan (`detect_leaks=0`, halt-on-error) | **PASS** 3/3 |
+| **TSan** (nouveau profil Debug, moteur seul, OpenMP off) | **PASS** 3/3 + 3 exécutions supplémentaires de `test-engine` : **0 rapport** |
+| `test-engine-lifecycle` : défauts publics bornés, 1000 sinks et 1000 événements sans `queue_full` après `apply_http_compat_limits` | **PASS** |
+| `git diff --check` | **PASS** |
+
+LeakSanitizer reste **BLOCKED** sur macOS. Metal, Linux/Windows/iOS non qualifiés.
+
+### Performance A/B contre upstream (CPU)
+
+Même hôte au repos, binaires upstream `e4c142c` et moteur alternés (upstream, moteur) × 3 tours, `bench-server-baseline.py --gpu-layers 0 --repeats 5`, soit 15 échantillons par configuration. Même modèle et paramètres qu’à P0.
+
+| Binaire | Concurrence | Débit agrégé médian tok/s [min–max] | Premier événement ms (méd.) | Génération tok/s par requête (méd.) | RSS max |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| upstream | 1 | 5791 [4326–6212] | 1,41 | 6931 | 92 553 216 |
+| moteur | 1 | 5584 [4517–6514] | 1,44 | 6941 | 92 372 992 |
+| upstream | 4 | 9459 [7176–10051] | 3,47 | 2760 | 92 553 216 |
+| moteur | 4 | 9903 [8076–11036] | 3,38 | 2855 | 92 372 992 |
+
+Débit de génération, premier événement et RSS équivalents ; débit agrégé −3,6 % en mono et +4,7 % en concurrent, avec des plages qui se recouvrent largement. **Pas de régression détectée à cette résolution** ; le signal P1-C (mesuré contre des références non alternées) n’est pas reproduit en A/B alterné. Modèle minuscule : la qualification sur modèle représentatif et Metal reste à P9.
+
+### Commandes
+
+```sh
+MODEL="$PWD/tools/server/tests/tmp/models--ggml-org--test-model-stories260K/snapshots/479896ec924af6d40fd419ab8f4d1eb2101de00d/stories260K-f32.gguf"
+cmake -S . -B build-agent-engine-baseline -DLLAMA_ENGINE_TEST_MODEL="$MODEL"
+cmake --build build-agent-engine-baseline --parallel 8 \
+  --target llama-server llama-cli llama-app test-engine test-engine-lifecycle \
+  test-chat test-common-local test-hf-cache test-acquisition \
+  test-json-schema-to-grammar test-sampling test-model-resolution test-arg-parser test-jinja
+ctest --test-dir build-agent-engine-baseline --output-on-failure \
+  -R '^(test-engine|test-engine-lifecycle|test-engine-model|test-common-local|test-hf-cache|test-acquisition|test-chat|test-json-schema-to-grammar|test-sampling|test-model-resolution|test-arg-parser|test-jinja)$'
+# Profil local statique neuf : mêmes options que P1-C, plus -DLLAMA_ENGINE_TEST_MODEL="$MODEL" et -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+PATH="$PWD/.venv-server-tests/bin:$PATH" \
+  SSL_CERT_FILE="$(.venv-server-tests/bin/python -c 'import certifi; print(certifi.where())')" \
+  LLAMA_SERVER_BIN_PATH="$PWD/build-agent-engine-baseline/bin/llama-server" \
+  N_GPU_LAYERS=0 PYTEST_WORKERS=1 ./tools/server/tests/tests.sh \
+  unit/test_completion.py unit/test_sleep.py unit/test_chat_completion.py unit/test_slot_save.py \
+  unit/test_stream.py unit/test_basic.py unit/test_infill.py unit/test_security.py unit/test_metrics.py \
+  -m 'not slow' -q
+```
+
 ## Prochaine session — P3
 
-1. Lire le plan, le design/ADR, ce journal et le guide API. P2 est finalisé ; **ne pas recommencer l’extraction du décodeur ni créer un second moteur**. Les changements de cette session sont non commités, dont les nouveaux fichiers engine/include/tests et le guide.
+1. Lire le plan, le design/ADR, ce journal et le guide API. P2 est finalisé ; **ne pas recommencer l’extraction du décodeur ni créer un second moteur**. P2 est dans `da40e15ae` ; le correctif de revue (parité HTTP) peut être encore non commité. **Règle** : aucun handler migré ne doit changer le comportement observable. Tout runtime utilisé par HTTP reçoit `apply_http_compat_limits` ; les adapters HTTP lisent via `read_native`/`submit_native`. Étendre `scripts/diff-server-completion.py` à chaque famille migrée et exiger l’identité contre `e4c142c`.
 2. Revalider les trois tests moteur (`test-engine`, `test-engine-lifecycle`, `test-engine-model`) et les tests HTTP ciblés. `LLAMA_ENGINE_TEST_MODEL` doit désigner un vrai GGUF ; l’absence de fixture ne vaut pas PASS. Les logs P0/P1/P2 sont sous `build-agent-engine-evidence/`, ignoré par Git.
 3. Premier lot P3 : migrer `/v1/completions` et infill en réutilisant `prepare_completion`, puis chat avec templates/tools/sorties structurées. Généraliser les opérations du runtime et la conversion sémantique par requête ; conserver les réservations d’admission, bornes, payload final et terminal séparés. Chaque handler doit déléguer dès que son opération est disponible.
 4. Raccorder Responses/Anthropic aux événements sémantiques, **sans SSE dans le moteur**. Garder les keep-alives HTTP même pendant attente, les fragments incrémentaux de reasoning/tool calls et les erreurs avant/après headers. Les états de conversion `task_result_state` restent côté lecture.

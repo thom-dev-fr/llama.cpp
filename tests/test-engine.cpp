@@ -129,6 +129,33 @@ int main(int argc, char ** argv) {
     assert(terminal(*slow).category == "queue_full");
     bounded.reset();
 
+    // Preparation runs on the submitting threads, outside the engine lock. Stop
+    // must wait for in-flight preparations before releasing the model.
+    for (int round = 0; round < 4; ++round) {
+        auto owner = create(parallel_settings);
+        std::promise<void> go;
+        auto gate = go.get_future().share();
+        std::vector<std::future<int>> submitters;
+        for (int t = 0; t < 4; ++t) {
+            submitters.push_back(std::async(std::launch::async, [&] {
+                gate.wait();
+                int done = 0;
+                for (int i = 0; i < 16; ++i) {
+                    auto end = terminal(*owner->completion(prompt(i % 2 == 0, 2)));
+                    assert(end.type == event_type::success || end.type == event_type::cancelled);
+                    done += end.type == event_type::success;
+                }
+                return done;
+            }));
+        }
+        go.set_value();
+        assert(submitters.front().valid());
+        submitters.front().wait(); // at least one submitter ran its requests
+        owner->stop();
+        for (auto & submitter : submitters) { submitter.get(); }
+        owner.reset();
+    }
+
     for (int i = 0; i < 8; ++i) {
         auto owner = create(settings);
         auto req = owner->completion(prompt(true, 1));

@@ -67,6 +67,8 @@ Détruire une requête demande son annulation. Arrêter le moteur annule ses tra
 
 Les files d’événements sont bornées par requête. La saturation termine la requête concernée en erreur, sans perte silencieuse de fragments ni blocage des autres générations. L’issue terminale doit rester observable, y compris lorsque la file est saturée.
 
+Ces bornes sont des limites **configurables par instance**, bornées par défaut pour un consommateur embarqué. Le serveur HTTP configure son instance avec la sémantique upstream : admissions mises en file sans limite, résultats bufferisés sans limite et taille des corps gouvernée par HTTP. La ré-architecture ne doit introduire aucune régression observable côté HTTP ; toute nouvelle borne serveur serait une évolution de comportement distincte, hors de ce drop.
+
 La reprise après déconnexion appartient au serveur : il garde la requête vivante, la draine et conserve les octets SSE selon le contrat existant. Le moteur ne possède pas de registre de conversations pour cette reprise.
 
 ## Modèles et ressources

@@ -10,6 +10,12 @@ struct server_context;
 void engine_backend_init();
 
 namespace llama_engine { namespace detail {
+// A converted native payload (status payload), or a timeout/terminal status.
+struct native_item {
+    event status;
+    server_task_result_ptr result;
+};
+
 struct request_state {
     std::mutex mutex;
     std::mutex reader_mutex;
@@ -29,6 +35,11 @@ struct request_state {
     void finish(event end);
     void cancel();
     event read(std::chrono::milliseconds timeout);
+    // Same serialized reader, without conversion to the public JSON type. Used by
+    // the HTTP adapter to format the native result exactly as before the engine.
+    native_item read_native(std::chrono::milliseconds timeout);
+private:
+    native_item next_native(std::chrono::milliseconds timeout);
 };
 
 struct runtime {
@@ -36,6 +47,8 @@ struct runtime {
     std::mutex join_mutex;
     server_context * context = nullptr;
     bool stopped = false;
+    size_t preparing = 0;             // submissions preparing tasks outside the mutex
+    std::condition_variable prepared;
     std::thread decoder;
     std::vector<std::weak_ptr<request_state>> requests;
     config limits;
@@ -43,8 +56,19 @@ struct runtime {
     void cancel(const std::unordered_set<int> & ids);
 };
 
+// Limits of the legacy HTTP adapter. Before the engine, HTTP handlers queued
+// every request, buffered every result and left body size to the transport.
+// The public engine keeps bounded defaults; the server keeps this compatibility
+// until an arbitration gives it its own configurable bounds.
+void apply_http_compat_limits(runtime & run);
+
 std::unique_ptr<request> submit(const std::shared_ptr<runtime> & run, json input,
                               std::vector<attachment> files = {});
+std::shared_ptr<request_state> submit_state(const std::shared_ptr<runtime> & run, json input,
+                                            std::vector<attachment> files = {});
+// HTTP adapter entry point: native JSON already parsed by the transport.
+void submit_native(const std::shared_ptr<runtime> & run, const std::shared_ptr<request_state> & state,
+                   const ::json & data);
 void request_stop(const std::shared_ptr<runtime> & run);
 void stop(const std::shared_ptr<runtime> & run);
 } }

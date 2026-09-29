@@ -652,12 +652,14 @@ void server_routes::init_routes() {
     };
 
     this->post_completions = [this](const server_http_req & req) {
+        // Same observable behavior as handle_completions_impl for the native
+        // format; preparation and decoding are owned by the engine.
         auto res = create_response();
         res->set_req(&req);
-        auto body = llama_engine::json::parse(req.body);
-        const bool stream = body.value("stream", false);
-        const int ping_interval = body.value("sse_ping_interval", params.sse_ping_interval);
-        res->engine_request = llama_engine::detail::submit(ctx_server.runtime, std::move(body));
+        const json body = json::parse(req.body);
+        auto state = std::make_shared<llama_engine::detail::request_state>();
+        res->engine_request = std::make_shared<llama_engine::request>(state); // cancels on destruction
+        llama_engine::detail::submit_native(ctx_server.runtime, state, body);
         auto error_json = [](const llama_engine::event & item) {
             if (item.data.is_object() && item.data.contains("code")) {
                 return json::parse(item.data.dump());
@@ -665,46 +667,90 @@ void server_routes::init_routes() {
             auto type = item.category == "invalid_request" ? ERROR_TYPE_INVALID_REQUEST : ERROR_TYPE_SERVER;
             return format_error_response(item.message, type);
         };
-        llama_engine::event first;
-        for (;;) {
-            if (req.should_stop()) { res->engine_request->cancel(); return res; }
-            first = res->engine_request->next_for(std::chrono::seconds(1));
-            if (first.type == llama_engine::event_type::timeout) { continue; }
-            if (first.type == llama_engine::event_type::error) { res->error(error_json(first)); return res; }
-            if (first.type == llama_engine::event_type::cancelled) { return res; }
-            if (stream) { break; }
-            if (first.terminal()) {
-                res->ok(json::parse(res->engine_request->result().data.dump()));
+        auto next = [state](const std::function<bool()> & should_stop) {
+            for (;;) {
+                if (should_stop()) {
+                    return llama_engine::detail::native_item {{llama_engine::event_type::cancelled, nullptr, "closed", {}}, nullptr};
+                }
+                auto item = state->read_native(std::chrono::seconds(HTTP_POLLING_SECONDS));
+                if (item.status.type != llama_engine::event_type::timeout) { return item; }
+            }
+        };
+        auto first = next(req.should_stop);
+        if (first.status.type == llama_engine::event_type::error) {
+            res->error(error_json(first.status));
+            return res;
+        }
+        if (!first.result && first.status.type != llama_engine::event_type::success) {
+            res->engine_request->cancel();
+            return res; // connection closed, cancelled or stopped
+        }
+
+        if (!state->stream) {
+            std::vector<json> results(state->complete.size());
+            for (auto item = std::move(first);; item = next(req.should_stop)) {
+                if (item.result) {
+                    results[item.result->index] = item.result->to_json();
+                    continue;
+                }
+                if (item.status.type == llama_engine::event_type::error) {
+                    res->error(error_json(item.status));
+                } else if (item.status.type == llama_engine::event_type::success) {
+                    json arr = json::array();
+                    for (auto & result : results) {
+                        arr.push_back(std::move(result));
+                    }
+                    // if single request, return single object instead of array
+                    res->ok(arr.size() == 1 ? arr[0] : arr);
+                } else {
+                    res->engine_request->cancel(); // connection closed
+                }
                 return res;
             }
         }
+
+        // validated by the task schema during submission
+        const int32_t sse_ping_interval = json_value(body, "sse_ping_interval", params.sse_ping_interval);
+        json first_json = first.result ? first.result->to_json() : json();
+        res->data = first_json == nullptr ? "" : format_oai_sse(first_json);
         res->status = 200;
         res->content_type = "text/event-stream";
-        res->data = first.type == llama_engine::event_type::payload && !first.data.is_null()
-            ? format_oai_sse(json::parse(first.data.dump())) : "";
-        res->set_next([ptr = res.get(), error_json, ping_interval](std::string & output) {
-            if (!ptr->data.empty()) {
-                output = std::move(ptr->data);
-                ptr->data.clear();
-                return true;
-            }
-            const auto start = std::chrono::steady_clock::now();
-            for (;;) {
-                if (ptr->should_stop()) { ptr->engine_request->cancel(); return false; }
-                auto item = ptr->engine_request->next_for(std::chrono::seconds(1));
-                if (item.type == llama_engine::event_type::timeout) {
-                    if (ping_interval > 0 && std::chrono::steady_clock::now() - start >= std::chrono::seconds(ping_interval)) {
-                        output = ":\n\n";
-                        return true;
-                    }
-                    continue;
+        res->set_next([res_this = res.get(), state, error_json, sse_ping_interval](std::string & output) -> bool {
+            try {
+                if (res_this->should_stop()) {
+                    res_this->engine_request->cancel();
+                    return false;
                 }
-                if (item.type == llama_engine::event_type::payload) {
-                    output = format_oai_sse(json::parse(item.data.dump()));
+                if (!res_this->data.empty()) {
+                    output = std::move(res_this->data);
+                    res_this->data.clear();
                     return true;
                 }
-                output = item.type == llama_engine::event_type::error
-                    ? format_oai_sse(json {{"error", error_json(item)}}) : "";
+                const int64_t start_time = ggml_time_ms();
+                for (;;) {
+                    if (res_this->should_stop()) {
+                        res_this->engine_request->cancel();
+                        return false;
+                    }
+                    auto item = state->read_native(std::chrono::seconds(HTTP_POLLING_SECONDS));
+                    if (item.status.type == llama_engine::event_type::timeout) {
+                        if (sse_ping_interval > 0 && ggml_time_ms() - start_time > (int64_t) sse_ping_interval * 1000) {
+                            // keep clients with idle timeouts connected
+                            output = ":\n\n";
+                            return true;
+                        }
+                        continue;
+                    }
+                    if (item.result) {
+                        output = format_oai_sse(item.result->to_json());
+                        return true;
+                    }
+                    output = item.status.type == llama_engine::event_type::error
+                        ? format_oai_sse(json {{"error", error_json(item.status)}}) : "";
+                    return false;
+                }
+            } catch (const std::exception & e) {
+                output = format_oai_sse(json {{"error", format_error_response(e.what(), ERROR_TYPE_SERVER)}});
                 return false;
             }
         });

@@ -10,7 +10,7 @@
 
 // Experimental C++ interface; no stable ABI is promised during extraction.
 namespace llama_engine {
-using json = nlohmann::json;
+using json = nlohmann::ordered_json; // keeps the native field order
 
 struct attachment {
     std::string name;
