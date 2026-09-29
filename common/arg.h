@@ -144,13 +144,27 @@ struct common_models_handler {
 };
 
 // initialize downloading opts and hf_plan if needed, but does not download anything yet
-common_models_handler common_models_handler_init(const common_params & params, llama_example curr_ex);
+// remote is the network transport (common_download_network()); with nullptr only local
+// files and the cache are used, and a remote resource missing locally throws
+// common_download_unavailable
+common_models_handler common_models_handler_init(const common_params & params, llama_example curr_ex,
+                                                 const common_download_remote * remote);
 
 // check if the model is a preset repo (i.e. has a preset file)
 bool common_models_handler_is_preset_repo(const common_models_handler & handler);
 
-// download and update params with the downloaded model path
+// download and update params with the downloaded model path, through the same transport as init
+void common_models_handler_apply(common_models_handler & handler, common_params & params,
+                                 const common_download_remote * remote, common_download_callback * callback);
+
+// same, with the network transport (require llama-common-acquisition)
+common_models_handler common_models_handler_init(const common_params & params, llama_example curr_ex);
 void common_models_handler_apply(common_models_handler & handler, common_params & params, common_download_callback * callback = nullptr);
+
+// post-processing of parsed parameters shared by common_params_parse and consumers that
+// apply options without argv (presets): CPU params, escapes, terminators, template check.
+// Call once, after all options were applied.
+void common_params_finalize(common_params & params);
 
 // initialize argument parser context - used by test-arg-parser and preset
 common_params_context common_params_parser_init(common_params & params, llama_example ex, void(*print_usage)(int, char **) = nullptr);

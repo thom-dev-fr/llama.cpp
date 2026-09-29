@@ -71,6 +71,8 @@ add_library(${TARGET}
     common.h
     debug.cpp
     debug.h
+    download-local.cpp
+    download.h
     fit.cpp
     fit.h
     hf-cache-local.cpp
@@ -171,6 +173,33 @@ endif()
 
 target_link_libraries(${TARGET} PUBLIC llama Threads::Threads)
 
+#
+# llama-common-options: the option registry (arg.cpp), presets and model resolution
+# against local files and the cache. Consumers translate named options without argv;
+# network transport and argv parsing stay in the targets below.
+#
+
+set(TARGET llama-common-options)
+add_library(${TARGET}
+    arg.cpp
+    arg.h
+    preset.cpp
+    preset.h
+)
+set_target_properties(${TARGET} PROPERTIES
+    VERSION ${LLAMA_VERSION_BASE}
+    SOVERSION ${LLAMA_VERSION_MAJOR}
+    MACHO_CURRENT_VERSION 0
+)
+target_include_directories(${TARGET} PUBLIC .)
+target_link_libraries(${TARGET} PUBLIC llama-common-local)
+if (BUILD_SHARED_LIBS)
+    set_target_properties(${TARGET} PROPERTIES
+        POSITION_INDEPENDENT_CODE ON
+        WINDOWS_EXPORT_ALL_SYMBOLS ON
+    )
+endif()
+
 # Optional network acquisition. This target does not depend on argument parsing,
 # presets, subprocess, or executable targets. Cache IO lives in the local library.
 if (LLAMA_BUILD_COMMON OR LLAMA_BUILD_COMMON_ACQUISITION)
@@ -197,18 +226,15 @@ if (LLAMA_BUILD_COMMON OR LLAMA_BUILD_COMMON_ACQUISITION)
     endif()
 endif()
 
-# Compatibility library for executables. Argument parsing, presets and model
-# resolution still depend on one another; neither local nor acquisition utilities
-# depend on this target.
+# Compatibility library for executables: argv/environment parsing with model
+# download, console and subprocess. Neither local, options nor acquisition
+# utilities depend on this target.
 if (LLAMA_BUILD_COMMON)
     set(TARGET llama-common)
     add_library(${TARGET}
-        arg.cpp
-        arg.h
+        arg-parse.cpp
         console.cpp
         console.h
-        preset.cpp
-        preset.h
         subproc.cpp
         subproc.h
     )
@@ -218,7 +244,7 @@ if (LLAMA_BUILD_COMMON)
         MACHO_CURRENT_VERSION 0
     )
     target_include_directories(${TARGET} PUBLIC .)
-    target_link_libraries(${TARGET} PUBLIC llama-common-local llama-common-acquisition vendor::sheredom)
+    target_link_libraries(${TARGET} PUBLIC llama-common-options llama-common-acquisition vendor::sheredom)
     if (LLAMA_SUBPROCESS)
         target_compile_definitions(${TARGET} PUBLIC LLAMA_SUBPROCESS)
     endif()

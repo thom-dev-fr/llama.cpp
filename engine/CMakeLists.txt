@@ -4,12 +4,16 @@ llama_add_compile_flags()
 # Shared decoder, request conversion and public lifetime API. Historical server_*
 # names remain private compatibility interfaces for the HTTP adapter until P8.
 add_library(llama-engine
+    engine-catalog.cpp
+    engine-catalog.h
     engine-context.cpp
     engine-context.h
     engine-models.cpp
     engine-models.h
     engine-operations.cpp
     engine-operations.h
+    engine-options.cpp
+    engine-options.h
     engine-runtime.h
     engine-scheduler.h
     llama-engine.cpp
@@ -36,6 +40,8 @@ set_target_properties(llama-engine PROPERTIES
 # public headers. Only include/llama-engine.h is the embedding interface.
 target_include_directories(llama-engine PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(llama-engine PUBLIC llama-common-local mtmd Threads::Threads vendor::nlohmann)
+# Named options, presets and local model resolution (no network, no argv parsing).
+target_link_libraries(llama-engine PRIVATE llama-common-options)
 target_compile_features(llama-engine PUBLIC cxx_std_17)
 
 if (TARGET llama-common-acquisition)

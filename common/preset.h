@@ -79,6 +79,14 @@ struct common_preset_context {
     // generate one preset from CLI arguments
     common_preset load_from_args(int argc, char ** argv) const;
 
+    // generate one preset from options named like INI keys (argument names without
+    // leading dashes, negated boolean names or env names), with the rules of load_from_ini
+    common_preset load_from_map(const std::string & name, const std::map<std::string, std::string> & options) const;
+
+    // parse one INI key into preset; source names the origin in warnings
+    void set_key(common_preset & preset, const std::string & key, const std::string & value,
+                 const std::string & source) const;
+
     // cascade multiple presets if exist on both: base < added
     // if preset does not exist in base, it will be added without modification
     common_presets cascade(const common_presets & base, const common_presets & added) const;

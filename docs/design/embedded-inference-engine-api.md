@@ -1,11 +1,12 @@
-# API C++ du moteur — mono-modèle P3, multi-modèles P4
+# API C++ du moteur — mono-modèle P3, multi-modèles P4, catalogue et configuration P5
 
 L’interface expérimentale est `include/llama-engine.h`, dans le namespace
 `llama_engine`. Lier `llama-engine` suffit dans le graphe CMake du dépôt ; le
 header public utilise `nlohmann::ordered_json` (alias `llama_engine::json`), fourni par
 la cible `vendor::nlohmann`, afin de conserver l’ordre natif des champs.
 Aucune stabilité ABI ni installation autonome complète n’est promise pendant cette extraction.
-Les consommateurs compilés sont `tests/test-engine.cpp`, `test-engine-operations.cpp` et `test-engine-fixtures.cpp`.
+Les consommateurs compilés sont `tests/test-engine.cpp`, `test-engine-operations.cpp`, `test-engine-fixtures.cpp`,
+`test-engine-options.cpp`, `test-engine-sources.cpp` et `test-engine-acquisition.cpp`.
 
 ```cpp
 #include "llama-engine.h"
@@ -39,25 +40,48 @@ ordonné des résultats des prompts/completions multiples. `next_for(millisecond
 permet au consommateur de vérifier une déconnexion ou d’émettre un keep-alive ;
 `timeout` n’est pas terminal et ne provoque aucune annulation.
 
-## Configuration et capacités de cette tranche
+## Configuration d’un modèle
 
-Un moteur charge synchronement un GGUF local. `create()` retourne `nullptr` et
-une erreur explicite si la configuration ou le chargement échoue. CPU est le
-profil par défaut ; `gpu_layers` est configurable. Le contexte, les slots,
-threads et tailles de batch ont des champs explicites. `generation_defaults`
+Un moteur charge synchronement son modèle. `create()` retourne `nullptr` et une
+erreur explicite si la configuration ou le chargement échoue. `generation_defaults`
 est fusionné avec le JSON des requêtes de génération, qui a priorité. La validation,
 les alias de paramètres et l’ordonnanceur sont ceux du chemin natif existant.
 
-La configuration de chargement publique sera étendue en P5 selon la matrice P0.
-L’adapter privé serveur conserve **tous** ses `common_params` actuels ; cette
-tranche ne prétend pas encore exposer tous les réglages de chargement via l’API
-publique. P3 ajoute `chat_template` (nom ou source Jinja), `mmproj_path`,
-`embeddings`, `pooling_type` (-1 défaut modèle, 0 none, 1 mean, 2 CLS, 3 last,
-4 rank), `slot_save_path` et `lora_paths`. Un chemin de slots vide interdit les
-écritures ; un chemin non vide reçoit automatiquement son séparateur final.
-Les adapters LoRA configurés sont chargés à l’échelle 1, modifiable par requête.
-Le multi-modèles est décrit plus bas (P4) ; les sources de catalogue
-(presets, répertoires, cache) et l’acquisition arrivent en P5.
+`config` comporte deux niveaux, sans `common_params`, `argc/argv` ni option HTTP :
+
+- **Champs typés** : raccourcis aux défauts prudents pour l’embarqué (CPU,
+  contexte 512, 2 threads, un slot, batchs 128, ni ajustement mémoire `fit` ni
+  warmup ; `gpu_layers = 0` garde aussi le projecteur multimodal sur CPU).
+  `std::nullopt` ou une valeur vide conserve le défaut de llama.cpp. `chat_template`
+  (nom ou source Jinja), `mmproj_path`, `embeddings`, `pooling_type` (-1 défaut
+  modèle, 0 none, 1 mean, 2 CLS, 3 last, 4 rank), `slot_save_path` (répertoire
+  existant ; vide interdit les écritures), `lora_paths` (échelle 1, modifiable par
+  requête) et `sleep_idle_seconds` complètent la liste.
+- **`options`** : tout autre réglage, nommé comme dans un fichier de presets INI —
+  nom long sans tirets (`ctx-size`), forme négative (`no-warmup`) ou variable
+  `LLAMA_ARG_*`. Les valeurs suivent la ligne de commande de `llama-server` :
+  mêmes gestionnaires (registre de `common/arg.cpp`), même post-traitement
+  (`common_params_finalize`), mêmes ajustements serveur (slots automatiques,
+  batch des embeddings, pool KV par slot, alias par défaut). Ressources :
+  `model`, `hf-repo`, `hf-file`, `model-url`, `docker-repo`, `hf-token`, `offline`,
+  `mmproj*`, modèles de brouillon.
+
+`config::from_options(options)` ignore les champs typés : le modèle est configuré
+exactement comme par la ligne de commande de `llama-server` (c’est ce que font
+les catalogues lus depuis des sources). Sont refusés avec `invalid_config` : une
+option inconnue ou à valeur invalide, une option de l’hôte (HTTP, UI, outils,
+journalisation, terminal, état global du processus : priorité, NUMA,
+enregistrement RPC, actions qui quittent), une option de catalogue (`alias`,
+`models-dir`, …) et une option qui répète un champ typé renseigné. La table
+`engine/engine-options.cpp` attribue chaque option des registres serveur et CLI ;
+`test-engine-options` échoue si une option ajoutée n’y est pas classée, et vérifie
+la parité avec `common_params_parse`.
+
+Une ressource distante déjà présente dans le cache (ou avec `offline`) est
+locale : elle se charge sans réseau. Sans module d’acquisition, une ressource
+absente localement échoue avec `capability_unavailable` ; avec lui, elle est
+téléchargée pendant le chargement (progression `stage: "download"`, annulable
+comme un chargement), comme un `llama-server -hf`.
 
 Les pièces jointes sont des valeurs possédées (`name`, `bytes`), sans type HTTP.
 La completion native conserve son schéma `multimodal_data`. Pour chat, Responses,
@@ -166,7 +190,8 @@ de tâche existant ; les messages d’erreur sont ceux du serveur historique.
 
 Catégories d’erreur actuelles : `invalid_config`, `load_failed`, `invalid_request`,
 `capacity_exceeded`, `queue_full`, `inference_error`, `preparation_failed`,
-`model_not_found`, `model_not_loaded`, `wait_timeout`, `wake_failed`. Catégories
+`model_not_found`, `model_not_loaded`, `wait_timeout`, `wake_failed`,
+`capability_unavailable`, `model_downloading`, `download_failed`. Catégories
 d’annulation : `cancelled`, `stopped`, `unloaded`, `evicted`.
 Appeler `result()` sur un stream est une erreur de programmation
 (`std::logic_error`), pas une deuxième issue terminale.
@@ -179,7 +204,8 @@ backends restent soumises aux limites du design.
 `engine::create_catalog(catalog_config, error)` crée un moteur sans rien charger.
 Chaque `model_entry` a un identifiant, des alias, des tags informatifs et sa
 propre `config` (chargement et bornes par modèle). Les identifiants et alias
-doivent être uniques entre eux (`invalid_config` sinon). `engine::create(config)`
+doivent être uniques entre eux (`invalid_config` sinon). Un catalogue vide est
+valide : des modèles peuvent être ajoutés ensuite (P5). `engine::create(config)`
 reste le raccourci mono-modèle : même gestionnaire avec une seule entrée,
 chargée avant le retour, et le champ `model` des requêtes n’est pas utilisé.
 
@@ -199,7 +225,7 @@ engine->unload("small");                      // bloquant : admissions fermées,
   Absent : `invalid_request` ; inconnu : `model_not_found` ; `autoload=false`
   et modèle ni chargé ni en chargement : `model_not_loaded`.
 - **États** (`catalog()`, événements) : `unloaded`, `loading`, `loaded`,
-  `sleeping`, `unloading`, `failed` (+ `error`). Présence au catalogue,
+  `sleeping`, `unloading`, `failed` (+ `error`), `downloading` (P5). Présence au catalogue,
   résidence (`status`), attentes (`waiting`) et requêtes admises (`active`)
   sont distinctes. Un échec de chargement est récupérable : la demande suivante
   relance le chargement.
@@ -247,6 +273,70 @@ Threads possédés par un moteur multi-modèles : un thread d’entretien (déla
 déchargements, jointures), un thread de chargement par chargement en cours
 (borné par `max_loaded`), et pour chaque modèle résident son décodeur et son
 worker. Aucun thread par requête.
+
+## Sources du catalogue, rechargement et acquisition (P5)
+
+`read_catalog(catalog_sources, models)` lit uniquement les sources demandées :
+cache Hugging Face (`cache = true`, chemin de `LLAMA_CACHE`/`HF_HUB_CACHE`/…),
+répertoire (`models_dir`, un GGUF ou un sous-répertoire par modèle, projecteur
+et brouillon détectés), fichier INI (`presets`, section `*` commune) et
+`options` appliquées à tous les modèles. Règles de `llama-server` : un modèle du
+répertoire remplace l’entrée du cache de même nom, la section INI de ce nom y
+est fusionnée, la section `*` s’applique en dessous et `options` au-dessus de
+chaque modèle ; `dedup-cache-models` masque (`hidden`) l’entrée du cache déjà
+fournie par un preset. Lecture seule : ni réseau ni écriture ; le cache absent
+n’est pas créé. Chaque entrée reçoit `source`, `load_on_startup`,
+`host_options` (options de l’hôte propres au modèle : `stop-timeout`, HTTP…) et
+sa `config` (`config::from_options`). Une valeur invalide (`ctx-size = abc`)
+laisse l’entrée listée avec `error` : son chargement échoue avec
+`invalid_config`, comme un enfant du routeur. Une clé inconnue ou un alias en
+conflit fait échouer la lecture ; `skip_conflicting_aliases` ignore l’alias avec
+un avertissement, comme un rechargement du routeur.
+
+```cpp
+llama_engine::catalog_config catalog;
+catalog.sources = llama_engine::catalog_sources{};
+catalog.sources->cache      = true;
+catalog.sources->models_dir = "/models";
+catalog.sources->presets    = "/etc/models.ini";
+catalog.sources->options    = {{"n-gpu-layers", "99"}};
+auto engine = llama_engine::engine::create_catalog(catalog, error);
+engine->reload();                               // relit les sources
+auto download = engine->download("ggml-org/model:Q4_K_M"); // réseau optionnel
+download->result();                             // success, download_failed ou cancelled
+engine->remove("ggml-org/model:Q4_K_M");        // cache uniquement
+```
+
+- **`update_catalog(models)`** remplace les entrées (moteurs de catalogue
+  uniquement). Entrée retirée : attentes terminées avec `model_not_found`,
+  requêtes en cours avec `unloaded`, ressources libérées puis entrée effacée.
+  Configuration modifiée : instance résidente ou en chargement libérée, ses
+  requêtes en cours terminées (`unloaded`) ; les **attentes sont conservées** et
+  chargent la nouvelle configuration. Alias/tags seuls : aucun déchargement.
+  Liste invalide : catalogue inchangé. Les abonnés reçoivent `reload` avec le
+  catalogue courant.
+- **`reload()`** relit `catalog_config::sources` (alias en conflit ignorés) et
+  applique le résultat avec `update_catalog`, en conservant les entrées données
+  explicitement dans `catalog_config::models`.
+- **`download(repo, options)`** : mêmes règles de sélection que `hf-repo`
+  (modèle, projecteur, fichiers de brouillon) ; `options` accepte par exemple
+  `hf-token`. Les métadonnées du dépôt sont demandées avant le retour, comme la
+  validation de `POST /models`. Pendant le téléchargement, l’entrée `downloading`
+  refuse les requêtes (`model_downloading`) et publie `progress` (`stage`,
+  `url`, `downloaded`, `total`) ; un second téléchargement du même nom est
+  refusé. À la fin, l’entrée provisoire disparaît, un événement `download`
+  (`finished`, `failed`, `cancelled`) est publié et, avec des sources, le
+  catalogue est relu : le modèle apparaît sous son nom de cache
+  (`dépôt:quantification`). Annuler la requête, `unload()` sur l’entrée ou
+  `stop()` interrompt le téléchargement et supprime le fichier incomplet. Sans
+  module d’acquisition : `capability_unavailable`.
+- **`remove(model)`** : uniquement pour une entrée de source `cache` (sinon
+  `invalid_request`) ; annule son téléchargement ou la décharge, supprime ses
+  fichiers du cache (au mieux, comme le routeur) et l’entrée, puis publie
+  `remove`. Fonctionne sans module d’acquisition.
+
+Téléchargements et chargements partagent l’annulation coopérative : aucun
+sous-processus. Un thread par téléchargement en cours, joint par l’entretien.
 
 ## Ressources globales et transition
 

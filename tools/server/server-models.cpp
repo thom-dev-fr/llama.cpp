@@ -1,6 +1,7 @@
 #include "server-common.h"
 #include "http.h"
 #include "server-models.h"
+#include "engine-catalog.h"
 #include "server-context.h"
 #include "server-stream.h"
 
@@ -536,95 +537,25 @@ void server_models::notify_sse(const std::string & event, const std::string & mo
 
 void server_models::load_models() {
     // Phase 1: load presets from all sources - pure I/O, no lock needed
-    // 1. cached models
-    common_presets cached_models = ctx_preset.load_from_cache();
-    SRV_TRC("Loaded %zu cached model presets from %s\n", cached_models.size(), hf_cache::get_cache_path().c_str());
-    // 2. local models from --models-dir
-    common_presets local_models;
-    if (!base_params.models_dir.empty()) {
-        local_models = ctx_preset.load_from_models_dir(base_params.models_dir);
-        SRV_TRC("Loaded %zu local model presets from %s\n", local_models.size(), base_params.models_dir.c_str());
-    }
-    // 3. custom-path models from presets
-    common_preset global = {};
-    common_presets custom_presets = {};
-    if (!base_params.models_preset.empty()) {
-        custom_presets = ctx_preset.load_from_ini(base_params.models_preset, global);
-        SRV_TRC("Loaded %zu custom model presets from %s\n", custom_presets.size(), base_params.models_preset.c_str());
-    }
-
-    // cascade, apply global preset first
-    cached_models  = ctx_preset.cascade(global, cached_models);
-    local_models   = ctx_preset.cascade(global, local_models);
-    custom_presets = ctx_preset.cascade(global, custom_presets);
-
-    // note: if a model exists in both cached and local, local takes precedence
+    // (rules shared with the engine: cache < models_dir < presets, router args over all)
+    const auto found = llama_engine::detail::read_catalog_presets(
+        ctx_preset, /* cache */ true, base_params.models_dir, base_params.models_preset, base_preset);
     common_presets final_presets;
     std::unordered_map<std::string, server_model_source> source_map;
-    for (const auto & [name, preset] : cached_models) {
-        final_presets[name] = preset;
-        source_map[name] = SERVER_MODEL_SOURCE_CACHE;
-    }
-    for (const auto & [name, preset] : local_models)  {
-        final_presets[name] = preset;
-        source_map[name] = SERVER_MODEL_SOURCE_MODELS_DIR;
-    }
-    for (const auto & [name, custom] : custom_presets) {
-        if (final_presets.find(name) != final_presets.end()) {
-            final_presets[name].merge(custom);
-        } else {
-            final_presets[name] = custom;
+    std::set<std::string> hidden_models;
+    for (const auto & [name, entry] : found) {
+        final_presets[name] = entry.preset;
+        source_map[name] = entry.source == "cache"      ? SERVER_MODEL_SOURCE_CACHE
+                         : entry.source == "models_dir" ? SERVER_MODEL_SOURCE_MODELS_DIR
+                                                        : SERVER_MODEL_SOURCE_PRESET;
+        if (entry.hidden) {
+            hidden_models.insert(name);
         }
-        source_map[name] = SERVER_MODEL_SOURCE_PRESET;
-    }
-
-    // overlay router's own CLI args on top of every model preset so that
-    // e.g. `llama-server --temp 0` is honoured by all child processes
-    for (auto & [name, preset] : final_presets) {
-        preset.merge(base_preset);
     }
 
     auto get_source = [&](const std::string & name) {
         return source_map.count(name) ? source_map.at(name) : SERVER_MODEL_SOURCE_PRESET;
     };
-
-    // hide cache models whose resolved file is already used by a preset with dedup-cache-models enabled
-    std::set<std::string> hidden_models;
-    {
-        std::set<std::string> preset_paths;
-        auto add_hf_path = [&preset_paths](const common_preset & preset, const char * repo_key, const char * file_key) {
-            std::string hf_repo;
-            if (!preset.get_option(repo_key, hf_repo) || hf_repo.empty()) {
-                return;
-            }
-            std::string hf_file;
-            preset.get_option(file_key, hf_file);
-            std::string path = common_download_resolve_path(hf_repo, hf_file);
-            if (!path.empty()) {
-                preset_paths.insert(path);
-            }
-        };
-        for (const auto & [name, preset] : custom_presets) {
-            std::string val;
-            if (!preset.get_option(COMMON_ARG_PRESET_DEDUP_CACHE_MODELS, val) || !common_arg_utils::is_truthy(val)) {
-                continue;
-            }
-            add_hf_path(preset, "LLAMA_ARG_HF_REPO", "LLAMA_ARG_HF_FILE");
-            add_hf_path(preset, "LLAMA_ARG_SPEC_DRAFT_HF_REPO", "LLAMA_ARG_SPEC_DRAFT_MODEL");
-        }
-        if (!preset_paths.empty()) {
-            for (const auto & [name, preset] : cached_models) {
-                if (get_source(name) != SERVER_MODEL_SOURCE_CACHE) {
-                    continue; // merged with another source, not a pure cache entry
-                }
-                std::string path = common_download_resolve_path(name);
-                if (!path.empty() && preset_paths.count(path)) {
-                    SRV_INF("hiding cache model name=%s (deduplicated by a preset)\n", name.c_str());
-                    hidden_models.insert(name);
-                }
-            }
-        }
-    }
 
     // Helpers that read `mapping` - must be called while holding the lock.
     auto join_set = [](const std::set<std::string> & s) {

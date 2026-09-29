@@ -60,6 +60,16 @@ Prometheus text, HTTP guards and child process IO stay outside the engine.
 The legacy `start_loop()` starts/joins the engine-owned thread; direct callers
 never supply a decode loop.
 
+Model configuration is shared with the engine as well: the post-parse
+adjustments of `llama-server` (automatic slots, embedding batch, KV pool per
+slot, default alias) live in `llama_engine::detail::apply_server_defaults`, and
+the router reads its model sources (cache, `--models-dir`, `--models-preset`,
+router arguments, `dedup-cache-models`) through `read_catalog_presets` in
+`engine/engine-catalog.cpp`. Any change to option priorities belongs there, not
+in `server-models.cpp`. New command-line options must be classified in
+`engine/engine-options.cpp` (engine, host or catalog); `test-engine-options`
+fails otherwise.
+
 - `server_context`: Holds the primary inference state, including the main `llama_context` and all active slots.
 - `server_slot`: An abstraction over a single “sequence” in llama.cpp, responsible for managing individual parallel inference requests.
 - `server_routes`: Middleware layer between `server_context` and the HTTP interface; parses transport bodies, delegates operations and formats transport responses.

@@ -4,12 +4,14 @@
 
 - Référence initiale : `e4c142c5765abf9e5e2285b4b7379e4e84edacea`. Reprise P2 sur `642c8ea7b`, avec P0/P1 commités et arbre propre.
 - **P3 implémenté le 29 septembre 2026 : tous les contrats mono-modèle utilisent le runtime moteur ; qualification et limites détaillées dans la section P3 ci-dessous.**
-- **P3 revérifié puis P4 implémenté le 29 septembre 2026** (section P4) : cycle de vie multi-modèles dans le processus, sans sous-processus ni port. **Prochaine étape : P5.** Le drop complet P0–P9 n’est pas terminé. P3 et P4 ne sont pas commités à la fin de cette session.
+- **P3 revérifié puis P4 implémenté le 29 septembre 2026** (section P4) : cycle de vie multi-modèles dans le processus, sans sous-processus ni port.
+- **P4 revérifié puis P5 implémenté le 29 septembre 2026** (section P5) : configuration complète par options nommées, sources de catalogue partagées avec le routeur, rechargement, acquisition optionnelle sans sous-processus. **P5 non commité à la fin de cette session. Prochaine étape : P6.** Le drop complet P0–P9 n’est pas terminé.
+- **Commits** : correctif de revue P2 `8dd3003e9`, P3 `675bf4fd0`, P4 `825f7f3b0`. Arbre propre après P4 ; revalidation après commit ci-dessous (« P4 — Revalidation après commit »).
 - P0/P1 : inventaire, références et graphe recontrôlés ; 16/16 tests locaux dans chaque profil et 9/9 tests C++ ciblés repassés avant P2. Les réserves de performance et capacités consignées à P1 restent ouvertes.
 - P2 : `include/llama-engine.h`, décodeur unique dans `engine/`, handlers `/completion` et `/completions` migrés. Voir la section P2 et [le guide API](embedded-inference-engine-api.md). CLI local et routeur conservent leurs chemins legacy jusqu’à P6/P7.
 - Références obligatoires lues intégralement : CONTEXT, design, ADR 0001, CONTRIBUTING, README-dev serveur et README tests serveur.
 - P2 commité dans `da40e15ae`. Les notes « non suivis » des lots P0/P1 décrivent leur état historique ; ces lots figurent désormais dans HEAD.
-- **Revue P0–P2 du 29 septembre 2026** : régressions HTTP de `/completion` trouvées puis corrigées (voir « P2 — Correctif de revue »). **Décision** : le serveur conserve la sémantique upstream, sans aucune régression observable ; les bornes restent le défaut de l’API embarquée. Parité vérifiée octet par octet et en performance contre `e4c142c`. Correctif non commité à la fin de cette session.
+- **Revue P0–P2 du 29 septembre 2026** : régressions HTTP de `/completion` trouvées puis corrigées (voir « P2 — Correctif de revue »). **Décision** : le serveur conserve la sémantique upstream, sans aucune régression observable ; les bornes restent le défaut de l’API embarquée. Parité vérifiée octet par octet et en performance contre `e4c142c`. Correctif commité dans `8dd3003e9`.
 - Swift / XCFramework : hors périmètre.
 - Passation : tous les builds/tests lancés sont terminés ; aucun travail de fond laissé à reprendre. `git diff --check` final passe.
 - Légende : PASS = exécuté et vérifié ; FAIL = exécuté, assertion/build échoué ; BLOCKED = prérequis indisponible ; OUVERT = non encore implémenté/vérifié. Un test sauté n’est jamais PASS.
@@ -376,6 +378,9 @@ RSS maximale CPU 90 914 816, Metal 93 274 112 octets. La baisse CPU agrégée vs
 | `download.cpp` helpers cache/sélection, `arg.cpp` résolution, `preset.cpp` cascades | Réutilisés, pas encore disponibles comme catalogue local autonome | P5 ; auditer avant intégration de chargement P2 |
 | `server_lru_sched` (routeur) | Adaptateur des enfants du routeur vers la politique partagée `llama_engine::detail::load_queue` ; aucune copie de l’algorithme | P6 (suppression avec le routeur de processus) |
 | `server_models::ensure_model_ready` (routeur) | Boucle d’attente du routeur, par sondage 200 ms, sans délai ; l’attente bornée du moteur est dans `model_manager` | P6 |
+| Phase 2 de `server_models::load_models` et `add_model` (routeur) | Alias/tags, conflits et réconciliation au rechargement propres au mapping d’enfants ; la lecture des sources (phase 1) est partagée depuis P5, les mêmes règles côté moteur sont dans `read_catalog`/`model_manager::update` | P6 |
+| Téléchargement du routeur (`SERVER_CHILD_MODE_DOWNLOAD`, `server_download_state`) | Enfant de téléchargement conservé tant que le routeur existe ; le moteur télécharge sans processus (`engine::download`) | P6 |
+| Surcharges `common_models_handler_init/apply` et `common_download_*` sans transport (`arg-parse.cpp`, `download.cpp`) | API historique des exécutables, déléguant aux versions à transport explicite ; pas une seconde implémentation | Conservées (outils hors périmètre) |
 
 Aucune façade appelant le serveur depuis un moteur n’a été ajoutée. Un seul exemplaire de chaque algorithme extrait. Les suppressions `.cpp` dans tools/server sont des **déplacements vers engine non encore suivis par Git**, pas des fonctionnalités supprimées.
 
@@ -772,7 +777,21 @@ TSAN_OPTIONS=halt_on_error=1 ctest --test-dir build-agent-engine-p4-tsan --outpu
 
 Le répertoire TSan est désormais dans le dépôt (ignoré par Git), pas dans un scratchpad temporaire comme à P3.
 
-## Consignes de reprise P5
+## P4 — Revalidation après commit (`825f7f3b0`)
+
+Arbre propre. Premier build **FAIL** au lien (`valid_config`, `request_stop(…, reason)` introuvables) : objets P3 non recompilés, car les fichiers P4 restaurés depuis une archive `tar` avaient gardé des dates antérieures aux `.o`. Code commité vérifié identique à l’état P4 validé ; `touch` des fichiers des deux commits puis rebuild. **Leçon pour la suite : après une restauration de fichiers (tar, stash ancien), forcer la recompilation.**
+
+| Vérification | Résultat |
+| --- | --- |
+| Build serveur/CLI/app + tests | **PASS**, 0 warning (`p4-post-commit-build.log`) |
+| C++ ciblé | **PASS 15/15** |
+| Suite HTTP complète `not slow` | **PASS 379, 6 SKIP** (`p4-post-commit-http.log`) |
+| Profil local statique / partagé | **PASS 26/26** / **23/23** |
+| Smoke CLI legacy | **PASS**, code 0 |
+
+Le commit P3 `675bf4fd0` a été contrôlé seul avant commit (build, C++ 13/13, HTTP sommeil/completion/chat 98 PASS + 1 SKIP).
+
+## Consignes de reprise P5 (historiques, exécutées ci-dessous)
 
 1. Lire le plan, ce journal (sections P3/P4) et le guide API. Ne pas réécrire le gestionnaire : P5 **alimente** `catalog_config` à partir des sources existantes.
 2. Extraire de `server_models::load_models` (cache, `models_dir`, presets INI, preset global/arguments du routeur, alias/dédoublonnage, `hidden`, `load_on_startup`) une lecture partagée produisant des `model_entry` ; conserver priorités et règles de conflit, établir d’abord des fixtures qui figent le comportement actuel.
@@ -780,3 +799,108 @@ Le répertoire TSan est désormais dans le dépôt (ignoré par Git), pas dans u
 4. Acquisition optionnelle (`llama-common-acquisition`) : téléchargement sans enfant, progression vers les abonnés (état `downloading` à ajouter au gestionnaire ou module distinct), annulation, fichiers incomplets ; suppression du cache avec les garanties de `server_models::remove`. Rechargement de catalogue pendant utilisation/attente : définir le sort des attentes et des modèles résidents retirés (le routeur les décharge).
 5. Profil sans acquisition : ressource distante = erreur explicite de capacité. Revalider les profils locaux statique/partagé et le graphe sans HTTP.
 6. P6 devra choisir `wait_timeout` serveur (parité : non borné), traduire les états (`failed` ↔ `unloaded`+`exit_code`, `unloading`) et supprimer `server_lru_sched`/`ensure_model_ready`.
+
+## P5 — Catalogue, configuration et acquisition partagés
+
+### Vérification préalable (29 septembre 2026)
+
+Arbre au commit P4 `825f7f3b0` (seul le journal modifié). Rebuild complet et C++ ciblé : **PASS 15/15** (`p5-pre-build.log`, `p5-pre-cpp.log`). Relecture P0–P4 contre le plan : étapes conformes, façades tracées ; deux constats traités ci-dessous — la configuration publique ne couvrait qu’un sous-ensemble fixe (défauts embarqués cachés : `fit`/`warmup` désactivés, projecteur sur CPU) et aucune source de catalogue n’était partagée.
+
+### Implémentation
+
+- **Graphe (lot A)** : `common/download-local.cpp` (dans `llama-common-local`) reçoit, par déplacement mécanique, sélection GGUF, plan HF, cache, `resolve_path`, `remove`, `get_all_parts` et la branche hors ligne de `file_single` (`common_download_file_cached`). Le transport réseau devient une table explicite `common_download_remote` fournie par `llama-common-acquisition` (`common_download_network()`) ; `nullptr` = fichiers locaux et cache seulement, une ressource absente lève `common_download_unavailable`. Nouvelle cible locale **`llama-common-options`** : registre d’options (`arg.cpp`), presets (`preset.cpp`) et résolution de modèles (`common_models_handler_*` avec transport). `common/arg-parse.cpp` (agrégat `llama-common`) garde argv/environnement/fichier de configuration système/usage et les surcharges historiques à transport réseau. Le post-traitement du parsing devient `common_params_finalize` (partagé). Contrôle : toutes les lignes de `download.cpp`/`arg.cpp` d’origine se retrouvent, sauf les appels réseau remplacés par le transport et l’état statique ci-dessous.
+- **Correctif de coexistence** : le handler `--dry-sequence-breaker` utilisait un `static bool` processus (« défauts déjà effacés ») ; dans un processus multi-modèles, les breakers d’un second modèle s’ajoutaient aux défauts. Remplacé par `common_params_sampling::dry_sequence_breakers_set` (par paramètres). Trouvé par le test de parité.
+- **Configuration (lot B)** : `config` garde ses champs typés (désormais `std::optional`, défauts embarqués inchangés, `fit`/`warmup` explicites) et gagne `options` au vocabulaire des presets INI, plus `config::from_options` (défauts `llama-server`). `engine/engine-options.cpp` : table exhaustive des **273 options** des registres serveur et CLI (202 moteur, 63 hôte, 8 catalogue), traduction par les handlers du registre, `common_params_finalize`, puis `apply_server_defaults` — **extrait de `server.cpp`**, qui l’appelle désormais (une seule règle). Refus explicites : option inconnue/valeur invalide, option hôte ou catalogue, doublon avec un champ typé. `slot_save_path` est désormais validé comme un répertoire existant (comme `--slot-save-path`).
+- **Résolution des ressources** : `hf-repo`, `model-url`, `docker-repo`, projecteur et brouillons sont résolus au chargement par `common_models_handler_*` : avec acquisition, téléchargement pendant `loading` (progression `stage: download`, annulable) ; sans acquisition, cache/fichiers locaux, sinon `capability_unavailable`.
+- **Sources (lot C)** : `engine/engine-catalog.cpp::read_catalog_presets` contient la phase 1 de `server_models::load_models` (cache < répertoire < INI fusionné, section `*`, options de base au-dessus, `dedup-cache-models`/`hidden`) ; **le routeur l’appelle** (copie supprimée). API publique `read_catalog(catalog_sources, models)` : alias/tags, `load_on_startup`, `host_options` (ex. `stop-timeout`, `port`), `error` par entrée pour une valeur invalide (l’entrée reste listée et échoue au chargement, comme un enfant du routeur). Lecture seule, sans réseau.
+- **Rechargement** : `engine::update_catalog` / `reload` ; entrées retirées marquées puis effacées une fois inactives (générations uniques au gestionnaire, recherches sous verrou) ; modèle modifié libéré en gardant ses attentes ; alias seuls sans déchargement ; liste invalide sans effet. Correctif trouvé par le test : une réservation de file restait « en chargement » après l’annulation d’un chargement dont les attentes sont conservées (famine) ; `claim_done(…, false)` la libère.
+- **Acquisition (lot D)** : `engine::download` (validation des métadonnées synchrone comme `POST /models`, entrée `downloading`, progression, événement `download`, relecture des sources), annulation par requête/`unload`/`stop` avec suppression des fichiers incomplets, `engine::remove` (source `cache` seulement ; fonctionne sans réseau). Catalogue vide désormais valide.
+
+### Matrice de traduction des options (clôture du point P0)
+
+| Famille P0 | Traduction P5 | Preuve |
+| --- | --- | --- |
+| Ressources `model.*`, `mmproj*`, `hf_*`, `offline`, brouillons | Options moteur ; résolution au chargement (transport optionnel) | `test-engine-options` (cache local, capacité), `test-engine-acquisition` |
+| `models_*`, `alias`, `tags`, `load-on-startup`, `dedup-cache-models` | Portée catalogue : `read_catalog` / `catalog_config` | `test-engine-sources` |
+| Contexte, batch, slots, KV, fit, devices, rope/yarn, cache, flash-attn, LoRA, control vectors, sampling, grammaires, templates/reasoning, spéculation, multimodal, sommeil, slots/media/prompts log | Options moteur, handlers du registre + `common_params_finalize` + `apply_server_defaults` | Audit exhaustif et parité avec `common_params_parse` sur 6 lignes de commande (`test-engine-options`) |
+| HTTP, UI, outils/MCP, logs, endpoints `metrics/props/slots`, options CLI terminal | Portée hôte, refusées par le moteur ; par modèle dans `host_options` | `test-engine-options`, `test-engine-sources` |
+| `prio*`, `numa`, `rpc`, actions qui quittent (`version`, `list-devices`, …) | Portée hôte : état global du processus | Classification ; écart ci-dessous |
+| `cb_eval`, `load_progress_callback` | Internes au moteur (progression publique P4) | P4 |
+
+### Écarts et décisions à suivre
+
+- **Options processus par modèle** (`prio`, `numa`, `rpc`) : un enfant du routeur pouvait les appliquer à son propre processus. Dans un processus partagé, elles restent au serveur (hôte) ; un preset qui les fixe par modèle les voit dans `host_options`. **P6 doit décider** : appliquer au processus, refuser ou avertir (à documenter comme différence de compatibilité).
+- **Options HTTP par modèle** (`timeout`, `api-prefix`, `webui`, logs…) dans un preset : sans effet par modèle hors processus enfant ; conservées dans `host_options` pour la décision P6.
+- **Environnement et configuration système** : les enfants du routeur héritaient des variables `LLAMA_ARG_*` et de `/etc/llama.cpp/config.ini`. Le moteur ne lit rien implicitement ; le serveur (P6) et le CLI (P7) devront traduire ces sources en `options` explicites.
+- **Alias d’un modèle résident modifié par rechargement** : le routeur ne les mettait à jour qu’une fois le modèle arrêté ; le moteur les applique immédiatement (sans déchargement).
+- `POST /models` d’un dépôt sans GGUF : l’amont annonce la réussite sans fichier ; conservé tel quel (`download` réussit, aucune entrée n’apparaît).
+
+### Validation réellement exécutée
+
+| Vérification | Résultat |
+| --- | --- |
+| Build serveur/CLI/app + tests, profil complet | **PASS**, 0 warning (`p5-final-build.log`) |
+| C++ ciblé complet (moteur, chat, arg-parser, model-resolution, acquisition, hf-cache, schema, sampling) | **PASS 22/22** (`p5-final-cpp.log`) |
+| `test-engine-options` : audit des 273 options, refus, défauts typés, parité `common_params_parse` (6 lignes de commande), `hf-repo` depuis un cache local sans HTTP ; sans acquisition `capability_unavailable` (hf-repo, URL, download) | **PASS** complet et local |
+| `test-engine-sources` (vrais GGUF) : priorités cache/répertoire/INI, `*`, options au-dessus, dedup/hidden, `host_options`, erreur par entrée, alias en conflit strict/ignoré, clé inconnue, lecture sans écriture ; alias, cache, INI modifié pendant résidence, modèle supprimé pendant génération (`unloaded`), modifié pendant attente (servi avec la nouvelle configuration), liste invalide, suppression du cache sans réseau | **PASS** complet et local |
+| `test-engine-models` (doubles) : retrait pendant génération/attente, alias seul, modification pendant génération et pendant chargement (attentes conservées), entrée en erreur puis corrigée, retrait puis réajout avant libération, 50 courses erreur/déchargement/mise à jour, 30 courses mise à jour/soumissions/déchargements/arrêt | **PASS**, 10 + 5 exécutions consécutives |
+| `test-engine-acquisition` (serveur HTTP local contrôlé) : `downloading`, `model_downloading`, doublon refusé, progression, `download`/`reload`, chargement réel du fichier téléchargé, suppression pendant résidence, annulation (requête, `unload`, `stop`) sans fichier incomplet, 404 → `download_failed` | **PASS**, 6 exécutions |
+| Suite HTTP complète `not slow` (routeur sur la lecture partagée, `apply_server_defaults` partagé) | **PASS 379, 6 SKIP** (`p5-http-all.log`, 347 s) ; mêmes 6 skips non qualifiés que P1–P4 ; ciblé routeur/sommeil/base 33 PASS avant |
+| Profil local statique sans HTTP (`build-agent-engine-p3-local`) | **PASS 28/28** ; `nm -u` engine/options/local sans httplib, subprocess, transport réseau, `common_params_parse` |
+| Profil local partagé (`build-agent-engine-core-shared`) | **PASS 25/25**, 0 warning ; `otool -L` : engine, mtmd, common-options, common-local, llama, ggml, système ; aucun symbole réseau |
+| ASan + UBSan (9 tests moteur, profil local) | **PASS 9/9** (`p5-asan-tests.log`) ; LeakSanitizer **BLOCKED** sur macOS |
+| TSan (profil moteur Debug **avec** `LLAMA_BUILD_COMMON_ACQUISITION=ON`, 10 tests dont acquisition) | **PASS 10/10**, 0 rapport ; models/sources/acquisition répétés 5 fois : 0 échec, 0 rapport (`p5-tsan-repeat.log`). Les 17 « Not Run » de ce répertoire sont des cibles non construites, pas des résultats |
+| Smoke CLI legacy single-turn | **PASS**, code 0 (`p5-cli-smoke.log`) |
+| Déplacements `download.cpp`/`arg.cpp` | Comparaison des lignes avant/après : seules les lignes réseau remplacées et l’état statique DRY diffèrent |
+| `git diff --check` | **PASS** |
+
+Échecs intermédiaires corrigés, non comptés : asserts compilés hors du nouveau test en Release (ajout `#undef NDEBUG`) ; option supprimée `--draft-max` dans un cas de parité ; clé canonique `temperature` ; test d’opérations réutilisant un répertoire de slots supprimé (désormais validé) ; binaires non recompilés après changement de `common_params_sampling` (plantage, rebuild) ; **blocage réel** : nom vide pour un modèle `model-url` (création mono-modèle non validée) ; **famine réelle** : réservation de file non libérée (voir implémentation) ; **déréférencement nul** trouvé en relecture pour une entrée en erreur déchargée pendant son échec (garde + test de course) ; deux lancements de scripts zsh mal découpés (`command not found`, relancés).
+
+Le binaire utilisé par la suite HTTP précède la garde de déréférencement nul, sans effet sur le serveur (il n’utilise ni entrées en erreur ni mises à jour de catalogue) ; les tests C++ et sanitizers finaux l’incluent.
+
+### Limites et passation
+
+- Le serveur et le CLI ne consomment pas encore `read_catalog`, `update_catalog`, `download` ni `remove` : bascule **P6** (routeur) et **P7** (CLI). À P6 : mapper `downloading`/`model_downloading`/`download_failed`, les événements `download`/`remove`/`reload` sur le SSE `/models`, traduire les `LLAMA_ARG_*` et le fichier de configuration système en `options`, décider des `host_options` par modèle (processus, HTTP) et des capacités multimodales exposées par `/models` (encore calculées par le routeur).
+- Le catalogue ne connaît pas les capacités multimodales par modèle (`update_caps` du routeur) : à ajouter côté moteur en P6 si `/models` les sert depuis le moteur.
+- Tests de téléchargement sur serveur local seulement ; pas de vrai Hugging Face, Docker ni URL multi-parties réseau (Docker/URL sans acquisition testés en erreur de capacité). Linux/Windows/iOS non qualifiés ; Metal non exercé à P5.
+- Un téléchargement pendant `loading` (ressource non en cache) apparaît comme progression `stage: download` du chargement, comme un enfant `-hf` du routeur ; seuls les téléchargements explicites ont le statut `downloading`.
+
+### Commandes P5 reproductibles
+
+```sh
+MODEL="$PWD/tools/server/tests/tmp/models--ggml-org--test-model-stories260K/snapshots/479896ec924af6d40fd419ab8f4d1eb2101de00d/stories260K-f32.gguf"
+cmake -S . -B build-agent-engine-baseline -DLLAMA_ENGINE_TEST_MODEL="$MODEL"
+cmake --build build-agent-engine-baseline --parallel 8 --target llama-server llama-cli llama-app \
+  test-engine test-engine-lifecycle test-engine-models test-engine-catalog test-engine-events \
+  test-engine-operations test-engine-fixtures test-engine-replay test-engine-transport \
+  test-engine-options test-engine-sources test-engine-acquisition test-chat test-arg-parser \
+  test-model-resolution test-acquisition test-hf-cache test-json-schema-to-grammar test-sampling
+ctest --test-dir build-agent-engine-baseline --output-on-failure \
+  -R '^(test-engine.*|test-chat|test-arg-parser|test-model-resolution|test-acquisition|test-hf-cache|test-json-schema-to-grammar|test-sampling)$'
+PATH="$PWD/.venv-server-tests/bin:$PATH" \
+  SSL_CERT_FILE="$(.venv-server-tests/bin/python -c 'import certifi; print(certifi.where())')" \
+  LLAMA_SERVER_BIN_PATH="$PWD/build-agent-engine-baseline/bin/llama-server" \
+  N_GPU_LAYERS=0 PYTEST_WORKERS=1 ./tools/server/tests/tests.sh -m 'not slow' -q
+for d in build-agent-engine-p3-local build-agent-engine-core-shared; do
+  cmake -S . -B $d && cmake --build $d --parallel 4 && ctest --test-dir $d --output-on-failure
+done
+nm -u build-agent-engine-p3-local/engine/libllama-engine.a build-agent-engine-p3-local/common/libllama-common-options.a \
+  | grep -iE 'httplib|subproc|get_repo_files|common_download_network|common_docker'   # doit être vide
+cmake --build build-agent-engine-p2-sanitize --parallel 6 --target test-engine test-engine-lifecycle \
+  test-engine-models test-engine-catalog test-engine-operations test-engine-events test-engine-options test-engine-sources
+ASAN_OPTIONS=detect_leaks=0 UBSAN_OPTIONS=halt_on_error=1 ctest --test-dir build-agent-engine-p2-sanitize --output-on-failure \
+  -R '^(test-engine|test-engine-lifecycle|test-engine-model|test-engine-models|test-engine-catalog|test-engine-operations|test-engine-events|test-engine-options|test-engine-sources)$'
+# TSan : profil P4 reconfiguré avec l’acquisition (HTTP local seulement)
+cmake -S . -B build-agent-engine-p4-tsan -DLLAMA_BUILD_COMMON_ACQUISITION=ON -DLLAMA_OPENSSL=OFF
+cmake --build build-agent-engine-p4-tsan --parallel 6 --target test-engine test-engine-lifecycle test-engine-models \
+  test-engine-catalog test-engine-operations test-engine-events test-engine-options test-engine-sources test-engine-acquisition
+TSAN_OPTIONS=halt_on_error=1 ctest --test-dir build-agent-engine-p4-tsan --output-on-failure -R '^test-engine'
+```
+
+## Consignes de reprise P6
+
+1. Commiter P5 si ce n’est pas fait (vérifier `git status`, aucun fichier temporaire). Après restauration d’archives, forcer la recompilation (leçon P4) ; après tout changement de `common.h`, reconstruire **tous** les tests (leçon P5).
+2. Créer le serveur multi-modèles sur `engine::create_catalog` avec `catalog_config::sources` (cache toujours, `--models-dir`, `--models-preset`, arguments du routeur en `options`), `wait_timeout` non borné, `max_loaded = --models-max`, `autoload`, limites HTTP de compatibilité par entrée ; `load-on-startup` via `engine::load` ; `GET /models?reload` → `engine::reload`.
+3. Remplacer proxy/enfants par les opérations moteur ; `/models`, `/models/load|unload`, `POST/DELETE /models`, SSE de progression (traduire les événements `status`/`progress`/`download`/`remove`/`reload` vers les noms historiques), reprise des streams sans lookup enfant.
+4. Définir et documenter les champs historiques (`args`, `preset`, `exit_code`, `stop-timeout`, `failed` ↔ `unloaded`+`exit_code`) et le sort des `host_options` processus/HTTP par modèle (voir écarts P5).
+5. Supprimer ensuite `server_lru_sched`, `ensure_model_ready`, la phase 2 de `load_models`, `add_model`, le mode enfant de téléchargement et `server-process.*` de l’inférence (P6/P8), avec test « aucun sous-processus ni port enfant ».

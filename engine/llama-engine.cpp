@@ -3,6 +3,7 @@
 #include "engine-runtime.h"
 #include "engine-operations.h"
 #include "engine-models.h"
+#include "engine-options.h"
 #include "server-common.h"
 #include <algorithm>
 #include <filesystem>
@@ -351,39 +352,23 @@ void stop(const std::shared_ptr<runtime> & run) {
     if (run->decoder.joinable()) { run->decoder.join(); }
 }
 
-bool valid_config(const config & settings) {
-    return !settings.model_path.empty() && settings.context_size > 0 && settings.parallel > 0 &&
-        settings.threads > 0 && settings.batch_size > 0 && settings.micro_batch_size > 0 &&
-        settings.max_tasks && settings.max_events && settings.max_request_bytes &&
-        settings.generation_defaults.is_object() && settings.pooling_type >= LLAMA_POOLING_TYPE_UNSPECIFIED &&
-        settings.pooling_type <= LLAMA_POOLING_TYPE_RANK && settings.sleep_idle_seconds >= -1 &&
-        settings.sleep_idle_seconds != 0;
-}
-
-common_params to_common_params(const config & settings) {
-    common_params params;
-    params.model.path = settings.model_path;
-    params.n_ctx = settings.context_size;
-    params.n_parallel = settings.parallel;
-    params.cpuparams.n_threads = settings.threads;
-    params.cpuparams_batch.n_threads = settings.threads;
-    params.n_gpu_layers = settings.gpu_layers;
-    params.n_batch = settings.batch_size;
-    params.n_ubatch = settings.micro_batch_size;
-    params.chat_template = settings.chat_template;
-    params.mmproj.path = settings.mmproj_path;
-    params.mmproj_use_gpu = settings.gpu_layers != 0;
-    params.embedding = settings.embeddings;
-    params.pooling_type = static_cast<enum llama_pooling_type>(settings.pooling_type);
-    params.slot_save_path = settings.slot_save_path;
-    if (!params.slot_save_path.empty() && params.slot_save_path.back() != DIRECTORY_SEPARATOR) {
-        params.slot_save_path += DIRECTORY_SEPARATOR;
+bool valid_config(const config & settings, std::string & error) {
+    const auto positive = [](const std::optional<int> & v) { return !v || *v > 0; };
+    if (!positive(settings.context_size) || !positive(settings.parallel) || !positive(settings.threads) ||
+        !positive(settings.batch_size) || !positive(settings.micro_batch_size) || !settings.max_tasks ||
+        !settings.max_events || !settings.max_request_bytes || !settings.generation_defaults.is_object() ||
+        settings.pooling_type < LLAMA_POOLING_TYPE_UNSPECIFIED || settings.pooling_type > LLAMA_POOLING_TYPE_RANK ||
+        settings.sleep_idle_seconds < -1 || settings.sleep_idle_seconds == 0) {
+        error = "Invalid engine configuration";
+        return false;
     }
-    for (const auto & path : settings.lora_paths) { params.lora_adapters.push_back({path, 1.0f, {}, {}, nullptr}); }
-    params.fit_params = false;
-    params.warmup = false;
-    params.sleep_idle_seconds = settings.sleep_idle_seconds;
-    return params;
+    try {
+        build_params(settings); // options, their values and a model source
+    } catch (const std::exception & e) {
+        error = e.what();
+        return false;
+    }
+    return true;
 }
 
 struct engine_impl {
@@ -404,6 +389,9 @@ event request::result() {
         if (item.terminal()) {
             if (item.type == event_type::success) {
                 std::lock_guard<std::mutex> reader(state->reader_mutex);
+                if (state->complete.empty() && !state->assemble && !item.data.is_null()) {
+                    return item; // no payload: the result is the terminal data (downloads)
+                }
                 if (state->assemble) {
                     item.data = json::parse(safe_json_to_str(state->assemble(::json::parse(json(state->complete).dump()))));
                 } else {
@@ -420,28 +408,45 @@ subscription::~subscription() { state->close({event_type::cancelled, nullptr, "u
 event subscription::next() { return state->read(std::chrono::milliseconds::max()); }
 event subscription::next_for(std::chrono::milliseconds timeout) { return state->read(timeout); }
 
+config config::from_options(std::map<std::string, std::string> options) {
+    config settings;
+    settings.context_size = settings.parallel = settings.threads = std::nullopt;
+    settings.gpu_layers = settings.batch_size = settings.micro_batch_size = std::nullopt;
+    settings.fit = settings.warmup = std::nullopt;
+    settings.options = std::move(options);
+    return settings;
+}
+
 engine::engine() : impl(new detail::engine_impl) {}
 engine::~engine() { stop(); }
 
 std::unique_ptr<engine> engine::create(const config & settings, event & error) {
     error = {};
     try {
-        if (!detail::valid_config(settings)) {
-            error = {event_type::error, nullptr, "invalid_config", "Invalid engine configuration"};
+        std::string message;
+        if (!detail::valid_config(settings, message)) {
+            error = {event_type::error, nullptr, "invalid_config", message};
             return nullptr;
         }
         // One catalog entry, loaded now; its model field is not used for selection.
         catalog_config catalog;
-        catalog.models.push_back({std::filesystem::path(settings.model_path).filename().string(), {}, {}, settings});
+        model_entry entry;
+        entry.id       = detail::model_name(settings);
+        entry.settings = settings;
+        catalog.models.push_back(std::move(entry));
         catalog.max_loaded  = 1;
         catalog.max_waiting = std::max<size_t>(settings.max_tasks, 1);
+        if (!detail::model_manager::validate(catalog, message)) {
+            error = {event_type::error, nullptr, "invalid_config", message};
+            return nullptr;
+        }
         auto owner = std::unique_ptr<engine>(new engine);
         owner->impl->models = std::make_shared<detail::model_manager>(catalog, true, detail::make_context_backend);
         owner->impl->models->start();
         auto loaded = owner->impl->models->load(catalog.models.front().id)->read(std::chrono::milliseconds::max());
         if (loaded.type != event_type::success) {
             error = loaded.category == "load_failed"
-                ? event {event_type::error, nullptr, "load_failed", "Failed to load model: " + settings.model_path}
+                ? event {event_type::error, nullptr, "load_failed", "Failed to load model: " + detail::model_name(settings)}
                 : loaded;
             return nullptr;
         }
@@ -455,13 +460,27 @@ std::unique_ptr<engine> engine::create(const config & settings, event & error) {
 std::unique_ptr<engine> engine::create_catalog(const catalog_config & settings, event & error) {
     error = {};
     try {
+        catalog_config merged = settings;
+        if (settings.sources) {
+            std::vector<model_entry> read;
+            event status = read_catalog(*settings.sources, read);
+            if (status.type != event_type::success) {
+                error = status;
+                return nullptr;
+            }
+            merged.models = std::move(read);
+            merged.models.insert(merged.models.end(), settings.models.begin(), settings.models.end());
+        }
         std::string message;
-        if (!detail::model_manager::validate(settings, message)) {
+        if (!detail::model_manager::validate(merged, message)) {
             error = {event_type::error, nullptr, "invalid_config", message};
             return nullptr;
         }
         auto owner = std::unique_ptr<engine>(new engine);
-        owner->impl->models = std::make_shared<detail::model_manager>(settings, false, detail::make_context_backend);
+        owner->impl->models = std::make_shared<detail::model_manager>(merged, false, detail::make_context_backend);
+        if (settings.sources) {
+            owner->impl->models->set_sources(*settings.sources, settings.models);
+        }
         owner->impl->models->start();
         return owner;
     } catch (const std::exception & ex) {
@@ -482,6 +501,12 @@ std::unique_ptr<request> engine::load(const std::string & model) {
     return std::make_unique<request>(impl->models->load(model));
 }
 event engine::unload(const std::string & model) { return impl->models->unload(model); }
+event engine::update_catalog(std::vector<model_entry> models) { return impl->models->update(std::move(models)); }
+event engine::reload() { return impl->models->reload(); }
+std::unique_ptr<request> engine::download(const std::string & repo, std::map<std::string, std::string> options) {
+    return std::make_unique<request>(impl->models->download(repo, options));
+}
+event engine::remove(const std::string & model) { return impl->models->remove(model); }
 void engine::stop() {
     std::lock_guard<std::mutex> lock(impl->shutdown_mutex);
     if (impl->models) { impl->models->stop(); }

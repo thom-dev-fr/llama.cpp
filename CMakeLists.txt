@@ -297,7 +297,7 @@ set_target_properties(llama
 install(TARGETS llama LIBRARY PUBLIC_HEADER)
 
 if (TARGET llama-common-local)
-    install(TARGETS llama-common-local LIBRARY)
+    install(TARGETS llama-common-local llama-common-options LIBRARY)
 endif()
 if (TARGET llama-common-acquisition)
     install(TARGETS llama-common-acquisition LIBRARY)

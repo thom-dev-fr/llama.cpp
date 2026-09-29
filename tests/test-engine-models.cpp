@@ -133,6 +133,7 @@ static std::shared_ptr<model_manager> make(world & w, int max_loaded, std::vecto
         {
             std::lock_guard<std::mutex> lock(w.mutex);
             w.hooks[entry.id] = hooks;
+            w.log.push_back("config:" + entry.id + "=" + entry.settings.model_path);
         }
         return std::make_shared<fake_backend>(w, entry.id);
     });
@@ -420,6 +421,137 @@ int main() {
         while (closed.type == event_type::payload) { closed = sub->read(std::chrono::milliseconds::max()); }
         assert(closed.type == event_type::cancelled && closed.category == "stopped");
         assert(m->subscribe()->read(0ms).category == "stopped");
+    }
+
+    // catalog updates: removal during generation and waiting, changed settings,
+    // aliases, invalid lists, entries with a reading error, re-adding a name
+    {
+        world w;
+        auto m = make(w, 1, {"a", "b"});
+        const auto entry = [](const std::string & id, const std::string & path, std::vector<std::string> aliases = {}) {
+            model_entry e(id, std::move(aliases));
+            e.settings.model_path = path;
+            return e;
+        };
+        auto sub = m->subscribe();
+        (void) sub->read(1s); // snapshot
+        auto ra = m->submit(operation::completion, req("a"), {});
+        assert(w.wait_for([&] { return w.n("submit:a") == 1; }));
+        auto rb = m->submit(operation::completion, req("b"), {}); // waits: a is busy
+        // invalid list (duplicate alias): nothing changes
+        assert(m->update({entry("a", "/fake/a.gguf", {"x"}), entry("c", "/fake/c.gguf", {"x"})}).category == "invalid_config");
+        assert(status(*m, "a") == "loaded" && status(*m, "c").empty());
+        // b removed while waiting, a kept with a new alias only: a keeps running
+        assert(m->update({entry("a", "/fake/a.gguf", {"a2"})}).type == event_type::success);
+        auto ended = wait_terminal(rb);
+        assert(ended.category == "model_not_found" && ended.message.find("removed") != std::string::npos);
+        assert(status(*m, "b").empty() && status(*m, "a") == "loaded" && w.count("stopping:a") == 0);
+        assert(wait_terminal(m->submit(operation::completion, req("b"), {})).category == "model_not_found");
+        auto via_alias = m->submit(operation::completion, req("a2"), {});
+        assert(w.wait_for([&] { return w.n("submit:a") == 2; }));
+        assert(wait_terminal(m->submit(operation::completion, req("a-alias"), {})).category == "model_not_found");
+        bool reload = false;
+        for (auto item = sub->read(1s); item.type == event_type::payload; item = sub->read(50ms)) {
+            reload = reload || item.data["type"] == "reload";
+        }
+        assert(reload);
+
+        // a's settings change during generation: its requests end, waiters load the new settings
+        w.set(w.blocked, {"a"});
+        auto next = [&] {
+            auto r = m->submit(operation::completion, req("c"), {}); // c is new: waits for the only slot
+            return r;
+        };
+        assert(m->update({entry("a", "/fake/a-v2.gguf"), entry("c", "/fake/c.gguf")}).type == event_type::success);
+        assert(wait_terminal(ra).category == "unloaded" && wait_terminal(via_alias).category == "unloaded");
+        auto rc = next();
+        auto ra2 = m->submit(operation::completion, req("a"), {});
+        assert(w.wait_for([&] { return w.n("load:c") == 1; }));
+        w.finish("c");
+        assert(wait_terminal(rc).type == event_type::success);
+        assert(w.wait_for([&] { return w.n("config:a=/fake/a-v2.gguf") == 1; }));
+        // a changes again while its load is in progress: the load is cancelled, the waiter kept
+        assert(w.wait_for([&] { return w.n("load:a") == 2; }));
+        assert(m->update({entry("a", "/fake/a-v3.gguf"), entry("c", "/fake/c.gguf")}).type == event_type::success);
+        w.set(w.blocked, {});
+        assert(w.wait_for([&] { return w.n("config:a=/fake/a-v3.gguf") == 1 && w.n("submit:a") == 3; }));
+        w.finish("a");
+        assert(wait_terminal(ra2).type == event_type::success);
+
+        // an entry read with a configuration error is listed and fails to load, until fixed
+        auto broken = entry("d", "/fake/d.gguf");
+        broken.error = "invalid value 'abc' for option 'ctx-size'";
+        assert(m->update({entry("a", "/fake/a-v3.gguf"), broken}).type == event_type::success);
+        auto failed = wait_terminal(m->submit(operation::completion, req("d"), {}));
+        assert(failed.category == "invalid_config" && failed.message.find("ctx-size") != std::string::npos);
+        assert(status(*m, "d") == "failed" && w.count("config:d=/fake/d.gguf") == 0);
+        for (int i = 0; i < 50; ++i) { // unload/update racing the immediate failure: no backend to cancel
+            auto pending = m->submit(operation::completion, req("d"), {});
+            (void) m->unload("d");
+            assert(m->update({entry("a", "/fake/a-v3.gguf"), broken}).type == event_type::success);
+            assert(wait_terminal(pending).terminal());
+        }
+        assert(m->update({entry("a", "/fake/a-v3.gguf"), entry("d", "/fake/d.gguf")}).type == event_type::success);
+        assert(status(*m, "d") == "unloaded");
+        auto rd = m->submit(operation::completion, req("d"), {});
+        assert(w.wait_for([&] { return w.n("submit:d") == 1; }));
+        w.finish("d");
+        assert(wait_terminal(rd).type == event_type::success);
+
+        // removed while resident then re-added before its instance is freed
+        w.set(w.blocked, {"stop:d"});
+        assert(m->update({entry("a", "/fake/a-v3.gguf")}).type == event_type::success);
+        assert(w.wait_for([&] { return w.n("stopping:d") == 1; }));
+        assert(m->update({entry("a", "/fake/a-v3.gguf"), entry("d", "/fake/d.gguf")}).type == event_type::success);
+        assert(status(*m, "d") == "unloading");
+        auto again = m->submit(operation::completion, req("d"), {});
+        w.set(w.blocked, {});
+        w.release("stop:d");
+        assert(w.wait_for([&] { return w.n("submit:d") == 2; }));
+        w.finish("d");
+        assert(wait_terminal(again).type == event_type::success);
+        m->stop();
+    }
+
+    // updates race with submissions, unloads and stop
+    for (int round = 0; round < 30; ++round) {
+        world w;
+        auto m = make(w, 2, {"a", "b", "c"});
+        const std::vector<std::vector<std::string>> lists = {{"a", "b", "c"}, {"a"}, {"b", "c"}, {"c", "a"}};
+        auto updater = std::async(std::launch::async, [&] {
+            for (int i = 0; i < 40; ++i) {
+                std::vector<model_entry> models;
+                for (const auto & id : lists[i % lists.size()]) {
+                    model_entry e(id);
+                    e.settings.model_path = "/fake/" + id + (i % 3 ? "" : "-v") + ".gguf";
+                    models.push_back(e);
+                }
+                (void) m->update(models);
+            }
+        });
+        auto finisher = std::async(std::launch::async, [&] {
+            for (int i = 0; i < 200; ++i) {
+                std::vector<std::shared_ptr<request_state>> states;
+                {
+                    std::lock_guard<std::mutex> lock(w.mutex);
+                    for (auto & [id, list] : w.active) {
+                        states.insert(states.end(), list.begin(), list.end());
+                        list.clear();
+                    }
+                }
+                for (auto & st : states) { st->finish({event_type::success, nullptr, {}, {}}); }
+                std::this_thread::sleep_for(1ms);
+            }
+        });
+        std::vector<std::shared_ptr<request_state>> submitted;
+        for (int i = 0; i < 60; ++i) {
+            submitted.push_back(m->submit(operation::completion, req(std::string(1, char('a' + i % 3))), {}));
+            if (i % 7 == 0) { (void) m->unload("b"); }
+        }
+        updater.get();
+        m->stop();
+        finisher.get();
+        for (auto & st : submitted) { assert(wait_terminal(st).terminal()); }
     }
 
     // stop: waiters, blocked loads and active requests all end; independent instances

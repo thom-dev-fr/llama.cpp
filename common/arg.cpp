@@ -330,16 +330,6 @@ static std::string get_all_kv_cache_types() {
     return msg.str();
 }
 
-static bool parse_bool_value(const std::string & value) {
-    if (is_truthy(value)) {
-        return true;
-    } else if (is_falsey(value)) {
-        return false;
-    } else {
-        throw std::invalid_argument("invalid boolean value");
-    }
-}
-
 [[noreturn]] static void arg_removed(const std::string & msg) {
     throw std::invalid_argument("the argument has been removed. " + msg);
 }
@@ -358,7 +348,8 @@ static bool spec_types_is_default(const common_params & params) {
     return params.speculative.types == std::vector<enum common_speculative_type>{COMMON_SPECULATIVE_TYPE_NONE};
 }
 
-common_models_handler common_models_handler_init(const common_params & params, llama_example curr_ex) {
+common_models_handler common_models_handler_init(const common_params & params, llama_example curr_ex,
+                                                 const common_download_remote * remote) {
     common_download_hf_plan plan;
     common_download_hf_plan plan_spec;
     common_download_opts opts;
@@ -401,7 +392,7 @@ common_models_handler common_models_handler_init(const common_params & params, l
                         && params.mmproj.path.empty() && params.mmproj.url.empty();
 
     if (!params.model.hf_repo.empty()) {
-        plan = common_download_get_hf_plan(params.model, opts);
+        plan = common_download_get_hf_plan(params.model, opts, remote);
     }
 
     if (!params.speculative.draft.mparams.hf_repo.empty()) {
@@ -413,7 +404,21 @@ common_models_handler common_models_handler_init(const common_params & params, l
             opts_spec.download_eagle3 = true;
             opts_spec.download_dspark = true;
         }
-        plan_spec = common_download_get_hf_plan(params.speculative.draft.mparams, opts_spec);
+        plan_spec = common_download_get_hf_plan(params.speculative.draft.mparams, opts_spec, remote);
+    }
+
+    // without a transport, a repository missing from the cache cannot be resolved later
+    const auto missing_locally = [&](const common_params_model & model, const common_download_hf_plan & p) {
+        return !remote && !opts.offline && !model.hf_repo.empty() && p.primary.local_path.empty() &&
+               p.preset.local_path.empty() && p.mtp.local_path.empty() && p.dflash.local_path.empty() &&
+               p.eagle3.local_path.empty() && p.dspark.local_path.empty();
+    };
+    for (const auto * m : {&params.model, &params.speculative.draft.mparams}) {
+        if (missing_locally(*m, m == &params.model ? plan : plan_spec)) {
+            throw common_download_unavailable(string_format(
+                "model '%s' is not in the local cache and network acquisition is not available in this build",
+                m->hf_repo.c_str()));
+        }
     }
 
     return common_models_handler{plan, plan_spec, opts};
@@ -461,7 +466,8 @@ static std::vector<common_download_task> build_url_tasks(const common_params_mod
     return tasks;
 }
 
-void common_models_handler_apply(common_models_handler & handler, common_params & params, common_download_callback * callback) {
+void common_models_handler_apply(common_models_handler & handler, common_params & params,
+                                 const common_download_remote * remote, common_download_callback * callback) {
     std::vector<common_download_task> tasks;
 
     auto & plan      = handler.plan;
@@ -484,7 +490,12 @@ void common_models_handler_apply(common_models_handler & handler, common_params 
 
     // optionally, if docker repo is set, resolve it
     if (!params.model.docker_repo.empty()) {
-        params.model.url  = common_docker_resolve_model(params.model.docker_repo);
+        if (!remote) {
+            throw common_download_unavailable(string_format(
+                "Docker model '%s' requires network acquisition, which is not available in this build",
+                params.model.docker_repo.c_str()));
+        }
+        params.model.url  = remote->docker_resolve_model(params.model.docker_repo);
         params.model.path = get_default_local_path(params.model.url);
     }
 
@@ -701,7 +712,7 @@ void common_models_handler_apply(common_models_handler & handler, common_params 
             LOG_DBG("download task: %s -> %s\n", pair.second->url.c_str(), pair.second->local_path.c_str());
             unique_tasks_vec.push_back(*pair.second);
         }
-        common_download_run_tasks(unique_tasks_vec);
+        common_download_run_tasks(unique_tasks_vec, remote);
     }
 
     // download successful, update params with the downloaded paths
@@ -709,410 +720,6 @@ void common_models_handler_apply(common_models_handler & handler, common_params 
         if (task.on_done) {
             task.on_done();
         }
-    }
-}
-
-//
-// CLI argument parsing functions
-//
-
-// apply config files (if present), a later file overrides an earlier one:
-// 1. system-wide: /etc/llama.cpp/config.ini (%PROGRAMDATA%\llama.cpp\config.ini on windows)
-// 2. user-level: ${XDG_CONFIG_HOME:-~/.config}/llama.cpp/config.ini (%APPDATA%\llama.cpp\config.ini on windows)
-static void common_params_apply_system_config(common_params & params, llama_example ex) {
-    std::vector<std::filesystem::path> paths;
-
-#if defined(_WIN32)
-    const std::filesystem::path program_data = common_get_path_from_env("PROGRAMDATA");
-    if (!program_data.empty()) {
-        paths.push_back(program_data / "llama.cpp" / "config.ini");
-    }
-#else
-    paths.push_back("/etc/llama.cpp/config.ini");
-#endif
-
-    try {
-        paths.push_back(fs_get_config_directory() / "config.ini");
-    } catch (const std::exception & e) {
-        LOG_DBG("cannot read user-level config file, skipping: %s\n", e.what());
-    }
-
-    std::vector<std::filesystem::path> found;
-    for (const auto & path : paths) {
-        std::error_code ec;
-        if (std::filesystem::exists(path, ec)) {
-            found.push_back(path);
-        }
-    }
-    if (found.empty()) {
-        return;
-    }
-
-    common_preset_context ctx(ex);
-    ctx.ignore_unknown_keys = true; // the same config file is shared by all programs
-    for (const auto & path : found) {
-        LOG_INF("using config file: %s\n", fs_path_to_utf8(path).c_str());
-        common_preset global;
-        common_presets presets = ctx.load_from_ini(path, global);
-        global.apply_to_params(params);
-        auto it = presets.find(COMMON_PRESET_DEFAULT_NAME);
-        if (it != presets.end()) {
-            it->second.apply_to_params(params);
-        }
-    }
-}
-
-static bool common_params_parse_ex(int argc, char ** argv, common_params_context & ctx_arg) {
-    common_params & params = ctx_arg.params;
-
-    // setup log directly from params.verbosity: see tools/cli/cli.cpp
-    common_log_set_verbosity_thold(params.verbosity);
-
-    // config file applies first, so env variables and CLI arguments override it
-    common_params_apply_system_config(params, ctx_arg.ex);
-
-    std::unordered_map<std::string, std::pair<common_arg *, bool>> arg_to_options;
-    for (auto & opt : ctx_arg.options) {
-        for (const auto & arg : opt.args) {
-            arg_to_options[arg] = {&opt, /* is_positive */ true};
-        }
-        for (const auto & arg : opt.args_neg) {
-            arg_to_options[arg] = {&opt, /* is_positive */ false};
-        }
-    }
-
-    // handle environment variables
-    for (auto & opt : ctx_arg.options) {
-        std::string value;
-        if (opt.get_value_from_env(value)) {
-            try {
-                if (opt.handler_void && is_truthy(value)) {
-                    opt.handler_void(params);
-                }
-                if (opt.handler_int) {
-                    opt.handler_int(params, std::stoi(value));
-                }
-                if (opt.handler_bool) {
-                    opt.handler_bool(params, parse_bool_value(value));
-                }
-                if (opt.handler_string) {
-                    opt.handler_string(params, value);
-                    continue;
-                }
-            } catch (std::exception & e) {
-                throw std::invalid_argument(string_format(
-                    "error while handling environment variable \"%s\": %s\n\n", opt.env, e.what()));
-            }
-        }
-    }
-
-    // handle command line arguments
-    auto check_arg = [&](int i) {
-        if (i+1 >= argc) {
-            throw std::invalid_argument("expected value for argument");
-        }
-    };
-
-    auto parse_cli_args = [&]() {
-        std::set<std::string> seen_args;
-
-        for (int i = 1; i < argc; i++) {
-            const std::string arg_prefix = "--";
-
-            std::string arg = argv[i];
-            if (arg.compare(0, arg_prefix.size(), arg_prefix) == 0) {
-                std::replace(arg.begin(), arg.end(), '_', '-');
-            }
-            if (arg_to_options.find(arg) == arg_to_options.end()) {
-                throw std::invalid_argument(string_format("error: invalid argument: %s", arg.c_str()));
-            }
-            if (!seen_args.insert(arg).second) {
-                const bool skip = (arg == "--spec-type");
-
-                if (!skip) {
-                    LOG_WRN("DEPRECATED: argument '%s' specified multiple times, use comma-separated values instead (only last value will be used)\n", arg.c_str());
-                }
-            }
-            auto & tmp = arg_to_options[arg];
-            auto opt = *tmp.first;
-            bool is_positive = tmp.second;
-            if (opt.has_value_from_env()) {
-                fprintf(stderr, "warn: %s environment variable is set, but will be overwritten by command line argument %s\n", opt.env, arg.c_str());
-            }
-            try {
-                if (opt.handler_void) {
-                    opt.handler_void(params);
-                    continue;
-                }
-                if (opt.handler_bool) {
-                    opt.handler_bool(params, is_positive);
-                    continue;
-                }
-
-                // arg with single value
-                check_arg(i);
-                std::string val = argv[++i];
-                if (opt.handler_int) {
-                    opt.handler_int(params, std::stoi(val));
-                    continue;
-                }
-                if (opt.handler_string) {
-                    opt.handler_string(params, val);
-                    continue;
-                }
-
-                // arg with 2 values
-                check_arg(i);
-                std::string val2 = argv[++i];
-                if (opt.handler_str_str) {
-                    opt.handler_str_str(params, val, val2);
-                    continue;
-                }
-            } catch (std::exception & e) {
-                throw std::invalid_argument(string_format(
-                    "error while handling argument \"%s\": %s\n\n"
-                    "usage:\n%s\n\nto show complete usage, run with -h",
-                    arg.c_str(), e.what(), opt.to_string().c_str()));
-            }
-        }
-    };
-
-    // parse all CLI args now, so that -hf is available below for remote preset resolution
-    parse_cli_args();
-
-    postprocess_cpu_params(params.cpuparams,       nullptr);
-    postprocess_cpu_params(params.cpuparams_batch, &params.cpuparams);
-
-    postprocess_cpu_params(params.speculative.draft.cpuparams,       &params.cpuparams);
-    postprocess_cpu_params(params.speculative.draft.cpuparams_batch, &params.cpuparams_batch);
-
-    // default the mmproj device to the global device selection if not set explicitly with -mmdev
-    if (params.mmproj_use_gpu && params.mmproj_device == nullptr && !params.devices.empty()) {
-        params.mmproj_device = params.devices.front();
-        params.mmproj_use_gpu = params.mmproj_device != nullptr;
-    }
-
-    if (params.prompt_cache_all && (params.interactive || params.interactive_first)) {
-        throw std::invalid_argument("error: --prompt-cache-all not supported in interactive mode yet\n");
-    }
-
-    const bool skip_model_download =
-        // server will call common_params_handle_models() later, so we skip it here
-        ctx_arg.ex == LLAMA_EXAMPLE_SERVER ||
-        // download calls common_params_handle_models() itself and prints the paths
-        ctx_arg.ex == LLAMA_EXAMPLE_DOWNLOAD ||
-        // export_graph_ops loads only metadata
-        ctx_arg.ex == LLAMA_EXAMPLE_EXPORT_GRAPH_OPS;
-
-    if (!skip_model_download) {
-        // handle model and download
-        common_models_handler handler = common_models_handler_init(params, ctx_arg.ex);
-        common_models_handler_apply(handler, params);
-
-        // model is required (except for server)
-        // TODO @ngxson : maybe show a list of available models in CLI in this case
-        bool can_skip_model = params.usage || params.completion || !params.server_base.empty();
-        if (!can_skip_model && params.model.path.empty()) {
-            throw std::invalid_argument("error: --model is required\n");
-        }
-    }
-
-    if (params.escape) {
-        string_process_escapes(params.prompt);
-        string_process_escapes(params.input_prefix);
-        string_process_escapes(params.input_suffix);
-        for (auto & antiprompt : params.antiprompt) {
-            string_process_escapes(antiprompt);
-        }
-        for (auto & seq_breaker : params.sampling.dry_sequence_breakers) {
-            string_process_escapes(seq_breaker);
-        }
-    }
-
-    if (!params.kv_overrides.empty()) {
-        params.kv_overrides.emplace_back();
-        params.kv_overrides.back().key[0] = 0;
-    }
-
-    const bool mcp_enabled = !params.mcp_servers_config.empty() || !params.mcp_servers_json.empty();
-    if ((!params.server_tools.empty() || mcp_enabled) && !params.cors_origins_explicit) {
-        LOG_WRN("server tools or MCP servers are enabled, using localhost as default CORS origin (change via --cors-origins)\n");
-        params.cors_origins = "localhost";
-    }
-
-    // pad tensor_buft_overrides for llama_params_fit:
-    const size_t ntbo = llama_max_tensor_buft_overrides();
-    while (params.tensor_buft_overrides.size() < ntbo) {
-        params.tensor_buft_overrides.push_back({nullptr, nullptr});
-    }
-
-    if (!params.speculative.draft.tensor_buft_overrides.empty()) {
-        params.speculative.draft.tensor_buft_overrides.push_back({nullptr, nullptr});
-    }
-
-    if (!params.chat_template.empty() && !common_chat_verify_template(params.chat_template, params.use_jinja)) {
-        throw std::runtime_error(string_format(
-            "error: the supplied chat template is not supported: %s%s\n",
-            params.chat_template.c_str(),
-            params.use_jinja ? "" : "\nnote: llama.cpp was started without --jinja, we only support commonly used templates"
-        ));
-    }
-
-    // if the preserve_reasoning kwarg was not specified explicitly, enable it by default
-    if (!params.default_template_kwargs.count("preserve_reasoning")) {
-        params.default_template_kwargs["preserve_reasoning"] = "true";
-    }
-
-    return true;
-}
-
-static void common_params_print_usage(common_params_context & ctx_arg) {
-    auto print_options = [](std::vector<common_arg *> & options) {
-        for (common_arg * opt : options) {
-            printf("%s", opt->to_string().c_str());
-        }
-    };
-
-    std::vector<common_arg *> common_options;
-    std::vector<common_arg *> sampling_options;
-    std::vector<common_arg *> spec_options;
-    std::vector<common_arg *> specific_options;
-    for (auto & opt : ctx_arg.options) {
-        // in case multiple LLAMA_EXAMPLE_* are set, we prioritize the LLAMA_EXAMPLE_* matching current example
-        if (opt.is_sampling) {
-            sampling_options.push_back(&opt);
-        } else if (opt.is_spec) {
-            spec_options.push_back(&opt);
-        } else if (opt.in_example(ctx_arg.ex)) {
-            specific_options.push_back(&opt);
-        } else {
-            common_options.push_back(&opt);
-        }
-    }
-    bool first = true;
-    auto print_section = [&](const char * header, std::vector<common_arg *> & options) {
-        if (options.empty()) {
-            return;
-        }
-        printf("%s----- %s -----\n\n", first ? "" : "\n\n", header);
-        first = false;
-        print_options(options);
-    };
-    print_section("common params",           common_options);
-    print_section("sampling params",         sampling_options);
-    print_section("speculative params",      spec_options);
-    print_section("example-specific params", specific_options);
-}
-
-static void common_params_print_completion(common_params_context & ctx_arg) {
-    std::vector<common_arg *> common_options;
-    std::vector<common_arg *> sampling_options;
-    std::vector<common_arg *> spec_options;
-    std::vector<common_arg *> specific_options;
-
-    for (auto & opt : ctx_arg.options) {
-        if (opt.is_sampling) {
-            sampling_options.push_back(&opt);
-        } else if (opt.is_spec) {
-            spec_options.push_back(&opt);
-        } else if (opt.in_example(ctx_arg.ex)) {
-            specific_options.push_back(&opt);
-        } else {
-            common_options.push_back(&opt);
-        }
-    }
-
-    printf("_llama_completions() {\n");
-    printf("    local cur prev opts\n");
-    printf("    COMPREPLY=()\n");
-    printf("    cur=\"${COMP_WORDS[COMP_CWORD]}\"\n");
-    printf("    prev=\"${COMP_WORDS[COMP_CWORD-1]}\"\n\n");
-
-    printf("    opts=\"");
-    auto print_options = [](const std::vector<common_arg *> & options) {
-        for (const common_arg * opt : options) {
-            for (const char * arg : opt->args) {
-                printf("%s ", arg);
-            }
-        }
-    };
-
-    print_options(common_options);
-    print_options(sampling_options);
-    print_options(spec_options);
-    print_options(specific_options);
-    printf("\"\n\n");
-
-    printf("    case \"$prev\" in\n");
-    printf("        --model|-m)\n");
-    printf("            COMPREPLY=( $(compgen -f -X '!*.gguf' -- \"$cur\") $(compgen -d -- \"$cur\") )\n");
-    printf("            return 0\n");
-    printf("            ;;\n");
-    printf("        --grammar-file)\n");
-    printf("            COMPREPLY=( $(compgen -f -X '!*.gbnf' -- \"$cur\") $(compgen -d -- \"$cur\") )\n");
-    printf("            return 0\n");
-    printf("            ;;\n");
-    printf("        --chat-template-file)\n");
-    printf("            COMPREPLY=( $(compgen -f -X '!*.jinja' -- \"$cur\") $(compgen -d -- \"$cur\") )\n");
-    printf("            return 0\n");
-    printf("            ;;\n");
-    printf("        *)\n");
-    printf("            COMPREPLY=( $(compgen -W \"${opts}\" -- \"$cur\") )\n");
-    printf("            return 0\n");
-    printf("            ;;\n");
-    printf("    esac\n");
-    printf("}\n\n");
-
-    std::set<std::string> executables = {
-        "llama-batched",
-        "llama-batched-bench",
-        "llama-bench",
-        "llama-cli",
-        "llama-completion",
-        "llama-convert-llama2c-to-ggml",
-        "llama-cvector-generator",
-        "llama-debug",
-        "llama-diffusion-cli",
-        "llama-embedding",
-        "llama-eval-callback",
-        "llama-export-lora",
-        "llama-finetune",
-        "llama-fit-params",
-        "llama-gemma3-cli",
-        "llama-gen-docs",
-        "llama-gguf",
-        "llama-gguf-hash",
-        "llama-gguf-split",
-        "llama-idle",
-        "llama-imatrix",
-        "llama-llava-cli",
-        "llama-lookahead",
-        "llama-lookup",
-        "llama-lookup-create",
-        "llama-lookup-merge",
-        "llama-lookup-stats",
-        "llama-minicpmv-cli",
-        "llama-mtmd-cli",
-        "llama-parallel",
-        "llama-passkey",
-        "llama-perplexity",
-        "llama-q8dot",
-        "llama-quantize",
-        "llama-qwen2vl-cli",
-        "llama-retrieval",
-        "llama-save-load-state",
-        "llama-server",
-        "llama-simple",
-        "llama-simple-chat",
-        "llama-speculative",
-        "llama-speculative-simple",
-        "llama-tokenize",
-        "llama-tts",
-        "llama-vdot"
-    };
-
-    for (const auto& exe : executables) {
-        printf("complete -F _llama_completions %s\n", exe.c_str());
     }
 }
 
@@ -1184,6 +791,70 @@ static void add_rpc_devices(const std::string & servers) {
     }
 }
 
+void common_params_finalize(common_params & params) {
+    postprocess_cpu_params(params.cpuparams,       nullptr);
+    postprocess_cpu_params(params.cpuparams_batch, &params.cpuparams);
+
+    postprocess_cpu_params(params.speculative.draft.cpuparams,       &params.cpuparams);
+    postprocess_cpu_params(params.speculative.draft.cpuparams_batch, &params.cpuparams_batch);
+
+    // default the mmproj device to the global device selection if not set explicitly with -mmdev
+    if (params.mmproj_use_gpu && params.mmproj_device == nullptr && !params.devices.empty()) {
+        params.mmproj_device = params.devices.front();
+        params.mmproj_use_gpu = params.mmproj_device != nullptr;
+    }
+
+    if (params.prompt_cache_all && (params.interactive || params.interactive_first)) {
+        throw std::invalid_argument("error: --prompt-cache-all not supported in interactive mode yet\n");
+    }
+
+    if (params.escape) {
+        string_process_escapes(params.prompt);
+        string_process_escapes(params.input_prefix);
+        string_process_escapes(params.input_suffix);
+        for (auto & antiprompt : params.antiprompt) {
+            string_process_escapes(antiprompt);
+        }
+        for (auto & seq_breaker : params.sampling.dry_sequence_breakers) {
+            string_process_escapes(seq_breaker);
+        }
+    }
+
+    if (!params.kv_overrides.empty()) {
+        params.kv_overrides.emplace_back();
+        params.kv_overrides.back().key[0] = 0;
+    }
+
+    const bool mcp_enabled = !params.mcp_servers_config.empty() || !params.mcp_servers_json.empty();
+    if ((!params.server_tools.empty() || mcp_enabled) && !params.cors_origins_explicit) {
+        LOG_WRN("server tools or MCP servers are enabled, using localhost as default CORS origin (change via --cors-origins)\n");
+        params.cors_origins = "localhost";
+    }
+
+    // pad tensor_buft_overrides for llama_params_fit:
+    const size_t ntbo = llama_max_tensor_buft_overrides();
+    while (params.tensor_buft_overrides.size() < ntbo) {
+        params.tensor_buft_overrides.push_back({nullptr, nullptr});
+    }
+
+    if (!params.speculative.draft.tensor_buft_overrides.empty()) {
+        params.speculative.draft.tensor_buft_overrides.push_back({nullptr, nullptr});
+    }
+
+    if (!params.chat_template.empty() && !common_chat_verify_template(params.chat_template, params.use_jinja)) {
+        throw std::runtime_error(string_format(
+            "error: the supplied chat template is not supported: %s%s\n",
+            params.chat_template.c_str(),
+            params.use_jinja ? "" : "\nnote: llama.cpp was started without --jinja, we only support commonly used templates"
+        ));
+    }
+
+    // if the preserve_reasoning kwarg was not specified explicitly, enable it by default
+    if (!params.default_template_kwargs.count("preserve_reasoning")) {
+        params.default_template_kwargs["preserve_reasoning"] = "true";
+    }
+}
+
 bool common_params_to_map(int argc, char ** argv, llama_example ex, std::map<common_arg, std::string> & out_map) {
     common_params dummy_params;
     common_params_context ctx_arg = common_params_parser_init(dummy_params, ex, nullptr);
@@ -1243,77 +914,6 @@ bool common_params_to_map(int argc, char ** argv, llama_example ex, std::map<com
             throw std::invalid_argument("error: argument with 2 values is not yet supported\n");
         }
         out_map[opt] = val;
-    }
-
-    return true;
-}
-
-#ifdef _WIN32
-struct utf8_argv {
-    std::vector<std::string> buf;
-    std::vector<char*> ptrs;
-};
-
-static utf8_argv make_utf8_argv() {
-    utf8_argv out;
-    int wargc = 0;
-    LPWSTR* wargv = CommandLineToArgvW(GetCommandLineW(), &wargc);
-    if (!wargv) return out;
-
-    out.buf.reserve(wargc);
-    for (int i = 0; i < wargc; ++i) {
-        int n = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, wargv[i], -1, nullptr, 0, nullptr, nullptr);
-        if (n <= 0) { out.buf.emplace_back(); continue; }
-        auto& s = out.buf.emplace_back();
-        s.resize(static_cast<size_t>(n - 1));
-        (void)WideCharToMultiByte(CP_UTF8, 0, wargv[i], -1, s.data(), n, nullptr, nullptr);
-    }
-    LocalFree(wargv);
-
-    out.ptrs.reserve(out.buf.size() + 1);
-    for (auto& s : out.buf) out.ptrs.push_back(s.data());
-    out.ptrs.push_back(nullptr);
-    return out;
-}
-#endif
-
-bool common_params_parse(int argc, char ** argv, common_params & params, llama_example ex, void(*print_usage)(int, char **)) {
-#ifdef _WIN32
-    auto utf8 = make_utf8_argv();
-    // repair argv only when it matches the process command line
-    if (static_cast<int>(utf8.buf.size()) == argc) {
-        argv = utf8.ptrs.data();
-    }
-#endif
-
-    auto ctx_arg = common_params_parser_init(params, ex, print_usage);
-    const common_params params_org = ctx_arg.params; // the example can modify the default params
-
-    try {
-        if (!common_params_parse_ex(argc, argv, ctx_arg)) {
-            ctx_arg.params = params_org;
-            return false;
-        }
-        if (ctx_arg.params.usage) {
-            common_params_print_usage(ctx_arg);
-            if (ctx_arg.print_usage) {
-                ctx_arg.print_usage(argc, argv);
-            }
-            common_log_flush(common_log_main());
-            exit(0);
-        }
-        if (ctx_arg.params.completion) {
-            common_params_print_completion(ctx_arg);
-            exit(0);
-        }
-        params.lr.init();
-    } catch (const std::invalid_argument & ex) {
-        fprintf(stderr, "%s\n", ex.what());
-        ctx_arg.params = params_org;
-        return false;
-    } catch (std::exception & ex) {
-        fprintf(stderr, "%s\n", ex.what());
-        exit(1); // for other exceptions, we exit with status code 1
     }
 
     return true;
@@ -2169,11 +1769,10 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
                     return a + ", '" + formatted_b + "'";
                 }).c_str()),
         [](common_params & params, const std::string & value) {
-            static bool defaults_cleared = false;
-
-            if (!defaults_cleared) {
+            // per params, not per process: several models are configured in one process
+            if (!params.sampling.dry_sequence_breakers_set) {
                 params.sampling.dry_sequence_breakers.clear();
-                defaults_cleared = true;
+                params.sampling.dry_sequence_breakers_set = true;
             }
 
             if (value == "none") {

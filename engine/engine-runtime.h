@@ -92,8 +92,7 @@ void request_stop(const std::shared_ptr<runtime> & run, const event & reason = {
 // Returns false after finishing state with an invalid_request error.
 bool prepare_input(const config & limits, request_state & state, const json & input,
                    const std::vector<attachment> & files, operation op, ::json & data);
-// The common_params equivalent of the public configuration (single source).
-common_params to_common_params(const config & settings);
-bool valid_config(const config & settings);
+// Engine limits and model options (build_params); error explains a failure.
+bool valid_config(const config & settings, std::string & error);
 void stop(const std::shared_ptr<runtime> & run);
 } }

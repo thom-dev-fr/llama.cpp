@@ -3,7 +3,9 @@
 #include "engine-runtime.h"
 #include "engine-scheduler.h"
 
+#include <atomic>
 #include <condition_variable>
+#include <optional>
 #include <list>
 #include <map>
 #include <set>
@@ -48,7 +50,7 @@ struct subscriber_state {
     event read(std::chrono::milliseconds timeout);
 };
 
-enum class model_status { unloaded, loading, loaded, sleeping, unloading, failed };
+enum class model_status { unloaded, loading, loaded, sleeping, unloading, failed, downloading };
 const char * to_string(model_status status);
 
 // Catalog, residency and admissions of several models in one engine.
@@ -67,11 +69,19 @@ public:
     model_manager(catalog_config settings, bool single, backend_factory factory);
     ~model_manager();
     static bool validate(const catalog_config & settings, std::string & error);
+    static bool validate_models(const std::vector<model_entry> & models, std::string & error);
 
     void start(); // housekeeping thread: unloads, joins and deadlines
     std::shared_ptr<request_state> submit(operation op, const json & input, std::vector<attachment> files);
     std::shared_ptr<request_state> load(const std::string & model);
     event unload(const std::string & model);
+    // Replaces the entries (see engine::update_catalog).
+    event update(std::vector<model_entry> models);
+    // Catalog sources re-read by reload() and after downloads, with entries given explicitly.
+    void set_sources(catalog_sources sources, std::vector<model_entry> fixed);
+    event reload();
+    std::shared_ptr<request_state> download(const std::string & repo, const std::map<std::string, std::string> & options);
+    event remove(const std::string & model);
     json catalog();
     std::shared_ptr<subscriber_state> subscribe();
     void stop();
@@ -93,10 +103,12 @@ private:
         std::shared_ptr<model_backend> backend;
         std::thread loader;
         bool unload_requested = false;
+        bool removed = false;         // left the catalog; erased once idle
+        std::shared_ptr<std::atomic<bool>> download_cancel; // set while downloading
         bool asleep = false;          // sleep reported before the load completed
         int active = 0;               // admitted requests not yet finished
         int64_t last_used = 0;
-        uint64_t generation = 0;      // one per load; late callbacks of older ones are ignored
+        uint64_t generation = 0;      // unique per load (manager-wide); late callbacks of older ones are ignored
         std::string error;
         json progress;
         std::list<std::shared_ptr<waiter>> waiters;
@@ -109,12 +121,17 @@ private:
     };
     using lock_t = std::unique_lock<std::mutex>;
 
-    record * resolve(const std::string & name);
+    record * resolve(const std::string & name);     // caller holds mutex; live entries only
+    record * find_record(const std::string & name); // caller holds mutex; tombstones too
+    void close_admissions(record & r, event reason); // caller holds mutex
     std::shared_ptr<request_state> enqueue(lock_t & lk, record & r, std::shared_ptr<request_state> state,
                                            ::json data, operation op, std::vector<attachment> files, bool load_only);
     void schedule(lock_t & lk);
     void start_load(record & r); // caller holds mutex
-    void run_load(const std::string & name, uint64_t generation, std::shared_ptr<model_backend> backend);
+    void run_load(const std::string & name, uint64_t generation, std::shared_ptr<model_backend> backend,
+                  std::string config_error);
+    void run_download(const std::string & repo, uint64_t generation, std::shared_ptr<request_state> state,
+                      std::shared_ptr<struct download_job> job);
     void begin_unload(record & r, event reason); // caller holds mutex
     void take_waiters(lock_t & lk, record & r, std::vector<std::shared_ptr<waiter>> & out);
     void drop_waiter(const std::shared_ptr<waiter> & w);
@@ -135,7 +152,11 @@ private:
     std::mutex stop_mutex;
     std::mutex mutex;
     std::condition_variable changed;
-    std::map<std::string, record> records; // keys and entries are immutable after construction
+    std::map<std::string, record> records; // guarded by mutex; removed entries are erased once idle
+    uint64_t next_generation = 0;
+    std::optional<catalog_sources> sources;
+    std::vector<model_entry> fixed; // entries given explicitly, kept by reload()
+    std::mutex reload_mutex;        // one reload at a time
     load_queue queue {mutex};
     size_t n_waiting = 0;
     bool stopped = false;

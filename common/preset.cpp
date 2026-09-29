@@ -282,6 +282,43 @@ common_preset_context::common_preset_context(llama_example ex)
     key_to_opt = get_map_key_opt(ctx_params);
 }
 
+void common_preset_context::set_key(common_preset & preset, const std::string & key, const std::string & value,
+                                    const std::string & source) const {
+    LOG_DBG("option: %s = %s\n", key.c_str(), value.c_str());
+    if (filter_allowed_keys && allowed_keys.find(key) == allowed_keys.end()) {
+        throw std::runtime_error(string_format(
+            "option '%s' is not allowed in remote presets",
+            key.c_str()
+        ));
+    }
+    if (key_to_opt.find(key) != key_to_opt.end()) {
+        const auto & opt = key_to_opt.at(key);
+        if (is_bool_arg(opt)) {
+            preset.options[opt] = parse_bool_arg(opt, key, value);
+        } else {
+            preset.options[opt] = value;
+        }
+        LOG_DBG("accepted option: %s = %s\n", key.c_str(), preset.options[opt].c_str());
+    } else if (ignore_unknown_keys) {
+        LOG_WRN("ignoring option '%s' from %s: not supported by this program\n", key.c_str(), source.c_str());
+    } else {
+        throw std::runtime_error(string_format(
+            "option '%s' not recognized in preset '%s'",
+            key.c_str(), preset.name.c_str()
+        ));
+    }
+}
+
+common_preset common_preset_context::load_from_map(const std::string & name,
+                                                   const std::map<std::string, std::string> & options) const {
+    common_preset preset;
+    preset.name = name;
+    for (const auto & [key, value] : options) {
+        set_key(preset, key, value, name);
+    }
+    return preset;
+}
+
 common_presets common_preset_context::load_from_ini(const std::filesystem::path & path, common_preset & global) const {
     common_presets out;
     auto ini_data = parse_ini_from_file(path);
@@ -306,30 +343,7 @@ common_presets common_preset_context::load_from_ini(const std::filesystem::path 
                 // skip version key (reserved for future use)
                 continue;
             }
-
-            LOG_DBG("option: %s = %s\n", key.c_str(), value.c_str());
-            if (filter_allowed_keys && allowed_keys.find(key) == allowed_keys.end()) {
-                throw std::runtime_error(string_format(
-                    "option '%s' is not allowed in remote presets",
-                    key.c_str()
-                ));
-            }
-            if (key_to_opt.find(key) != key_to_opt.end()) {
-                const auto & opt = key_to_opt.at(key);
-                if (is_bool_arg(opt)) {
-                    preset.options[opt] = parse_bool_arg(opt, key, value);
-                } else {
-                    preset.options[opt] = value;
-                }
-                LOG_DBG("accepted option: %s = %s\n", key.c_str(), preset.options[opt].c_str());
-            } else if (ignore_unknown_keys) {
-                LOG_WRN("ignoring option '%s' from %s: not supported by this program\n", key.c_str(), fs_path_to_utf8(path).c_str());
-            } else {
-                throw std::runtime_error(string_format(
-                    "option '%s' not recognized in preset '%s'",
-                    key.c_str(), preset.name.c_str()
-                ));
-            }
+            set_key(preset, key, value, fs_path_to_utf8(path));
         }
 
         if (preset.name == COMMON_PRESET_DEFAULT_NAME && preset.options.empty()) {

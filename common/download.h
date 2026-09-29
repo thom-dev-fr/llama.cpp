@@ -5,6 +5,7 @@
 #include <string>
 #include <vector>
 #include <functional>
+#include <stdexcept>
 
 struct common_params_model;
 
@@ -33,7 +34,7 @@ struct common_remote_params {
     long max_size = 0;           // unlimited if 0
 };
 
-// get remote file content, returns <http_code, raw_response_body>
+// get remote file content, returns <http_code, raw_response_body> (requires llama-common-acquisition)
 std::pair<long, std::vector<char>> common_remote_get_content(const std::string & url, const common_remote_params & params);
 
 // split HF repo with tag into <repo, tag>, for example:
@@ -77,7 +78,32 @@ struct common_download_task {
         : opts(opts), url(f.url), local_path(f.local_path), on_done(on_done), is_hf(true) {}
 };
 
+// Network transport of model acquisition. llama-common-acquisition provides
+// common_download_network(); the functions below that take a transport are
+// local (llama-common-local) and, given nullptr, use only files already present
+// locally: whatever would need the network fails with common_download_unavailable.
+struct common_download_remote {
+    hf_cache::hf_files (*get_repo_files)(const std::string & repo_id, const std::string & token);
+    int (*download_file)(const std::string & url, const std::string & path,
+                         const common_download_opts & opts, bool skip_etag);
+    std::string (*docker_resolve_model)(const std::string & docker);
+};
+
+// a remote resource was requested but no network transport is available
+struct common_download_unavailable : std::runtime_error {
+    using std::runtime_error::runtime_error;
+};
+
+// requires llama-common-acquisition
+const common_download_remote & common_download_network();
+
+// run downloads in parallel (local check only without a transport); throws on failure
+void common_download_run_tasks(const std::vector<common_download_task> & tasks, const common_download_remote * remote);
+// requires llama-common-acquisition
 void common_download_run_tasks(const std::vector<common_download_task> & tasks);
+
+// offline "download": checks the local file and reports it as cached (304), -1 if missing
+int common_download_file_cached(const std::string & url, const std::string & path, const common_download_opts & opts);
 
 // if url is a multi-part GGUF file, returns all parts, otherwise returns the single file
 std::vector<std::string> common_download_get_all_parts(const std::string & url);
@@ -89,7 +115,7 @@ std::vector<common_cached_model_info> common_list_cached_models();
 // returns an empty string if the model is not present in the cache
 std::string common_download_resolve_path(const std::string & hf_repo_with_tag, const std::string & hf_file = "");
 
-// download single file from url to local path
+// download single file from url to local path (requires llama-common-acquisition)
 // returns status code or -1 on error
 // skip_etag: if true, don't read/write .etag files (for HF cache where filename is the hash)
 int common_download_file_single(const std::string & url,
@@ -97,7 +123,7 @@ int common_download_file_single(const std::string & url,
                                 const common_download_opts & opts = {},
                                 bool skip_etag = false);
 
-// resolve and download model from Docker registry
+// resolve and download model from Docker registry (requires llama-common-acquisition)
 // return local path to downloaded model file
 std::string common_docker_resolve_model(const std::string & docker);
 
@@ -118,4 +144,8 @@ struct common_download_hf_plan {
     hf_cache::hf_file dspark;
     hf_cache::hf_file preset; // if set, only this file is downloaded
 };
+// lists repository files through the transport unless offline or remote is nullptr, falling back to the cache
+common_download_hf_plan common_download_get_hf_plan(const common_params_model & model, const common_download_opts & opts,
+                                                    const common_download_remote * remote);
+// requires llama-common-acquisition
 common_download_hf_plan common_download_get_hf_plan(const common_params_model & model, const common_download_opts & opts);

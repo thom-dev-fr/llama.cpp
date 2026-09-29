@@ -63,7 +63,10 @@ int main(int argc, char ** argv) {
     event error;
 
     catalog_config invalid;
+    invalid.max_waiting = 0;
     assert(!engine::create_catalog(invalid, error) && error.category == "invalid_config");
+    // an empty catalog is valid: models may be added by update_catalog
+    assert(engine::create_catalog(catalog_config{}, error) && error.category.empty());
 
     // limit 1: load on demand, evict the idle model, failed load leaves no reservation
     {

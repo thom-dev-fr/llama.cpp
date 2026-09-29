@@ -120,7 +120,6 @@ int main(int argc, char ** argv) {
     owner->stop();
     assert(props.contains("chat_template")); // owned snapshot survives stop
     assert(owner->submit(operation::tokenize, {})->result().type == event_type::cancelled);
-    std::filesystem::remove_all(dir);
 
     // The same bounded sink protects chat deltas; a stalled reader must not
     // block an unrelated request or lose its terminal overflow error.
@@ -166,5 +165,6 @@ int main(int argc, char ** argv) {
     assert(vector.is_array() && vector.size() == 1);
     auto vectors = success(embedding->submit(operation::embeddings_openai, {{"input", {"Hello", "World"}}, {"encoding_format", "base64"}})).data;
     assert(vectors["data"].size() == 2 && vectors["data"][0]["embedding"].is_string());
+    std::filesystem::remove_all(dir);
     std::cout << "PASS direct operation families, semantic streaming, structured output and slots\n";
 }

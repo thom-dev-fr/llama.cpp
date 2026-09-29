@@ -4,7 +4,9 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -24,14 +26,25 @@ enum class operation {
     slot_restore, slot_erase, lora_list, lora_apply, properties, models, metrics, properties_update,
 };
 
+// Configuration of one model. Typed fields are shortcuts with conservative
+// defaults for embedding (CPU, small context, no fitting or warmup); std::nullopt
+// or an empty value keeps llama.cpp's default instead. Every other loading and
+// inference setting is passed in options, named as in preset (INI) files: the
+// argument name without leading dashes, its negated form or its LLAMA_ARG_* name
+// ("ctx-size", "flash-attn", "temp", "hf-repo", ...). Options of the host
+// application (HTTP, UI, tools, logging, process-wide state) or of the catalog
+// (alias, models-dir, ...) are rejected, as is an option that repeats a typed
+// field. Invalid configurations fail with invalid_config.
 struct config {
-    std::string model_path;
-    int context_size = 512;
-    int parallel = 1;
-    int threads = 2;
-    int gpu_layers = 0;
-    int batch_size = 128;
-    int micro_batch_size = 128;
+    std::string model_path; // or a model option: "model", "hf-repo", "model-url", "docker-repo"
+    std::optional<int> context_size = 512;
+    std::optional<int> parallel = 1;
+    std::optional<int> threads = 2;
+    std::optional<int> gpu_layers = 0;      // 0 also keeps the multimodal projector on CPU
+    std::optional<int> batch_size = 128;
+    std::optional<int> micro_batch_size = 128;
+    std::optional<bool> fit = false;        // fit unset parameters to device memory
+    std::optional<bool> warmup = false;
     std::string chat_template;
     std::string mmproj_path;
     bool embeddings = false;
@@ -41,10 +54,15 @@ struct config {
     // Free the model after this many idle seconds and reload it on the next
     // request (-1 disables). A failed reload is reported as wake_failed.
     int sleep_idle_seconds = -1;
+    std::map<std::string, std::string> options;
     size_t max_tasks = 64;          // includes queued, active and cancelling tasks
     size_t max_events = 256;        // per request, before JSON conversion
     size_t max_request_bytes = 16 * 1024 * 1024;
     json generation_defaults = json::object();
+
+    // Only options, over llama.cpp's defaults (as the llama-server command line
+    // would configure a model); engine limits keep their defaults.
+    static config from_options(std::map<std::string, std::string> options);
 };
 
 enum class event_type { payload, success, error, cancelled, timeout };
@@ -61,11 +79,39 @@ struct event {
 
 // One catalog entry: selected by id or alias in the "model" field of requests.
 struct model_entry {
+    model_entry(std::string id = {}, std::vector<std::string> aliases = {}, std::vector<std::string> tags = {},
+                config settings = {})
+        : id(std::move(id)), aliases(std::move(aliases)), tags(std::move(tags)), settings(std::move(settings)) {}
+
     std::string id;
     std::vector<std::string> aliases;
     std::vector<std::string> tags;  // informational
     config settings;                // loading configuration and per-model limits
+    // Set by read_catalog, informational for the engine:
+    std::string source;             // "cache", "models_dir" or "preset"
+    bool hidden = false;            // cache entry deduplicated by a preset
+    bool load_on_startup = false;   // preset "load-on-startup"
+    std::map<std::string, std::string> host_options; // per-model options owned by the host (e.g. stop-timeout)
+    // Configuration error found while reading the sources: the model stays in
+    // the catalog and fails to load with this message (invalid_config).
+    std::string error;
 };
+
+// Explicit catalog sources; nothing else is discovered and nothing is written.
+struct catalog_sources {
+    bool cache = false;             // models in the Hugging Face cache (LLAMA_CACHE, HF_HUB_CACHE, ...)
+    std::string models_dir;         // one model per GGUF file or subdirectory
+    std::string presets;            // INI file; its "*" section applies to every model
+    std::map<std::string, std::string> options; // over every model, e.g. the host's command line
+    bool skip_conflicting_aliases = false;      // drop them with a warning instead of failing (reloads)
+};
+
+// Reads the sources into catalog entries with llama-server's rules: a models_dir
+// model replaces a cached one of the same name, an INI section of that name is
+// merged into it; the "*" section applies under each model and options over all.
+// Engine options become each entry's settings (config::from_options), host
+// options its host_options. No network access.
+event read_catalog(const catalog_sources & sources, std::vector<model_entry> & models);
 
 // Several models in one process. Loading, resident, sleeping and unloading
 // models count against max_loaded; only idle models are evicted (least
@@ -77,6 +123,9 @@ struct catalog_config {
     std::chrono::milliseconds wait_timeout = std::chrono::minutes(5);
     size_t max_waiting = 64;        // requests (and explicit loads) waiting for a model
     size_t max_subscriber_events = 256;
+    // When set, create_catalog() reads these sources (read_catalog) and adds their
+    // entries to models; reload() and successful downloads read them again.
+    std::optional<catalog_sources> sources;
 };
 
 namespace detail { struct request_state; struct engine_impl; struct subscriber_state; }
@@ -138,7 +187,8 @@ public:
                                     std::vector<attachment> files = {});
     std::unique_ptr<request> completion(json input, std::vector<attachment> files = {});
     // Catalog snapshot: id, aliases, tags, status (unloaded, loading, loaded,
-    // sleeping, unloading, failed), progress/error, active and waiting counts.
+    // sleeping, unloading, failed, downloading), progress/error, active and
+    // waiting counts, source and hidden when set.
     json catalog() const;
     std::unique_ptr<subscription> subscribe();
     // Loads a model, waiting for a slot like a request. Succeeds once it is
@@ -147,6 +197,29 @@ public:
     // Explicit unload: closes admissions, cancels its requests and waiters,
     // waits for them to stop, then frees resources. Blocks until done.
     event unload(const std::string & model);
+    // Replaces the catalog (not for engines made with create()). Removed models
+    // are unloaded and their requests and waiters end with model_not_found;
+    // models whose settings changed are unloaded and reloaded on demand with
+    // the new settings (waiters are kept); others keep running. An invalid list
+    // leaves the catalog unchanged. Subscribers receive a "reload" snapshot.
+    event update_catalog(std::vector<model_entry> models);
+    // Reads the catalog sources again and applies them like update_catalog
+    // (conflicting aliases are dropped with a warning); entries given in
+    // catalog_config::models are kept.
+    event reload();
+    // Downloads a Hugging Face repository ("user/model[:quant]") into the cache
+    // with the resolution rules of hf-repo (model, projector, draft sidecars);
+    // options are engine options such as "hf-token". The repository metadata is
+    // requested before returning. Meanwhile the catalog lists the repository as
+    // "downloading", with progress in subscriptions; afterwards the entry goes
+    // and, with sources, the catalog is read again. The request ends with
+    // success, download_failed or, if cancelled, cancelled (incomplete files are
+    // deleted). Without network acquisition: capability_unavailable.
+    std::unique_ptr<request> download(const std::string & repo, std::map<std::string, std::string> options = {});
+    // Removes a model read from the cache: cancels its download or unloads it
+    // (its requests and waiters end), deletes its cached files and its entry.
+    // Models from other sources are not removable (invalid_request).
+    event remove(const std::string & model);
     // Concurrent, idempotent. Closes admissions, cancels, wakes readers and joins.
     // Surviving requests drain buffered payloads then see their sole terminal result;
     // every subsequent next() returns that same terminal result immediately.
