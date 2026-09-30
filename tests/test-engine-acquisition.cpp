@@ -135,6 +135,8 @@ int main(int argc, char ** argv) {
         const auto & d = item.data;
         saw_downloading |= d["type"] == "status" && d["status"] == "downloading";
         saw_progress    |= d["type"] == "progress" && d["progress"]["stage"] == "download";
+        // the catalog is read again before the event: the downloaded model is listed by then
+        assert(!(d["type"] == "download") || saw_reload);
         saw_finished    |= d["type"] == "download" && d["result"] == "finished";
         saw_reload      |= d["type"] == "reload";
     }

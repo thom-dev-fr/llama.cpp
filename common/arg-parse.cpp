@@ -49,10 +49,7 @@ static bool parse_bool_value(const std::string & value) {
 // CLI argument parsing functions
 //
 
-// apply config files (if present), a later file overrides an earlier one:
-// 1. system-wide: /etc/llama.cpp/config.ini (%PROGRAMDATA%\llama.cpp\config.ini on windows)
-// 2. user-level: ${XDG_CONFIG_HOME:-~/.config}/llama.cpp/config.ini (%APPDATA%\llama.cpp\config.ini on windows)
-static void common_params_apply_system_config(common_params & params, llama_example ex) {
+std::vector<std::filesystem::path> common_params_config_files() {
     std::vector<std::filesystem::path> paths;
 
 #if defined(_WIN32)
@@ -77,6 +74,12 @@ static void common_params_apply_system_config(common_params & params, llama_exam
             found.push_back(path);
         }
     }
+    return found;
+}
+
+// apply config files (if present), a later file overrides an earlier one
+static void common_params_apply_system_config(common_params & params, llama_example ex) {
+    const std::vector<std::filesystem::path> found = common_params_config_files();
     if (found.empty()) {
         return;
     }

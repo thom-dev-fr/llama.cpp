@@ -5,8 +5,9 @@
 - Référence initiale : `e4c142c5765abf9e5e2285b4b7379e4e84edacea`. Reprise P2 sur `642c8ea7b`, avec P0/P1 commités et arbre propre.
 - **P3 implémenté le 29 septembre 2026 : tous les contrats mono-modèle utilisent le runtime moteur ; qualification et limites détaillées dans la section P3 ci-dessous.**
 - **P3 revérifié puis P4 implémenté le 29 septembre 2026** (section P4) : cycle de vie multi-modèles dans le processus, sans sous-processus ni port.
-- **P4 revérifié puis P5 implémenté le 29 septembre 2026** (section P5) : configuration complète par options nommées, sources de catalogue partagées avec le routeur, rechargement, acquisition optionnelle sans sous-processus. **P5 non commité à la fin de cette session. Prochaine étape : P6.** Le drop complet P0–P9 n’est pas terminé.
-- **Commits** : correctif de revue P2 `8dd3003e9`, P3 `675bf4fd0`, P4 `825f7f3b0`. Arbre propre après P4 ; revalidation après commit ci-dessous (« P4 — Revalidation après commit »).
+- **P4 revérifié puis P5 implémenté le 29 septembre 2026** (section P5) : configuration complète par options nommées, sources de catalogue partagées avec le routeur, rechargement, acquisition optionnelle sans sous-processus. **P5 commité dans `756173951`, arbre propre. Prochaine étape : P6.** Le drop complet P0–P9 n’est pas terminé.
+- **P6 implémenté le 29 septembre 2026** (section P6) : le mode multi-modèles de `llama-server` utilise le catalogue du moteur dans le processus ; routeur/proxy/enfants et `server-process.*` supprimés. **Commité (message « engine : run llama-server multi-model mode in process »). Prochaine étape : P7 (CLI local).**
+- **Commits** : correctif de revue P2 `8dd3003e9`, P3 `675bf4fd0`, P4 `825f7f3b0`, P5 `756173951`. Arbre propre après P4 ; revalidation après commit ci-dessous (« P4 — Revalidation après commit »).
 - P0/P1 : inventaire, références et graphe recontrôlés ; 16/16 tests locaux dans chaque profil et 9/9 tests C++ ciblés repassés avant P2. Les réserves de performance et capacités consignées à P1 restent ouvertes.
 - P2 : `include/llama-engine.h`, décodeur unique dans `engine/`, handlers `/completion` et `/completions` migrés. Voir la section P2 et [le guide API](embedded-inference-engine-api.md). CLI local et routeur conservent leurs chemins legacy jusqu’à P6/P7.
 - Références obligatoires lues intégralement : CONTEXT, design, ADR 0001, CONTRIBUTING, README-dev serveur et README tests serveur.
@@ -27,7 +28,7 @@ La completion native est **migrée à P2** ; les contrats mono-modèle sont **mi
 | GET `/metrics` | Tâche prioritaire, reset des compteurs par fenêtre, snapshot pendant sommeil ; `endpoint_metrics=false` | Statistiques moteur, texte Prometheus/headers HTTP | `test_metrics`, `test_sleep` ; direct snapshot concurrent |
 | GET `/props` | Métadonnées, templates, defaults, capacités, UI ; snapshot sommeil | Snapshot moteur + propriétés UI hôte | `test_basic`, `test_template`, `test_sleep` |
 | POST `/props` | `endpoint_props=false` ; actuellement succès sans mutation effective | Contrôle moteur si mutations ajoutées, garde HTTP conservée | Ajouter test direct/HTTP du no-op et garde |
-| GET `/models`, `/v1/models` | Mono : snapshot ; routeur : catalogue/alias/tags/source/modalités, `reload`, args/preset/exit_code historiques | Catalogue moteur, sérialisation compat HTTP | `test_router`, `test_sleep`, `test_basic` |
+| GET `/models`, `/v1/models` | Mono : snapshot ; routeur : catalogue/alias/tags/source/modalités, `reload`, args/preset/exit_code historiques | **P6** : `catalog()`/`entries()` du moteur, sérialisation compat HTTP ; `exit_code` → `failed`+`error` (section P6) | `test_router`, `test_sleep`, `test_basic` |
 | POST `/completion`, `/completions` | Native, prompts texte/tokens/batchs, stream, `n`, sampling, cache, timings, progression | Moteur P2 puis P3 ; SSE HTTP | `test_completion`, `test_ignore_eos`, `test_ctx_shift` |
 | POST `/v1/completions` | Conversion OpenAI, usage/finish_reason/logprobs ; même ordonnanceur | Moteur P3 | `test_completion` |
 | POST `/chat/completions`, `/v1/chat/completions` | Templates, outils produits, reasoning, JSON schema, médias, `n`, usage ; reprise opt-in | Moteur P3 ; reprise chez serveur | `test_chat_completion`, `test_tool_call`, `test_vision_api`, `test_stream`, `test-chat` |
@@ -46,12 +47,12 @@ La completion native est **migrée à P2** ; les contrats mono-modèle sont **mi
 | GET/POST `/lora-adapters` | Liste/échelles des adapters chargés, validation tableau, tâche sérialisée | Moteur P3 | `test_lora` ; direct |
 | GET `/slots` | `endpoint_slots=true`, `fail_on_no_slot`, tâche prioritaire | Moteur P3 ; garde HTTP | `test_basic`, `test_slot_save` |
 | POST `/slots/:id_slot` | save/restore/erase ; `slot_save_path` vide par défaut, validation nom | Moteur P3 ; garde HTTP | `test_slot_save`, `test_security` |
-| POST `/models/load`, `/models/unload` (routeur) | Validation état/alias ; lancement/arrêt enfant, annulation téléchargement | Cycle de vie moteur **implémenté P4** (`engine::load/unload`) ; bascule HTTP P6 | `test_router` ; `test-engine-models`, `test-engine-catalog` |
-| POST `/models` (routeur) | Validation distante, téléchargement enfant, rafraîchissement cache | Acquisition optionnelle P5, catalogue moteur | `test_router`, `test-model-resolution` ; serveur contrôlé |
-| DELETE `/models` (routeur) | Suppression explicite du cache, restrictions de source et de chemins | Cache local partagé + cycle de vie moteur | `test_router`, `test_security` ; courses suppression/chargement |
-| GET `/models/sse` (routeur) | Abonnement progression/états, déconnexion abonné indépendante du modèle | Observation moteur **implémentée P4** (`engine::subscribe`) ; SSE HTTP P6 | `test_router` ; saturation/resync dans `test-engine-models` |
+| POST `/models/load`, `/models/unload` (routeur) | Validation état/alias ; lancement/arrêt enfant, annulation téléchargement | Cycle de vie moteur P4 ; **HTTP basculé P6** (sans processus) | `test_router` ; `test-engine-models`, `test-engine-catalog` |
+| POST `/models` (routeur) | Validation distante, téléchargement enfant, rafraîchissement cache | Acquisition P5 ; **HTTP basculé P6** (`engine::download`, sans enfant) | `test_router`, `test-model-resolution`, `test-engine-acquisition` |
+| DELETE `/models` (routeur) | Suppression explicite du cache, restrictions de source et de chemins | **P6** : `engine::remove` | `test_router`, `test_security`, `test-engine-sources` |
+| GET `/models/sse` (routeur) | Abonnement progression/états, déconnexion abonné indépendante du modèle | Observation moteur P4 ; **SSE HTTP P6** (traduction des événements historiques) | `test_router` ; saturation/resync dans `test-engine-models` |
 | Sommeil/réveil (pas une route) | `sleep_idle_seconds=-1`, snapshot avant destroy, requête réveille ; **P4 : réveil échoué = erreur explicite récupérable** (`wake_failed`, HTTP 503) au lieu de GGML_ABORT | Machine d’états moteur P4 | `test_sleep` (dont réveil échoué), `test-engine-catalog` |
-| GET `/v1/stream`, POST `/v1/streams/lookup`, DELETE `/v1/stream` | conv_id/from, lookup privé, rétention, remplacement, drainage après déconnexion, Stop ; routeur proxy enfant | Serveur seul P3/P6, possède la requête moteur | `test_stream`, `test_router` ; arrêt pendant replay |
+| GET `/v1/stream`, POST `/v1/streams/lookup`, DELETE `/v1/stream` | conv_id/from, lookup privé, rétention, remplacement, drainage après déconnexion, Stop ; routeur proxy enfant | Serveur seul ; **P6** : registre local aussi en multi-modèles, 503 tant que le modèle charge | `test_stream`, `test_router` ; arrêt pendant replay |
 | GET/POST `/cors-proxy` | Proxy UI optionnel, sinon 403 | Serveur uniquement | `test_proxy`, `test_security` |
 | GET/POST `/tools` | Outils exécutés/MCP, streaming propre, sinon 403 | Serveur/hôte uniquement | `test_tools_builtin`, `test_mcp_servers` |
 | GCP (`register_gcp_compat`) | Alias configurés par environnement vers handlers, enveloppe transport | Serveur uniquement, opérations sous-jacentes moteur | `test_compat_gcp` |
@@ -68,7 +69,7 @@ La completion native est **migrée à P2** ; les contrats mono-modèle sont **mi
 | Vidéo conteneur | ffprobe + ffmpeg dans `mtmd-helper.cpp`, `MTMD_VIDEO` | Prétraitement externe non obligatoire ; pas de décodeur local équivalent existant | **OUVERT, arbitrage avant de revendiquer parité de formats** : décodeur embarqué ou entrée frames prétraitées |
 | WebP | stb ne le décode pas ; fallback ffmpeg sous `MTMD_VIDEO` | Désactiver VIDEO perd aussi WebP | Même arbitrage ; ne pas compter comme couvert |
 | Exécution outils/MCP | subprocess permis | Hors moteur ; option du consommateur | Ne pas confondre processus d’outil avec processus d’inférence |
-| `status.args`, `status.preset`, `exit_code`, signaux enfant, `DEFAULT_STOP_TIMEOUT`, ports enfants | Processus réels | Pas de faux exit_code d’inférence | Adaptation HTTP explicite à définir/documenter en P6 |
+| `status.args`, `status.preset`, `exit_code`, signaux enfant, `DEFAULT_STOP_TIMEOUT`, ports enfants | Processus réels | Pas de faux exit_code d’inférence | **Adapté P6** (tableau de la section P6, README-dev « Router mode ») |
 
 ## P0 — Configuration : registre de traduction
 
@@ -372,14 +373,12 @@ RSS maximale CPU 90 914 816, Metal 93 274 112 octets. La baisse CPU agrégée vs
 | `llama-common` | Agrégat args/presets/subprocess qui lie local + acquisition ; pas de copies de code | Les autres outils peuvent le conserver ; inférence serveur/CLI quitte cet agrégat P6/P7 |
 | `tools/server/server-{common,chat,task,queue,schema}.h` | Cinq includes de compatibilité vers engine, zéro implémentation | P8 |
 | Noms internes server_* et include dirs privés exportés temporairement par llama-engine | Adapter existant et tests internes utilisent encore les types historiques ; API publique P2 disponible séparément | Migration P3, nettoyage P8 |
-| `server-process.*` et routeur/proxy enfants | Comportement desktop conservé, désormais hors cible moteur | P6/P8 |
+| `server-process.*` et routeur/proxy enfants | **Supprimés P6** ; `server_http_proxy` déplacé dans `server-http-proxy.*` pour le seul proxy CORS de l’UI | — |
 | `tools/server/server-context.cpp` et accesseurs privés `engine/engine-context.h` | Handlers restants, snapshots référencés et lecteurs legacy ; décodeur extrait et natif migré à P2 | P3/P8 |
 | `server-task.cpp::to_metrics`, champs legacy SSE/config UI/HTTP | Restes de responsabilités à séparer sémantiquement ; pas de dépendance réseau nécessaire dans le profil local | P3/P6/P8 |
 | `download.cpp` helpers cache/sélection, `arg.cpp` résolution, `preset.cpp` cascades | Réutilisés, pas encore disponibles comme catalogue local autonome | P5 ; auditer avant intégration de chargement P2 |
-| `server_lru_sched` (routeur) | Adaptateur des enfants du routeur vers la politique partagée `llama_engine::detail::load_queue` ; aucune copie de l’algorithme | P6 (suppression avec le routeur de processus) |
-| `server_models::ensure_model_ready` (routeur) | Boucle d’attente du routeur, par sondage 200 ms, sans délai ; l’attente bornée du moteur est dans `model_manager` | P6 |
-| Phase 2 de `server_models::load_models` et `add_model` (routeur) | Alias/tags, conflits et réconciliation au rechargement propres au mapping d’enfants ; la lecture des sources (phase 1) est partagée depuis P5, les mêmes règles côté moteur sont dans `read_catalog`/`model_manager::update` | P6 |
-| Téléchargement du routeur (`SERVER_CHILD_MODE_DOWNLOAD`, `server_download_state`) | Enfant de téléchargement conservé tant que le routeur existe ; le moteur télécharge sans processus (`engine::download`) | P6 |
+| `server_lru_sched`, `ensure_model_ready`, phase 2 de `load_models`, `add_model`, enfant de téléchargement, `server_task_result_router` | **Supprimés P6** : le serveur utilise `model_manager` (file, LRU, rechargement, téléchargement) | — |
+| `server_context ctx_server` construit en mode multi-modèles | Objet vide (jamais chargé) : `server_routes` le référence encore pour le mode mono | P8 |
 | Surcharges `common_models_handler_init/apply` et `common_download_*` sans transport (`arg-parse.cpp`, `download.cpp`) | API historique des exécutables, déléguant aux versions à transport explicite ; pas une seconde implémentation | Conservées (outils hors périmètre) |
 
 Aucune façade appelant le serveur depuis un moteur n’a été ajoutée. Un seul exemplaire de chaque algorithme extrait. Les suppressions `.cpp` dans tools/server sont des **déplacements vers engine non encore suivis par Git**, pas des fonctionnalités supprimées.
@@ -899,8 +898,96 @@ TSAN_OPTIONS=halt_on_error=1 ctest --test-dir build-agent-engine-p4-tsan --outpu
 
 ## Consignes de reprise P6
 
-1. Commiter P5 si ce n’est pas fait (vérifier `git status`, aucun fichier temporaire). Après restauration d’archives, forcer la recompilation (leçon P4) ; après tout changement de `common.h`, reconstruire **tous** les tests (leçon P5).
+1. P5 est dans `756173951` (vérifier `git status` avant de reprendre). Après restauration d’archives, forcer la recompilation (leçon P4) ; après tout changement de `common.h`, reconstruire **tous** les tests (leçon P5).
 2. Créer le serveur multi-modèles sur `engine::create_catalog` avec `catalog_config::sources` (cache toujours, `--models-dir`, `--models-preset`, arguments du routeur en `options`), `wait_timeout` non borné, `max_loaded = --models-max`, `autoload`, limites HTTP de compatibilité par entrée ; `load-on-startup` via `engine::load` ; `GET /models?reload` → `engine::reload`.
 3. Remplacer proxy/enfants par les opérations moteur ; `/models`, `/models/load|unload`, `POST/DELETE /models`, SSE de progression (traduire les événements `status`/`progress`/`download`/`remove`/`reload` vers les noms historiques), reprise des streams sans lookup enfant.
 4. Définir et documenter les champs historiques (`args`, `preset`, `exit_code`, `stop-timeout`, `failed` ↔ `unloaded`+`exit_code`) et le sort des `host_options` processus/HTTP par modèle (voir écarts P5).
 5. Supprimer ensuite `server_lru_sched`, `ensure_model_ready`, la phase 2 de `load_models`, `add_model`, le mode enfant de téléchargement et `server-process.*` de l’inférence (P6/P8), avec test « aucun sous-processus ni port enfant ».
+
+## P6 — Serveur multi-modèles sur le moteur, sans processus
+
+### Vérification préalable
+
+Arbre au commit P5 `756173951` (seul le journal modifié). Relecture P0–P5 contre le plan et consignes de reprise P6 suivies. Les tests P5 ont été rejoués dans le cadre de la validation finale ci-dessous.
+
+### Implémentation
+
+- **Serveur** (`tools/server/server-models.{h,cpp}` réécrits, `server.cpp`) : `server_models_routes` crée le catalogue du moteur par `llama_engine::detail::make_catalog_manager` : sources cache + `--models-dir` + `--models-preset`, ligne de commande au-dessus de chaque modèle (options réservées retirées comme avant : clés API, TLS, `--models-*`, identité du modèle, `--log-file` ; options de portée catalogue ignorées avec avertissement), environnement `LLAMA_ARG_*` et fichiers `config.ini` **en dessous** (`catalog_sources::defaults`, nouveau) ; `max_loaded = --models-max`, `autoload = --models-autoload`, attente non bornée en temps et en nombre (parité), limites d’admission/événements/corps non bornées par entrée (ajustement appliqué à la création et à chaque rechargement).
+- **Routes d’inférence** : plus de proxy. `server_routes` reçoit un `server_model_routing` ; `handle_operation` soumet via `model_manager::submit_native` (JSON natif déjà parsé, `?autoload=` par requête) et réutilise la même mise en forme HTTP/SSE que le mode mono-modèle. Modèle : champ `model` du corps (POST) ou paramètre `model` (GET). Les capacités sont vérifiées par le moteur une fois le modèle résident. Erreurs de sélection avec les statuts/messages du routeur (400 « model 'x' not found », « model is not loaded », « model name is missing… », 500 « model name=x failed to load »).
+- **Routes `/models`** : liste (`catalog()` + `entries()` + `info` du modèle résident + `input_modalities`), `?reload`, `/models/load` (asynchrone, file du moteur), `/models/unload` (bloquant jusqu’à libération), `POST /models` (`engine::download`, métadonnées synchrones), `DELETE /models` (`engine::remove`), `/models/sse` (abonnement moteur traduit en `model_status`, `status_change`, `download_progress`, `download_finished|failed`, `model_remove`, `models_reload` ; `resync` → `models_reload`). `/props` sans `model` reste la réponse routeur.
+- **Paramètres hôte par modèle** : fabrique de backend du serveur (hook `backend_hooks::host_params`, nouveau) : intervalle de ping SSE, verbosité, UI, drapeaux d’endpoints, options hôte du preset appliquées à ce modèle ; nom du modèle = identifiant du catalogue (comme `--alias` forcé par l’ancien routeur), tags du catalogue. Les gardes `/metrics`, `/slots`, `POST /props` lisent ces paramètres par modèle.
+- **Reprise des flux** : registre de sessions du serveur dans les deux modes ; plus de lookup d’enfant. Une requête qui attend son modèle : `GET /v1/stream` → 503 « retry later », absente de `lookup`, `DELETE` l’annule (400 « request cancelled by a stop… »), déconnexion du client sans effet sur une requête de session.
+- **Arrêt** : le signal ferme l’écoute ; le thread principal arrête alors le moteur (fin des requêtes, attentes et abonnés SSE) avant de joindre les workers HTTP.
+- **`LLAMA_SERVER_DEBUG_FAKE_TIMING`** conservé (délai de 2 s au chargement et à l’admission, par un backend enveloppant) pour les tests de file.
+- **Moteur** (additions, pas de seconde implémentation) : `model_manager::submit_native`/`entries`/`entry`/`status_of`, `make_catalog_manager` (factorise `create_catalog`), `model_backend::info` + `info` dans le catalogue et l’événement `loaded`, `model_entry::input_modalities` (projecteur trouvé localement, hors ligne ; remplace `update_caps` du routeur), `catalog_sources::defaults`, événement `download` publié **après** la relecture des sources (le routeur listait le modèle dès `download_finished`).
+- **Correctif P5 trouvé par P6** : `read_catalog` comparait `opt.env` (nul pour une option sans variable, ex. `--seed`) à une chaîne : **SIGSEGV** dès que la ligne de commande contenait une telle option. Corrigé, test de non-régression ajouté (échoue en SEGFAULT sans le correctif, `p6-sources-without-fix.log`).
+- **Supprimés** : `server-process.{h,cpp}`, moniteur/enfants, proxy vers les enfants, `server_lru_sched`, `ensure_model_ready`, mode enfant de téléchargement, `server_task_result_router`. `server_http_proxy` (utilisé par le proxy CORS de l’UI) déplacé tel quel dans `server-http-proxy.{h,cpp}`. `common_params_config_files()` extrait de `arg-parse.cpp` (même liste, réutilisée par le serveur).
+
+### Décisions et différences de compatibilité (documentées dans README-dev et README)
+
+| Ancien routeur | Mode multi-modèles P6 |
+| --- | --- |
+| Échec de chargement : `unloaded` + `exit_code` | `status.value = "failed"`, `failed: true`, `error` ; SSE `status_change {"status": "failed", "error"}` (valeur déjà gérée par l’UI). Aucun `exit_code` fictif, y compris après un déchargement normal. |
+| `status.args` = ligne de commande de l’enfant | Arguments équivalents à la configuration, sans binaire/hôte/port ; `preset` inchangé dans son principe. |
+| `stop-timeout`, force-kill | Ignoré (accepté) : déchargement coopératif. |
+| Options hôte par modèle | `metrics`/`props`/`slots`/ping SSE/UI/verbosité appliquées au modèle ; les autres (`port`, `timeout`, `prio`, `numa`, `rpc`, …) sans effet, avertissement au chargement du catalogue. |
+| `/models/load` avec tous les emplacements occupés : 500 | Attend un emplacement. |
+| `/models/unload` asynchrone | Répond après libération ; requêtes en attente terminées en 500. |
+| Garde d’endpoint désactivé évaluée par l’enfant après chargement | Évaluée avant, sans charger le modèle. |
+| `load-on-startup` > `models_max` avec `models_max = 0` : refus (bug) | `0 = illimité` respecté. |
+| `--tags` de la ligne de commande appliqué à tous les modèles | Ignoré avec avertissement (option de catalogue). |
+
+### Validation réellement exécutée
+
+| Vérification | Résultat |
+| --- | --- |
+| Build serveur/CLI/app + tests, profil complet | **PASS**, 0 warning (`p6-build-2.log`) |
+| C++ ciblé (moteur, chat, arg-parser, model-resolution, acquisition, hf-cache, schema, sampling) | **PASS 22/22** (`p6-cpp-final.log`) |
+| Nouveaux tests directs : `submit_native`/autoload par requête, `info` (catalogue + événement), recherche par alias, `make_catalog_manager` + ajustement à la création/rechargement ; sources : option sans variable d’env, `defaults` (priorités et refus d’identité), `input_modalities` texte et **image** (projecteur tinygemma3) ; ordre reload → `download` | **PASS** ; `test-engine-models` 10 exécutions, acquisition 5 |
+| Suite HTTP complète `not slow` | **PASS 385, 6 SKIP** (`p6-http-all.log`, 311 s) : +6 tests P6 ; skips = les 6 habituels (Linux, 2 slow, docker/podman) |
+| Routeur + flux (dont reprise pendant chargement, Stop pendant chargement) | **PASS 20/20**, aucun skip (`p6-http-router-2.log`) |
+| Nouveaux tests HTTP P6 : aucun processus enfant ni port d’écoute supplémentaire (`pgrep`/`lsof` à l’exécution), échec de chargement `failed`, événements SSE, options hôte par modèle, environnement sous les presets, déchargement pendant attente | **PASS 6/6** ; contre le binaire P5 : **3 FAIL attendus** (2 enfants, `unloaded`, SSE historique), 3 PASS (parité) (`p6-new-tests-on-p5.log`) |
+| Graphe d’appels | Aucun `subprocess`/`server-process`/`httplib::Client` dans le chemin multi-modèles ; seul le proxy CORS UI garde un client HTTP |
+| Profil serveur `LLAMA_SUBPROCESS=OFF` (build neuf) | Build **PASS**, aucun symbole spawn/fork/exec ; routeur/flux/sécurité/basic **62 PASS, 1 FAIL attendu** : `--tools all` refusé au démarrage (« subprocess is not enabled », comportement existant des outils). L’ancien routeur ne démarrait pas dans ce profil. |
+| `llama serve` (binaire unifié) en mode routeur | **PASS** : liste, tokenisation, 0 enfant, un seul port, arrêt SIGINT propre |
+| Smoke CLI legacy single-turn | **PASS**, code 0 (`p6-cli-smoke.log`) |
+| Profil local statique / partagé sans HTTP | **PASS 28/28** / **25/25** ; `nm -u` sans httplib/subprocess/transport réseau ; `otool -L` inchangé |
+| ASan + UBSan (9 tests moteur) | **PASS 9/9** ; LeakSanitizer toujours **BLOCKED** (macOS) |
+| TSan (10 tests moteur dont acquisition) | **PASS 10/10**, 0 rapport ; models/sources/acquisition/catalog ×5 : 0 échec |
+| UI (navigateur intégré, serveur routeur) | **PASS** : liste des modèles, icône vision de tinygemma3 (modalités moteur), chargement depuis l’UI notifié par SSE (« Model loaded »), chat streamé. **Non vérifié à la main** : Stop et reconnexion (génération de ~1900 tokens en 1,6 s avec le modèle de test) ; couverts par `test_stream` en mode routeur uniquement. |
+| `git diff --check` | **PASS** |
+
+Échecs intermédiaires corrigés, non comptés : SIGSEGV au démarrage du routeur (bug P5 ci-dessus) ; assignation de `std::tie` sur un objet const ; proxy CORS dépendant de l’ancien header ; ambiguïté `json` dans un test ; compteur de test incluant l’appel invalide ; clic UI sur un modèle d’embeddings (erreur du modèle, attendue).
+
+Non qualifié à P6 : TSan/ASan du serveur HTTP lui-même (seuls les tests moteur sont instrumentés), Metal multi-modèles, Linux/Windows (`pgrep`/`lsof` requis par le test d’absence de processus, sauté ailleurs), performances multi-modèles contre l’ancien routeur.
+
+### Commandes P6 reproductibles
+
+```sh
+MODEL="$PWD/tools/server/tests/tmp/models--ggml-org--test-model-stories260K/snapshots/479896ec924af6d40fd419ab8f4d1eb2101de00d/stories260K-f32.gguf"
+cmake -S . -B build-agent-engine-baseline -DLLAMA_ENGINE_TEST_MODEL="$MODEL"   # + LLAMA_ENGINE_TEST_MMPROJ pour les modalités
+cmake --build build-agent-engine-baseline --parallel 8 --target llama-server llama-cli llama-app \
+  test-engine test-engine-lifecycle test-engine-models test-engine-catalog test-engine-events \
+  test-engine-operations test-engine-fixtures test-engine-replay test-engine-transport \
+  test-engine-options test-engine-sources test-engine-acquisition test-chat test-arg-parser \
+  test-model-resolution test-acquisition test-hf-cache test-json-schema-to-grammar test-sampling
+ctest --test-dir build-agent-engine-baseline --output-on-failure \
+  -R '^(test-engine.*|test-chat|test-arg-parser|test-model-resolution|test-acquisition|test-hf-cache|test-json-schema-to-grammar|test-sampling)$'
+PATH="$PWD/.venv-server-tests/bin:$PATH" \
+  SSL_CERT_FILE="$(.venv-server-tests/bin/python -c 'import certifi; print(certifi.where())')" \
+  LLAMA_SERVER_BIN_PATH="$PWD/build-agent-engine-baseline/bin/llama-server" \
+  N_GPU_LAYERS=0 PYTEST_WORKERS=1 ./tools/server/tests/tests.sh -m 'not slow' -q -rs
+cmake -S . -B build-agent-engine-p6-nosubproc -DLLAMA_SUBPROCESS=OFF -DLLAMA_BUILD_TESTS=ON
+cmake --build build-agent-engine-p6-nosubproc --parallel 6 --target llama-server
+LLAMA_SERVER_BIN_PATH="$PWD/build-agent-engine-p6-nosubproc/bin/llama-server" [même environnement] \
+  ./tools/server/tests/tests.sh unit/test_router.py unit/test_stream.py unit/test_security.py unit/test_basic.py -m 'not slow' -q -rs
+# Profils locaux, ASan/UBSan et TSan : commandes P5, cibles inchangées.
+```
+
+## Consignes de reprise P7
+
+1. P6 est commité : vérifier `git status` (fichiers ajoutés `tools/server/server-http-proxy.{h,cpp}`, supprimés `server-process.*`). Après restauration de fichiers, forcer la recompilation (leçon P4).
+2. Brancher le CLI local sur `llama_engine` (mono-modèle `engine::create` ou détail `model_manager` si la sélection de modèles l’exige) ; supprimer `cli-server.h`, le serveur local sur loopback et l’attente `/health`. `llama_server(params, 0, nullptr)` et `llama_server_terminate` ne servent plus qu’au CLI : les retirer avec lui.
+3. Traduire les options du CLI comme le serveur P6 : ligne de commande en options explicites, environnement/`config.ini` par `common_params_config_files()` ; options hôte du terminal hors moteur.
+4. Garder `cli-client` pour `--server-base` et le tester contre un serveur mono et multi-modèles (ce dernier est désormais sans processus).
+5. P8 : `server_context ctx_server` vide en mode multi-modèles, headers de compatibilité, noms `server_*` privés.

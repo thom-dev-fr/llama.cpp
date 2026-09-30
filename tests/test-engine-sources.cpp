@@ -54,11 +54,12 @@ static std::string status(engine & e, const std::string & id) {
 }
 
 int main(int argc, char ** argv) {
-    if (argc != 2) {
-        std::cout << "catalog sources NOT RUN (pass a GGUF model path)\n";
+    if (argc != 2 && argc != 3) {
+        std::cout << "catalog sources NOT RUN (pass a GGUF model path, optionally a projector)\n";
         return 0;
     }
     const fs::path model = argv[1];
+    const fs::path mmproj = argc == 3 ? fs::path(argv[2]) : fs::path();
     const auto id = std::chrono::steady_clock::now().time_since_epoch().count();
     const fs::path root = fs::temp_directory_path() / ("test-engine-sources-" + std::to_string(id));
     const fs::path dir = root / "models";
@@ -71,6 +72,11 @@ int main(int argc, char ** argv) {
     write(dir / "delta" / "delta-F32.gguf", "listed, never loaded");
     write(dir / "delta" / "mmproj-delta.gguf", "listed, never loaded");
     write(dir / "mmproj-companion.gguf", "a companion file is not a model");
+    if (!mmproj.empty()) {
+        fs::create_directories(dir / "vision");
+        fs::copy_file(model, dir / "vision" / "vision-F32.gguf");
+        fs::copy_file(mmproj, dir / "vision" / "mmproj-vision.gguf");
+    }
     const std::string commit(40, 'a');
     write(cache / "models--test--tiny" / "refs" / "main", commit);
     fs::create_directories(cache / "models--test--tiny" / "snapshots" / commit);
@@ -92,7 +98,10 @@ int main(int argc, char ** argv) {
     sources.cache = true;
     sources.models_dir = dir.string();
     sources.presets = ini.string();
-    sources.options = {{"temp", "0.1"}, {"n-gpu-layers", "0"}};
+    // seed has no LLAMA_ARG_* variable: options without one are valid everywhere
+    sources.options = {{"temp", "0.1"}, {"n-gpu-layers", "0"}, {"seed", "3"}};
+    // under everything read for a model, like the environment of the former child processes
+    sources.defaults = {{"ctx-size", "999"}, {"top-k", "7"}, {"temp", "0.9"}};
 
     // reading: priorities, aliases, host options, dedup, per-model errors; nothing written
     const auto before = listing(root);
@@ -100,14 +109,22 @@ int main(int argc, char ** argv) {
     auto read = read_catalog(sources, models);
     assert(read.type == event_type::success);
     assert(listing(root) == before);
-    assert(models.size() == 7);
+    assert(models.size() == (mmproj.empty() ? 7u : 8u));
     const auto * alpha = find(models, "alpha");
     assert(alpha && alpha->source == "preset" && alpha->aliases == std::vector<std::string>({"al", "first"}));
     assert(alpha->settings.options.at("model") == (dir / "alpha.gguf").string());
     assert(alpha->settings.options.at("ctx-size") == "256");
     assert(alpha->settings.options.at("temperature") == "0.1"); // options apply over every preset (canonical key)
+    assert(alpha->settings.options.at("seed") == "3");
+    assert(alpha->settings.options.at("top-k") == "7");         // defaults apply under every preset
+    assert(alpha->input_modalities == std::vector<std::string>({"text"}));
     const auto * beta = find(models, "beta");
     assert(beta && beta->source == "models_dir" && beta->settings.options.at("model") == (dir / "beta" / "beta-F32.gguf").string());
+    assert(beta->settings.options.at("ctx-size") == "256"); // the "*" section is over the defaults
+    if (!mmproj.empty()) {
+        const auto * vision = find(models, "vision");
+        assert(vision && vision->input_modalities == std::vector<std::string>({"text", "image"}));
+    }
     const auto * delta = find(models, "delta");
     assert(delta && delta->settings.options.at("mmproj") == (dir / "delta" / "mmproj-delta.gguf").string());
     assert(!find(models, "mmproj-companion"));
@@ -128,6 +145,9 @@ int main(int argc, char ** argv) {
     for (const auto & bad : std::vector<std::map<std::string, std::string>>{{{"alias", "x"}}, {{"models-dir", "/tmp"}}, {{"model", "/m.gguf"}}}) {
         auto s = sources;
         s.options = bad;
+        assert(read_catalog(s, models).category == "invalid_config" && models.empty());
+        s = sources;
+        s.defaults = bad;
         assert(read_catalog(s, models).category == "invalid_config" && models.empty());
     }
     write(root / "conflict.ini", "[gamma]\nmodel = " + model.string() + "\nalias = alpha\n");
@@ -203,5 +223,5 @@ int main(int argc, char ** argv) {
     owner.reset();
     single.reset();
     fs::remove_all(root);
-    std::cout << "PASS catalog sources, priorities, dedup, reloads during use and waiting\n";
+    std::cout << "PASS catalog sources, priorities, defaults, modalities, dedup, reloads during use and waiting\n";
 }

@@ -375,6 +375,44 @@ struct engine_impl {
     std::mutex shutdown_mutex;
     std::shared_ptr<model_manager> models;
 };
+
+std::shared_ptr<model_manager> make_catalog_manager(const catalog_config & settings, backend_factory factory,
+                                                    std::function<void(model_entry &)> adjust, event & error) {
+    error = {};
+    try {
+        catalog_config merged = settings;
+        if (settings.sources) {
+            std::vector<model_entry> read;
+            event status = read_catalog(*settings.sources, read);
+            if (status.type != event_type::success) {
+                error = status;
+                return nullptr;
+            }
+            merged.models = std::move(read);
+            merged.models.insert(merged.models.end(), settings.models.begin(), settings.models.end());
+        }
+        if (adjust) {
+            for (auto & m : merged.models) {
+                adjust(m);
+            }
+        }
+        std::string message;
+        if (!model_manager::validate(merged, message)) {
+            error = {event_type::error, nullptr, "invalid_config", message};
+            return nullptr;
+        }
+        auto models = std::make_shared<model_manager>(merged, false, std::move(factory));
+        if (settings.sources) {
+            models->set_sources(*settings.sources, settings.models);
+        }
+        models->set_entry_adjust(std::move(adjust));
+        models->start();
+        return models;
+    } catch (const std::exception & ex) {
+        error = {event_type::error, nullptr, "invalid_config", ex.what()};
+        return nullptr;
+    }
+}
 } // namespace detail
 
 request::request(std::shared_ptr<detail::request_state> state) : state(std::move(state)) {}
@@ -458,35 +496,13 @@ std::unique_ptr<engine> engine::create(const config & settings, event & error) {
 }
 
 std::unique_ptr<engine> engine::create_catalog(const catalog_config & settings, event & error) {
-    error = {};
-    try {
-        catalog_config merged = settings;
-        if (settings.sources) {
-            std::vector<model_entry> read;
-            event status = read_catalog(*settings.sources, read);
-            if (status.type != event_type::success) {
-                error = status;
-                return nullptr;
-            }
-            merged.models = std::move(read);
-            merged.models.insert(merged.models.end(), settings.models.begin(), settings.models.end());
-        }
-        std::string message;
-        if (!detail::model_manager::validate(merged, message)) {
-            error = {event_type::error, nullptr, "invalid_config", message};
-            return nullptr;
-        }
-        auto owner = std::unique_ptr<engine>(new engine);
-        owner->impl->models = std::make_shared<detail::model_manager>(merged, false, detail::make_context_backend);
-        if (settings.sources) {
-            owner->impl->models->set_sources(*settings.sources, settings.models);
-        }
-        owner->impl->models->start();
-        return owner;
-    } catch (const std::exception & ex) {
-        error = {event_type::error, nullptr, "invalid_config", ex.what()};
+    auto models = detail::make_catalog_manager(settings, detail::make_context_backend, nullptr, error);
+    if (!models) {
         return nullptr;
     }
+    auto owner = std::unique_ptr<engine>(new engine);
+    owner->impl->models = std::move(models);
+    return owner;
 }
 
 std::unique_ptr<request> engine::submit(operation op, json input, std::vector<attachment> files) {

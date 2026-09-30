@@ -186,7 +186,8 @@ if (TARGET llama-engine)
         set_tests_properties(test-engine-operations PROPERTIES TIMEOUT 120)
         add_test(NAME test-engine-model COMMAND test-engine "${LLAMA_ENGINE_TEST_MODEL}")
         set_tests_properties(test-engine-model PROPERTIES TIMEOUT 120)
-        add_test(NAME test-engine-sources COMMAND test-engine-sources "${LLAMA_ENGINE_TEST_MODEL}")
+        # with a projector, the catalog also reports the model's input modalities
+        add_test(NAME test-engine-sources COMMAND test-engine-sources "${LLAMA_ENGINE_TEST_MODEL}" ${LLAMA_ENGINE_TEST_MMPROJ})
         set_tests_properties(test-engine-sources PROPERTIES TIMEOUT 180)
         if (TARGET llama-common-acquisition)
             # controlled HTTP endpoint on loopback; the engine itself links acquisition privately

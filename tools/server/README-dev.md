@@ -41,7 +41,7 @@ Out-of-scope features:
 The server supports two primary operating modes:
 
 - **Inference mode**: The default mode for performing inference with a single loaded GGUF model.
-- **Router mode**: Enables management of multiple inference server instances behind a single API endpoint. Requests are automatically routed to the appropriate backend instance based on the requested model.
+- **Router mode** (multi-model mode): serves several models behind a single API endpoint. The models are loaded, put to sleep, evicted and unloaded in the server process by the engine's catalog; each request is routed to the model it names. No child process and no port is used for inference.
 
 The core architecture consists of the following components:
 
@@ -52,11 +52,11 @@ embedding interface is [`include/llama-engine.h`](../../include/llama-engine.h),
 documented in the [API guide](../../docs/design/embedded-inference-engine-api.md).
 Single-model HTTP handlers call the same operation runtime as direct callers;
 the server configures upstream-compatible unbounded admission and buffering.
-Private `server-*.h` forwarding headers remain for the CLI/router transition and
+Private `server-*.h` forwarding headers remain for the CLI transition and
 are not a public embedding interface. See the
 [progress journal](../../docs/design/embedded-inference-engine-progress.md) for
 qualified profiles and missing fixtures. SSE framing, keep-alives, replay,
-Prometheus text, HTTP guards and child process IO stay outside the engine.
+Prometheus text, HTTP guards, executed tools and MCP stay outside the engine.
 The legacy `start_loop()` starts/joins the engine-owned thread; direct callers
 never supply a decode loop.
 
@@ -64,7 +64,7 @@ Model configuration is shared with the engine as well: the post-parse
 adjustments of `llama-server` (automatic slots, embedding batch, KV pool per
 slot, default alias) live in `llama_engine::detail::apply_server_defaults`, and
 the router reads its model sources (cache, `--models-dir`, `--models-preset`,
-router arguments, `dedup-cache-models`) through `read_catalog_presets` in
+router arguments, `dedup-cache-models`) through `llama_engine::read_catalog` in
 `engine/engine-catalog.cpp`. Any change to option priorities belongs there, not
 in `server-models.cpp`. New command-line options must be classified in
 `engine/engine-options.cpp` (engine, host or catalog); `test-engine-options`
@@ -81,14 +81,16 @@ fails otherwise.
 - `server_task_result`: Unit of result pushed into `server_response`.
 - `server_tokens`: Unified representation of token sequences (supports both text and multimodal tokens); used by `server_task` and `server_slot`.
 - `server_prompt_checkpoint`: For recurrent (e.g., RWKV) and SWA models, stores snapshots of KV cache state. Enables reuse when subsequent requests share the same prompt prefix, saving redundant computation.
-- `server_models`: Standalone component for managing multiple backend instances (used in router mode). It is completely independent of `server_context`.
+- `server_models_routes` (`server-models.cpp`): HTTP adapter of router mode over the engine's `model_manager` (`engine/engine-models.h`). It builds the catalog sources from the command line, the environment and the configuration files, serves the `/models` routes, translates catalog events into the `/models/sse` events and gives `server_routes` the model selection (`server_model_routing`). Inference routes then go through the same `handle_operation` as with one model.
 - `stream_session_manager`: process wide owner of resumable SSE stream sessions, keyed by conversation id. A file-static singleton inside `server-stream.cpp`, driven through `server_stream_session_manager_start/stop`. Backs the replay buffer that lets a client reattach to a generation after an HTTP disconnect. See the "Resumable streaming" section below.
 
 ```mermaid
 graph TD
     API_User <--> server_http_context
-    server_http_context <-- router mode --> server_models
-    server_http_context <-- inference mode --> server_routes
+    server_http_context <-- router mode: /models --> server_models_routes
+    server_http_context --> server_routes
+    server_routes -- router mode: model selection --> server_models_routes
+    server_models_routes --> model_manager[engine model_manager: one server_context per resident model]
     server_routes -- server_task --> server_queue
     subgraph server_context
         server_queue --> server_slot
@@ -167,7 +169,7 @@ Routes:
 - `POST /v1/streams/lookup` with `{"conversation_ids": [...]}`: returns session status only for ids the caller already owns. There is no listing route, so live sessions cannot be enumerated (an earlier `GET /v1/streams` was removed for exactly this reason).
 - `DELETE /v1/stream?conv_id=<id>`: explicit Stop, idempotent (`evict_and_cancel`).
 
-Router mode binds the same paths to proxy handlers. A `conv_id -> child` map (`conv_models`), populated when a POST is routed, resolves the owning child in one lookup with no polling. The lookup groups ids per child; GET and DELETE proxy straight to the owner. This loopback REST hop is expected to move to a websocket IPC later, swapping only the transport.
+Router mode uses the same session registry: the models run in the server process, so no lookup crosses a process. Only one difference remains, for requests that still wait for their model (loading, or queued for a slot): the session exists from the POST, but `GET /v1/stream` answers 503 "Stream owner model is loading, retry later" and `POST /v1/streams/lookup` does not list it until the request stops waiting, as the former router did. A `DELETE` during that wait cancels the request, which answers 400 "request cancelled by a stop while the model was loading". A client that disconnects during the wait does not cancel a session request.
 
 Lifecycle: `server_stream_session_manager_start()` runs in main after common init, `server_stream_session_manager_stop()` runs first in `clean_up()` and finalizes every live session so no reader hangs. Reader blocking and the post drop drain both run on httplib worker threads, which block on a condvar rather than spin.
 
@@ -177,7 +179,6 @@ Lifecycle: `server_stream_session_manager_start()` runs in main after common ini
 | `STREAM_SESSION_MAX_BYTES` | 4 MiB | ring cap per session |
 | `STREAM_SESSION_GC_INTERVAL_SECONDS` | 60 | GC tick |
 | `STREAM_READ_WAKE_INTERVAL_MS` | 200 | read_from wake to recheck should_stop |
-| `STREAM_LOOKUP_TIMEOUT_MS` | 250 | router to child loopback budget |
 
 ```mermaid
 graph TD
@@ -285,34 +286,39 @@ or, if `invoke()` threw:
 
 There is no `[DONE]` sentinel (unlike `/chat/completions`), the stream ends after the `done`
 
-### Router mode: how child <--> router communicates
+### Router mode: models in the server process
 
-Upon spawning a new child process using `subprocess`, both child and router listen to the stdout/stderr (combined)
+`server_models_routes` creates the engine's catalog (`llama_engine::detail::make_catalog_manager`) with:
+- the sources of the former router: cache, `--models-dir`, `--models-preset`; the server's command line over every model (without its reserved options: API keys, TLS files, `--models-*`, model identity, `--log-file`); and, under every model, the `LLAMA_ARG_*` variables and the configuration files that each child process used to read (`catalog_sources::defaults`),
+- `--models-max`, `--models-autoload` (overridden per request by `?autoload=`), requests that wait for their model without time or count limit, and the unbounded admission/event/body limits of the single-model server,
+- a backend factory that gives each model the HTTP-facing settings its requests and properties read (SSE ping interval, verbosity, UI settings, endpoint flags, per-model host options of its preset) and names it with its catalog id.
 
-For the direction from child to router:
-- Generic messages are logs, it will be forwarded to router's stdout
-- Special state update messages are prefixed by `cmd_child_to_router:state:`, followed by a JSON. See `server_models::handle_child_state` for more
+The engine keeps the queue order (first come, first served per model), LRU eviction of idle models only, coalesced loads, per-model sleep and unloads that end the model's requests. `LLAMA_SERVER_DEBUG_FAKE_TIMING` still delays loads and admissions by 2 s so that tests can observe queued, loading and busy models.
 
-For the direction from router to child:
-- When server sends `cmd_router_to_child:exit`, the child should exit gracefully --> if after `DEFAULT_STOP_TIMEOUT` and the child is still running, force-kill it
+Fields and options that described a child process are adapted, not emulated:
+
+| Former router | Router mode in one process |
+| --- | --- |
+| `status.value` `unloaded` + `exit_code` for a failed load | `status.value` `failed`, `status.failed = true`, `status.error` (load error); the `status_change` SSE event carries `{"status": "failed", "error"}`. No `exit_code` field: there is no process. |
+| `status.args`: command line of the child | Arguments equivalent to the model's configuration, without binary, host or port. `status.preset` is still the INI section of the model. |
+| `stop-timeout`, force-kill of a child | Ignored: an unload ends the model's requests and waits for them cooperatively. |
+| Per-model host options in a preset (`metrics`, `props`, `slots`, `sse-ping-interval`, `webui*`, verbosity) | Applied to that model's endpoints and properties. Other per-model host options (`port`, `timeout`, `prio`, `numa`, `rpc`, logging files, ...) have no effect in one process and are reported with a warning. |
+| `POST /models/load` when every slot is busy: 500 "model limit reached" | The load waits for a slot like a request. |
+| `POST /models/unload` answered before the child exited | Answered once the model is freed. |
+| Unload of a model while requests wait for it | The waiting requests end with 500 and the unload message. |
+| Model name reported by the child (`--alias` forced to the model id) | Same: the model is named by its catalog id. |
+
+SSE events of `/models/sse` keep their names and payloads: `model_status` when a load or a download starts, `status_change` for load progress (`{"status": "loading", "progress"}`), `loaded` (with `info` after a load), `sleeping`, `unloaded` and `failed`; `download_progress`, `download_finished`/`download_failed`, `model_remove`, and `models_reload` (also sent to a client that fell too far behind). A model is listed by the time `download_finished` is sent.
 
 ### Model management API (router mode)
 
 Model management API was added via PR [#23976](https://github.com/ggml-org/llama.cpp/pull/23976)
 
-The main goal of this API is to allow downloading models and/or removing models from the web UI. It relies on the model cache infrastructure under the hood to manage the list of models dynamically.
-
-Instead of building everything from the ground up (like what most AI agents will do when you ask them to implement a similar feature), we built on top of existing, already well-engineered components inside the codebase:
-- Model cache infrastructure as mentioned above (`common/download.h`)
-- Server response queue (`server-queue.h`). We use this feature to broadcast events to SSE clients.
-- Server router thread management (`server-models.h`). We re-use the same thread model that is used for managing subprocess life cycle, except that we don't create a new subprocess, but launch the download right inside the thread.
-
-The flow for downloading a new model:
-- POST request comes in --> `post_router_models` --> validation
-- A new `llama-server` subprocess will be spawned with special `SERVER_CHILD_MODE_DOWNLOAD`
-- Child process runs the download and report status back to router via stdin/out
-- If a stop request comes in, the router asks the child process to stop (same mechanism as running a model in child process)
-- Otherwise, upon completion, we call `load_models()` to refresh the list of models
+The main goal of this API is to allow downloading models and/or removing models from the web UI. It relies on the model cache infrastructure under the hood to manage the list of models dynamically. Downloads and removals are engine operations (`engine::download`, `engine::remove`), without a process:
+- POST request comes in --> `post_router_models` --> the engine requests the repository metadata before answering (validation errors are returned to the client)
+- the download continues on an engine thread; the model is listed as `downloading`, with `download_progress` events
+- `POST /models/unload` or `DELETE /models` cancel it and delete incomplete files
+- upon completion, the engine reads the sources again, then `download_finished` is sent
 
 ### Sleep mode
 

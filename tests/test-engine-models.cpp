@@ -6,10 +6,13 @@
 // the test. No model, process or port; no timing assumption about inference.
 #include "engine-models.h"
 #include <cassert>
+#include <filesystem>
+#include <fstream>
 #include <future>
 using namespace llama_engine;
 using namespace llama_engine::detail;
 using namespace std::chrono_literals;
+namespace fs = std::filesystem;
 
 struct world {
     std::mutex mutex;
@@ -95,6 +98,7 @@ struct fake_backend : model_backend {
         w.log.push_back("submit:" + id);
         w.changed.notify_all();
     }
+    llama_engine::json info() override { return {{"id", id}}; }
     void stop(const event & reason) override {
         std::vector<std::shared_ptr<request_state>> states;
         {
@@ -110,6 +114,17 @@ struct fake_backend : model_backend {
         for (auto & state : states) { state->finish(reason); }
     }
 };
+
+static backend_factory fake_factory(world & w) {
+    return [&w](const model_entry & entry, backend_hooks hooks) {
+        {
+            std::lock_guard<std::mutex> lock(w.mutex);
+            w.hooks[entry.id] = hooks;
+            w.log.push_back("config:" + entry.id + "=" + entry.settings.model_path);
+        }
+        return std::make_shared<fake_backend>(w, entry.id);
+    };
+}
 
 static std::shared_ptr<model_manager> make(world & w, int max_loaded, std::vector<std::string> ids,
                                            std::chrono::milliseconds timeout = 10s, size_t max_waiting = 64,
@@ -129,14 +144,7 @@ static std::shared_ptr<model_manager> make(world & w, int max_loaded, std::vecto
     settings.max_subscriber_events = 4;
     std::string error;
     assert(model_manager::validate(settings, error));
-    auto manager = std::make_shared<model_manager>(settings, false, [&w](const model_entry & entry, backend_hooks hooks) {
-        {
-            std::lock_guard<std::mutex> lock(w.mutex);
-            w.hooks[entry.id] = hooks;
-            w.log.push_back("config:" + entry.id + "=" + entry.settings.model_path);
-        }
-        return std::make_shared<fake_backend>(w, entry.id);
-    });
+    auto manager = std::make_shared<model_manager>(settings, false, fake_factory(w));
     manager->start();
     return manager;
 }
@@ -185,6 +193,65 @@ int main() {
         w.finish("a");
         assert(wait_terminal(r).type == event_type::success);
         m->stop();
+    }
+
+    // HTTP adapter submissions: native JSON, per-request autoload, metadata of the
+    // loaded model in the catalog and in the "loaded" event, lookups by alias
+    {
+        world w;
+        auto m = make(w, 1, {"a"}, 10s, 64, false);
+        const ::json data = ::json::parse(R"({"model": "a-alias", "prompt": "x"})");
+        assert(wait_terminal(m->submit_native(operation::completion, data, {})).category == "model_not_loaded");
+        assert(wait_terminal(m->submit_native(operation::completion, ::json::parse(R"({"prompt": "x"})"), {}, true)).category ==
+               "invalid_request");
+        auto sub = m->subscribe();
+        assert(sub->read(0ms).data["type"] == "snapshot");
+        auto r = m->submit_native(operation::completion, data, {}, true); // autoload for this request only
+        assert(w.wait_for([&] { return w.n("submit:a") == 1; }));
+        const auto listed = m->catalog();
+        assert(listed[0]["status"] == "loaded" && listed[0]["info"]["id"] == "a");
+        assert(m->status_of("a-alias") == "loaded" && m->status_of("zzz").empty());
+        assert(m->entry("a-alias") && m->entry("a-alias")->id == "a" && !m->entry("zzz"));
+        assert(m->entries().size() == 1);
+        bool announced = false;
+        for (auto ev = sub->read(5s); ev.type == event_type::payload && !announced; ev = sub->read(5s)) {
+            announced = ev.data["type"] == "status" && ev.data["status"] == "loaded" && ev.data["info"]["id"] == "a";
+        }
+        assert(announced);
+        w.finish("a");
+        assert(wait_terminal(r).type == event_type::success);
+        assert(m->unload("a").type == event_type::success);
+        assert(!m->catalog()[0].contains("info")); // not resident any more
+        m->stop();
+    }
+
+    // manager of a host: its backends, entries adjusted on creation and on each reload
+    {
+        world w;
+        const fs::path dir = fs::temp_directory_path() /
+            ("test-engine-models-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+        fs::create_directories(dir);
+        std::ofstream(dir / "x.gguf") << "listed, never loaded";
+        catalog_config settings;
+        settings.sources = catalog_sources();
+        settings.sources->models_dir = dir.string();
+        int adjusted = 0;
+        const auto adjust = [&adjusted](model_entry & entry) {
+            entry.settings.max_events = 7;
+            adjusted++;
+        };
+        event error;
+        settings.max_waiting = 0;
+        assert(!make_catalog_manager(settings, fake_factory(w), adjust, error) && error.category == "invalid_config");
+        settings.max_waiting = 64;
+        adjusted = 0;
+        auto m = make_catalog_manager(settings, fake_factory(w), adjust, error);
+        assert(m && adjusted == 1 && m->entries().at(0).id == "x" && m->entries().at(0).settings.max_events == 7);
+        assert(wait_terminal(m->load("x")).type == event_type::success);
+        assert(m->reload().type == event_type::success && adjusted == 2);
+        assert(status(*m, "x") == "loaded"); // same adjusted settings: not reloaded
+        m->stop();
+        fs::remove_all(dir);
     }
 
     // limit 1: A busy, B waits; A finishes, A is evicted, then B loads

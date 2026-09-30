@@ -92,6 +92,9 @@ struct model_entry {
     bool hidden = false;            // cache entry deduplicated by a preset
     bool load_on_startup = false;   // preset "load-on-startup"
     std::map<std::string, std::string> host_options; // per-model options owned by the host (e.g. stop-timeout)
+    // "text", then "image" and "audio" when the model's projector, found locally
+    // (files or cache, without network), supports them.
+    std::vector<std::string> input_modalities;
     // Configuration error found while reading the sources: the model stays in
     // the catalog and fails to load with this message (invalid_config).
     std::string error;
@@ -102,13 +105,15 @@ struct catalog_sources {
     bool cache = false;             // models in the Hugging Face cache (LLAMA_CACHE, HF_HUB_CACHE, ...)
     std::string models_dir;         // one model per GGUF file or subdirectory
     std::string presets;            // INI file; its "*" section applies to every model
-    std::map<std::string, std::string> options; // over every model, e.g. the host's command line
-    bool skip_conflicting_aliases = false;      // drop them with a warning instead of failing (reloads)
+    std::map<std::string, std::string> options;  // over every model, e.g. the host's command line
+    std::map<std::string, std::string> defaults; // under every model, e.g. the host's environment
+    bool skip_conflicting_aliases = false;       // drop them with a warning instead of failing (reloads)
 };
 
 // Reads the sources into catalog entries with llama-server's rules: a models_dir
 // model replaces a cached one of the same name, an INI section of that name is
-// merged into it; the "*" section applies under each model and options over all.
+// merged into it; defaults apply under each model, then the "*" section, and
+// options over all.
 // Engine options become each entry's settings (config::from_options), host
 // options its host_options. No network access.
 event read_catalog(const catalog_sources & sources, std::vector<model_entry> & models);
@@ -188,7 +193,9 @@ public:
     std::unique_ptr<request> completion(json input, std::vector<attachment> files = {});
     // Catalog snapshot: id, aliases, tags, status (unloaded, loading, loaded,
     // sleeping, unloading, failed, downloading), progress/error, active and
-    // waiting counts, source and hidden when set.
+    // waiting counts, source, hidden and input_modalities when set, and the
+    // loaded model's metadata ("info") while it is resident. A status event
+    // announcing "loaded" carries the same info.
     json catalog() const;
     std::unique_ptr<subscription> subscribe();
     // Loads a model, waiting for a slot like a request. Succeeds once it is
@@ -212,7 +219,8 @@ public:
     // options are engine options such as "hf-token". The repository metadata is
     // requested before returning. Meanwhile the catalog lists the repository as
     // "downloading", with progress in subscriptions; afterwards the entry goes
-    // and, with sources, the catalog is read again. The request ends with
+    // and, with sources, the catalog is read again before the "download" event
+    // is published, so the downloaded model is listed by then. The request ends with
     // success, download_failed or, if cancelled, cancelled (incomplete files are
     // deleted). Without network acquisition: capability_unavailable.
     std::unique_ptr<request> download(const std::string & repo, std::map<std::string, std::string> options = {});

@@ -26,11 +26,16 @@ struct model_backend {
                         operation op, const std::vector<attachment> & files) = 0;
     // Ends its requests with reason, joins its threads and frees its resources.
     virtual void stop(const event & reason) = 0;
+    // Metadata of the loaded model (loading thread, after a successful load).
+    virtual json info() { return nullptr; }
 };
 
 struct backend_hooks {
     std::function<void(const ::json & progress)> progress; // loading thread or decoder (wake)
     std::function<void(bool sleeping)> sleeping;           // decoder thread
+    // Settings of the embedding host that the model's requests and properties
+    // read (HTTP-facing defaults, model name), applied after the engine options.
+    std::function<void(common_params & params)> host_params;
 };
 using backend_factory = std::function<std::shared_ptr<model_backend>(const model_entry &, backend_hooks)>;
 
@@ -73,7 +78,18 @@ public:
 
     void start(); // housekeeping thread: unloads, joins and deadlines
     std::shared_ptr<request_state> submit(operation op, const json & input, std::vector<attachment> files);
+    // Native JSON already parsed by a transport (see submit_native in engine-runtime.h);
+    // autoload overrides catalog_config::autoload for this request.
+    std::shared_ptr<request_state> submit_native(operation op, ::json data, std::vector<attachment> files,
+                                                 std::optional<bool> autoload = std::nullopt);
+    // Entries in the catalog (with alias resolution for entry()).
+    std::vector<model_entry> entries();
+    std::optional<model_entry> entry(const std::string & name);
+    // Applied to every entry read from the sources, at creation and on reload.
+    void set_entry_adjust(std::function<void(model_entry &)> adjust);
     std::shared_ptr<request_state> load(const std::string & model);
+    // Status of a model by name or alias ("" when unknown).
+    std::string status_of(const std::string & model);
     event unload(const std::string & model);
     // Replaces the entries (see engine::update_catalog).
     event update(std::vector<model_entry> models);
@@ -111,6 +127,7 @@ private:
         uint64_t generation = 0;      // unique per load (manager-wide); late callbacks of older ones are ignored
         std::string error;
         json progress;
+        json info;                    // backend metadata while resident
         std::list<std::shared_ptr<waiter>> waiters;
     };
     struct pending_stop {
@@ -122,6 +139,10 @@ private:
     using lock_t = std::unique_lock<std::mutex>;
 
     record * resolve(const std::string & name);     // caller holds mutex; live entries only
+    // Admission once the input is prepared for the model's limits.
+    std::shared_ptr<request_state> admit(const std::string & name, std::shared_ptr<request_state> state,
+                                         operation op, std::vector<attachment> files, std::optional<bool> autoload,
+                                         const std::function<bool(const config & limits, ::json & data)> & prepare);
     record * find_record(const std::string & name); // caller holds mutex; tombstones too
     void close_admissions(record & r, event reason); // caller holds mutex
     std::shared_ptr<request_state> enqueue(lock_t & lk, record & r, std::shared_ptr<request_state> state,
@@ -156,6 +177,7 @@ private:
     uint64_t next_generation = 0;
     std::optional<catalog_sources> sources;
     std::vector<model_entry> fixed; // entries given explicitly, kept by reload()
+    std::function<void(model_entry &)> adjust; // set before start()
     std::mutex reload_mutex;        // one reload at a time
     load_queue queue {mutex};
     size_t n_waiting = 0;
@@ -165,5 +187,11 @@ private:
     std::vector<std::weak_ptr<subscriber_state>> subscribers;
     std::thread housekeeper;
 };
+
+// The manager behind engine::create_catalog(), for hosts that choose the backend
+// (tests, instrumented backends) and adjust the entries read from the sources.
+// nullptr with error on an invalid catalog; started on success.
+std::shared_ptr<model_manager> make_catalog_manager(const catalog_config & settings, backend_factory factory,
+                                                    std::function<void(model_entry &)> adjust, event & error);
 
 } } // namespace llama_engine::detail

@@ -21,8 +21,7 @@ struct model_usage {
 };
 
 // Queue of requests waiting for a model slot, and the LRU eviction policy.
-// Extracted unchanged from the process router (server_lru_sched) so that the
-// in-process engine and the legacy router share one policy until P6.
+// Extracted unchanged from the former process router of llama-server.
 // Every call must hold the owner's mutex, passed at construction.
 struct load_queue {
     using usage_visitor = std::function<void(const std::string &, const model_usage &)>;

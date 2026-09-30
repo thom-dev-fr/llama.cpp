@@ -16,7 +16,9 @@
 
 #include <atomic>
 #include <clocale>
+#include <condition_variable>
 #include <exception>
+#include <mutex>
 #include <signal.h>
 #include <thread> // for std::thread::hardware_concurrency
 
@@ -164,7 +166,6 @@ int llama_server(common_params & params, int argc, char ** argv) {
     //
 
     // register API routes
-    server_child child; // only used in non-router mode
     server_routes routes(params, ctx_server);
     server_tools tools;
 
@@ -177,7 +178,7 @@ int llama_server(common_params & params, int argc, char ** argv) {
     }
 
     if (is_router_server) {
-        // setup server instances manager
+        // several models, loaded in this process by the engine's catalog
         try {
             models_routes.emplace(params, argc, argv);
         } catch (const std::exception & e) {
@@ -185,35 +186,17 @@ int llama_server(common_params & params, int argc, char ** argv) {
             return 1;
         }
 
-        // proxy handlers
+        // inference routes select the model named by each request
         // note: routes.get_health stays the same
-        routes.get_metrics                 = models_routes->proxy_get;
-        routes.post_props                  = models_routes->proxy_post;
-        routes.post_completions            = models_routes->proxy_post;
-        routes.post_completions_oai        = models_routes->proxy_post;
-        routes.post_chat_completions       = models_routes->proxy_post;
-        routes.post_control                = models_routes->proxy_post;
-        routes.post_responses_oai          = models_routes->proxy_post;
-        routes.post_transcriptions_oai     = models_routes->proxy_post;
-        routes.post_anthropic_messages     = models_routes->proxy_post;
-        routes.post_anthropic_count_tokens = models_routes->proxy_post;
-        routes.post_infill                 = models_routes->proxy_post;
-        routes.post_embeddings             = models_routes->proxy_post;
-        routes.post_embeddings_oai         = models_routes->proxy_post;
-        routes.post_rerank                 = models_routes->proxy_post;
-        routes.post_tokenize               = models_routes->proxy_post;
-        routes.post_detokenize             = models_routes->proxy_post;
-        routes.post_apply_template         = models_routes->proxy_post;
-        routes.post_chat_completions_tok   = models_routes->proxy_post;
-        routes.post_responses_tok_oai      = models_routes->proxy_post;
-        routes.get_lora_adapters           = models_routes->proxy_get;
-        routes.post_lora_adapters          = models_routes->proxy_post;
-        routes.get_slots                   = models_routes->proxy_get;
-        routes.post_slots                  = models_routes->proxy_post;
+        routes.routing = models_routes->routing();
 
         // custom routes for router
-        routes.get_props                   = models_routes->get_router_props;
-        routes.get_models                  = models_routes->get_router_models;
+        auto get_model_props = routes.get_props;
+        routes.get_props = [&models_routes, get_model_props](const server_http_req & req) {
+            // without ?model=, the router's own properties
+            return req.get_param("model").empty() ? models_routes->get_router_props(req) : get_model_props(req);
+        };
+        routes.get_models = models_routes->get_router_models;
 
         ctx_http.post("/models",               ex_wrapper(models_routes->post_router_models));
         ctx_http.post("/models/load",          ex_wrapper(models_routes->post_router_models_load));
@@ -264,15 +247,15 @@ int llama_server(common_params & params, int argc, char ** argv) {
     ctx_http.get ("/slots",                    ex_wrapper(routes.get_slots));
     ctx_http.post("/slots/:id_slot",           ex_wrapper(routes.post_slots));
 
-    // resumable streaming: a child binds the local session factories, the router binds
-    // proxies that resolve the owning child, see server-stream.h
+    // resumable streaming: the sessions belong to this server in both modes; with several
+    // models, a request that still waits for its model asks resuming clients to retry
     server_http_context::handler_t stream_get_h;
     server_http_context::handler_t streams_lookup_h;
     server_http_context::handler_t stream_delete_h;
     if (is_router_server) {
-        stream_get_h     = models_routes->router_stream_get;
-        streams_lookup_h = models_routes->router_streams_lookup;
-        stream_delete_h  = models_routes->router_stream_delete;
+        stream_get_h     = models_routes->stream_get;
+        streams_lookup_h = models_routes->streams_lookup;
+        stream_delete_h  = models_routes->stream_delete;
     } else {
         stream_get_h     = server_stream_make_get_handler();
         streams_lookup_h = server_stream_make_lookup_handler();
@@ -360,9 +343,7 @@ int llama_server(common_params & params, int argc, char ** argv) {
     // Handle downloading model
     //
 
-    if (child.is_child() && child.get_mode() == SERVER_CHILD_MODE_DOWNLOAD) {
-        return child.run_download(params);
-    } else if (!is_router_server && !is_run_by_cli) {
+    if (!is_router_server && !is_run_by_cli) {
         // single-model mode (NOT spawned by router)
         // if this is invoked by CLI, model downloading should be already handled
         try {
@@ -379,6 +360,11 @@ int llama_server(common_params & params, int argc, char ** argv) {
 
     std::function<void()> clean_up;
 
+    // multi-model mode: set by shutdown_handler, the main thread then ends the models' requests
+    std::mutex shutdown_mutex;
+    std::condition_variable shutdown_cv;
+    bool shutdown_requested = false;
+
     if (is_router_server) {
         SRV_INF("%s", "starting server in router mode. models will be automatically loaded on-demand\n");
 
@@ -387,8 +373,7 @@ int llama_server(common_params & params, int argc, char ** argv) {
             // stop the session GC first, it finalizes live sessions and wakes pending readers
             server_stream_session_manager_stop();
             if (models_routes.has_value()) {
-                models_routes->stopping.store(true); // maybe redundant, but just to be safe
-                models_routes->models.unload_all();
+                models_routes->stop(); // ends requests, waiting requests and SSE clients, frees the models
             }
             mcp_mgr.shutdown();
 
@@ -408,17 +393,14 @@ int llama_server(common_params & params, int argc, char ** argv) {
             }
             mcp_mgr.shutdown();
             ctx_http.stop();
+            {
+                std::lock_guard<std::mutex> lock(shutdown_mutex);
+                shutdown_requested = true;
+            }
+            shutdown_cv.notify_all();
         };
 
-        try {
-            models_routes->models.load_startup_models();
-        } catch (const std::exception & e) {
-            SRV_ERR("failed to load models on startup: %s\n", e.what());
-            ctx_http.stop();
-            ctx_http.join();
-            clean_up();
-            return 1;
-        }
+        models_routes->load_startup_models();
 
     } else {
         // setup clean up function, to be called before exit
@@ -437,13 +419,6 @@ int llama_server(common_params & params, int argc, char ** argv) {
             clean_up();
             SRV_ERR("%s", "exiting due to HTTP server error\n");
             return 1;
-        }
-
-        // setup communication child --> router if necessary
-        if (child.is_child()) {
-            ctx_server.set_state_callback([&](server_state state, json payload) {
-                child.notify_to_router(server_state_to_str(state), payload);
-            });
         }
 
         if (!ctx_server.load_model(params)) {
@@ -500,26 +475,23 @@ int llama_server(common_params & params, int argc, char ** argv) {
             SRV_WRN("%s", "      please only use presets that you can trust! Unknown presets may be unsafe\n");
         }
 
-        ctx_http.join(); // keep the main thread alive
+        // keep the main thread alive until a stop is requested
+        {
+            std::unique_lock<std::mutex> lock(shutdown_mutex);
+            shutdown_cv.wait(lock, [&] { return shutdown_requested; });
+        }
+        // requests waiting for or running on a model end, so the HTTP workers can finish
+        models_routes->stop();
+        ctx_http.join();
 
         // when the HTTP server stops, clean up and exit
         clean_up();
     } else {
-        // optionally, notify router server that this instance is ready
-        std::thread monitor_thread;
-        if (child.is_child()) {
-            monitor_thread = child.setup(shutdown_handler);
-            child.notify_to_router(server_state_to_str(SERVER_STATE_READY), routes.get_model_info());
-        }
-
         // this call blocks the main thread until queue_tasks.terminate() is called
         ctx_server.start_loop();
 
         clean_up();
         ctx_http.join();
-        if (monitor_thread.joinable()) {
-            monitor_thread.join();
-        }
 
         auto * ll_ctx = ctx_server.get_llama_context();
         if (ll_ctx != nullptr) {

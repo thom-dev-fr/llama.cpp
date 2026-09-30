@@ -232,8 +232,8 @@ engine->unload("small");                      // bloquant : admissions fermées,
 - **Limite et éviction** : `max_loaded` compte les modèles en chargement,
   chargés, endormis et en cours de déchargement. Seul un modèle sans requête
   admise ni attente peut être évincé, le moins récemment utilisé d’abord. La
-  politique (`engine/engine-scheduler.h`) est celle du routeur, partagée avec lui
-  jusqu’à P6.
+  politique (`engine/engine-scheduler.h`) est celle de l’ancien routeur de
+  processus ; depuis P6, le mode multi-modèles de `llama-server` est ce moteur.
 - **Attente** : une requête pour un modèle non résident est mise en file et le
   handle est rendu immédiatement ; `cancel()`/destruction la retire. Les demandes
   pour un même modèle partagent une entrée et **un seul chargement**. Ordre de
@@ -259,8 +259,13 @@ engine->unload("small");                      // bloquant : admissions fermées,
   (fichier absent, allocation) termine la requête avec `wake_failed` ; le modèle
   reste endormi et le réveil est retenté à la requête suivante. Propriétés,
   modèles et statistiques restent lisibles sans réveil.
+- **Métadonnées** : tant qu’un modèle est résident, son entrée de `catalog()`
+  porte `info` (identifiant, alias, métadonnées GGUF, comme `/v1/models`), aussi
+  présent dans l’événement `status` qui annonce `loaded`. `input_modalities`
+  (`text`, puis `image`/`audio`) est renseigné par `read_catalog` quand le
+  projecteur du modèle est trouvé localement, sans réseau.
 - **Abonnements** : `subscribe()` fournit un instantané `snapshot`, puis des
-  événements `status` (`model`, `status`, `waiting`, `error`) et `progress`
+  événements `status` (`model`, `status`, `waiting`, `error`, `info`) et `progress`
   (`stages`, `current`, `value`, au plus toutes les 200 ms). Au-delà de
   `max_subscriber_events` non lus, les événements en file sont remplacés par
   un seul `resync` contenant le catalogue courant. `stop()` termine l’abonnement
@@ -282,8 +287,9 @@ répertoire (`models_dir`, un GGUF ou un sous-répertoire par modèle, projecteu
 et brouillon détectés), fichier INI (`presets`, section `*` commune) et
 `options` appliquées à tous les modèles. Règles de `llama-server` : un modèle du
 répertoire remplace l’entrée du cache de même nom, la section INI de ce nom y
-est fusionnée, la section `*` s’applique en dessous et `options` au-dessus de
-chaque modèle ; `dedup-cache-models` masque (`hidden`) l’entrée du cache déjà
+est fusionnée, `defaults` puis la section `*` s’appliquent en dessous et
+`options` au-dessus de chaque modèle (`llama-server` y place respectivement son
+environnement `LLAMA_ARG_*`/fichiers `config.ini` et sa ligne de commande) ; `dedup-cache-models` masque (`hidden`) l’entrée du cache déjà
 fournie par un preset. Lecture seule : ni réseau ni écriture ; le cache absent
 n’est pas créé. Chaque entrée reçoit `source`, `load_on_startup`,
 `host_options` (options de l’hôte propres au modèle : `stop-timeout`, HTTP…) et
@@ -324,10 +330,10 @@ engine->remove("ggml-org/model:Q4_K_M");        // cache uniquement
   validation de `POST /models`. Pendant le téléchargement, l’entrée `downloading`
   refuse les requêtes (`model_downloading`) et publie `progress` (`stage`,
   `url`, `downloaded`, `total`) ; un second téléchargement du même nom est
-  refusé. À la fin, l’entrée provisoire disparaît, un événement `download`
-  (`finished`, `failed`, `cancelled`) est publié et, avec des sources, le
-  catalogue est relu : le modèle apparaît sous son nom de cache
-  (`dépôt:quantification`). Annuler la requête, `unload()` sur l’entrée ou
+  refusé. À la fin, l’entrée provisoire disparaît et, avec des sources, le
+  catalogue est relu **avant** la publication de l’événement `download`
+  (`finished`, `failed`, `cancelled`) : un abonné qui y réagit trouve déjà le
+  modèle sous son nom de cache (`dépôt:quantification`). Annuler la requête, `unload()` sur l’entrée ou
   `stop()` interrompt le téléchargement et supprime le fichier incomplet. Sans
   module d’acquisition : `capability_unavailable`.
 - **`remove(model)`** : uniquement pour une entrée de source `cache` (sinon

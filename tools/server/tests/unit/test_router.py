@@ -1,3 +1,4 @@
+import shutil
 import threading
 import pytest
 from utils import *
@@ -147,7 +148,7 @@ def test_router_models_max_evicts_lru():
     assert _get_model_status(first) == "unloaded"
 
 
-# server_lru_sched tests (relying on LLAMA_SERVER_DEBUG_FAKE_TIMING)
+# load queue and LRU tests (relying on LLAMA_SERVER_DEBUG_FAKE_TIMING)
 
 MODEL_A = "ggml-org/tinygemma3-GGUF:Q8_0"
 MODEL_B = "ggml-org/test-model-stories260K:F32"
@@ -626,3 +627,174 @@ def test_router_delete_model():
     # Model should no longer appear in GET /models
     ids = _get_model_ids(is_reload=False)
     assert MODEL_DOWNLOAD_ID not in ids, f"{MODEL_DOWNLOAD_ID} still present after deletion"
+
+
+# in-process multi-model mode: the models run in the server process, see README-dev.md
+
+def _child_pids(pid: int) -> list[int]:
+    out = subprocess.run(["pgrep", "-P", str(pid)], capture_output=True, text=True)
+    return [int(p) for p in out.stdout.split()]
+
+
+def _listening_ports(pid: int) -> set[int]:
+    out = subprocess.run(["lsof", "-nP", "-a", "-p", str(pid), "-iTCP", "-sTCP:LISTEN", "-Fn"],
+                         capture_output=True, text=True)
+    return {int(line.rsplit(":", 1)[1]) for line in out.stdout.splitlines() if line.startswith("n")}
+
+
+@pytest.mark.skipif(os.name == "nt" or shutil.which("pgrep") is None or shutil.which("lsof") is None,
+                    reason="needs pgrep and lsof")
+def test_router_runs_models_in_process():
+    """loaded models and their requests start no process and open no port"""
+    global server
+    server.models_max = 2
+    server.start()
+
+    _load_model_and_wait(MODEL_A, timeout=120)
+    _load_model_and_wait(MODEL_B, timeout=120)
+    for model in (MODEL_A, MODEL_B):
+        assert _tokenize(model).status_code == 200
+        res = server.make_request("POST", "/v1/chat/completions", data={
+            "model": model,
+            "max_tokens": 4,
+            "messages": [{"role": "user", "content": "hello"}],
+        })
+        assert res.status_code == 200
+
+    assert _child_pids(server.process.pid) == []
+    assert _listening_ports(server.process.pid) == {server.server_port}
+
+
+def test_router_failed_load_is_reported():
+    """a model that fails to load is 'failed' with its error: there is no exit code without a process"""
+    global server
+    preset_path = os.path.join(TMP_DIR, "test_failed_load.ini")
+    with open(preset_path, "w") as f:
+        f.write("[broken]\nmodel = /nonexistent/broken.gguf\n")
+    server.models_preset = preset_path
+
+    try:
+        server.start()
+        sse_events: list = []
+        stop = threading.Event()
+        sse_ready = threading.Event()
+        threading.Thread(target=_listen_sse, args=(server, sse_events, stop, sse_ready), daemon=True).start()
+        assert sse_ready.wait(10), "SSE client failed to connect"
+
+        res = server.make_request("POST", "/v1/chat/completions", data={
+            "model": "broken",
+            "max_tokens": 4,
+            "messages": [{"role": "user", "content": "hello"}],
+        })
+        assert res.status_code == 500
+        assert res.body["error"]["message"] == "model name=broken failed to load"
+
+        res = server.make_request("GET", "/models")
+        status = next(m["status"] for m in res.body["data"] if m["id"] == "broken")
+        assert status["value"] == "failed"
+        assert status["failed"] is True
+        assert "broken.gguf" in status["error"]
+        assert "exit_code" not in status
+
+        assert _wait_for_sse_event(sse_events, "status_change", "broken", 10)
+        stop.set()
+        events = [e for e in sse_events if e.get("model") == "broken"]
+        assert events[0] == {"model": "broken", "event": "model_status", "data": {"status": "loading"}}
+        failed = [e for e in events if e["event"] == "status_change"]
+        assert failed[-1]["data"]["status"] == "failed"
+        assert "exit_code" not in failed[-1]["data"]
+
+        # a failed model can be loaded again
+        res = server.make_request("POST", "/models/load", data={"model": "broken"})
+        assert res.status_code == 200
+        _wait_for_model_status("broken", {"failed"})
+    finally:
+        os.remove(preset_path)
+
+
+def test_router_sse_status_events():
+    """load and unload are reported with the event names of the process router"""
+    global server
+    server.start()
+    sse_events: list = []
+    stop = threading.Event()
+    sse_ready = threading.Event()
+    threading.Thread(target=_listen_sse, args=(server, sse_events, stop, sse_ready), daemon=True).start()
+    assert sse_ready.wait(10), "SSE client failed to connect"
+
+    _load_model_and_wait(MODEL_B, timeout=120)
+    assert _wait_for_sse_event(sse_events, "status_change", MODEL_B, 10)
+    res = server.make_request("POST", "/models/unload", data={"model": MODEL_B})
+    assert res.status_code == 200
+    assert _get_model_status(MODEL_B) == "unloaded"  # the unload is done when it answers
+
+    deadline = time.time() + 10
+    while time.time() < deadline and not any(
+            e.get("event") == "status_change" and e.get("data", {}).get("status") == "unloaded" for e in sse_events):
+        time.sleep(0.01)
+    stop.set()
+    events = [e for e in sse_events if e.get("model") == MODEL_B]
+    assert events[0]["event"] == "model_status" and events[0]["data"] == {"status": "loading"}
+    changes = [e["data"] for e in events if e["event"] == "status_change" and "progress" not in e["data"]]
+    loaded = [c for c in changes if c["status"] == "loaded"]
+    assert len(loaded) == 1 and loaded[0]["info"]["id"] == MODEL_B
+    assert changes[-1] == {"status": "unloaded"}
+
+
+def test_router_per_model_host_options():
+    """per-model server options of a preset apply to that model's endpoints"""
+    global server
+    preset_path = os.path.join(TMP_DIR, "test_host_options.ini")
+    with open(preset_path, "w") as f:
+        f.write("[with-metrics]\nhf-repo = ggml-org/test-model-stories260K\nmetrics = true\nsse-ping-interval = 7\n")
+    server.models_preset = preset_path
+
+    try:
+        server.start()
+        res = server.make_request("GET", "/metrics?model=with-metrics")
+        assert res.status_code == 200
+        res = server.make_request("GET", f"/metrics?model={MODEL_B}")
+        assert res.status_code == 501
+
+        res = server.make_request("GET", "/props?model=with-metrics")
+        assert res.status_code == 200
+        assert res.body["endpoint_metrics"] is True
+        assert res.body["model_alias"] == "with-metrics"
+        res = server.make_request("GET", f"/props?model={MODEL_B}")
+        assert res.body["endpoint_metrics"] is False
+    finally:
+        os.remove(preset_path)
+
+
+def test_router_environment_applies_to_models(monkeypatch):
+    """LLAMA_ARG_* variables configure every model, under the presets and the command line"""
+    global server
+    monkeypatch.setenv("LLAMA_ARG_TOP_K", "7")
+    preset_path = os.path.join(TMP_DIR, "test_environment.ini")
+    with open(preset_path, "w") as f:
+        f.write("[top-k-preset]\nhf-repo = ggml-org/test-model-stories260K\ntop-k = 3\n")
+    server.models_preset = preset_path
+
+    try:
+        server.start()
+        res = server.make_request("GET", f"/props?model={MODEL_B}")
+        assert res.status_code == 200
+        assert res.body["default_generation_settings"]["params"]["top_k"] == 7
+        res = server.make_request("GET", "/props?model=top-k-preset")
+        assert res.body["default_generation_settings"]["params"]["top_k"] == 3
+    finally:
+        os.remove(preset_path)
+
+
+def test_router_unload_while_request_waits():
+    """an unload ends the requests waiting for that model with an error"""
+    global server
+    server.start()
+    waiting = _Bg(lambda: _tokenize(MODEL_B)).start()
+    _wait_for_model_status(MODEL_B, {"loading"}, timeout=10)
+    res = server.make_request("POST", "/models/unload", data={"model": MODEL_B})
+    assert res.status_code == 200
+    waiting.join()
+    assert waiting.error is None
+    assert waiting.result.status_code == 500
+    assert _get_model_status(MODEL_B) == "unloaded"

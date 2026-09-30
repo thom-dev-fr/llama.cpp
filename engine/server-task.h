@@ -632,12 +632,3 @@ struct server_prompt_cache {
 
     void update();
 };
-
-// used exclusively by router mode
-struct server_task_result_router : server_task_result {
-    json data;
-    virtual json to_json() override { return data; }
-    virtual server_task_result * clone() const override {
-        return new server_task_result_router(*this);
-    }
-};

@@ -3,6 +3,7 @@
 #include "common.h"
 #include "download.h"
 
+#include <filesystem>
 #include <set>
 #include <map>
 #include <string>
@@ -125,6 +126,12 @@ struct common_params_context {
 // TODO: this function can load ggml backend (by calling llama_support_rpc)
 //       this is a side-effect that should be avoided
 bool common_params_parse(int argc, char ** argv, common_params & params, llama_example ex, void(*print_usage)(int, char **) = nullptr);
+
+// Existing configuration files that common_params_parse applies before the
+// environment and the command line, lowest priority first:
+// 1. system-wide: /etc/llama.cpp/config.ini (%PROGRAMDATA%\llama.cpp\config.ini on windows)
+// 2. user-level: ${XDG_CONFIG_HOME:-~/.config}/llama.cpp/config.ini (%APPDATA%\llama.cpp\config.ini on windows)
+std::vector<std::filesystem::path> common_params_config_files();
 
 // load all backends and print the list of available (non-CPU) devices to stdout
 void common_print_available_devices();

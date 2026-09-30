@@ -1,9 +1,25 @@
 #pragma once
 #include "../../engine/engine-context.h"
+#include "engine-runtime.h"
 #include "server-http.h"
+
+#include <optional>
 
 // forward declarations
 struct server_res_generator;
+
+// Multi-model mode: every request names its model, served by the engine's
+// catalog in this process (see server-models.h). Unset with one model.
+struct server_model_routing {
+    // Admits the request for the named model (it may wait for the model to load).
+    std::function<std::shared_ptr<llama_engine::detail::request_state>(const server_http_req & req,
+            llama_engine::operation op, const std::string & model, json data,
+            std::vector<llama_engine::attachment> files)> submit;
+    // Called once the request stopped waiting: first result, error or cancellation.
+    std::function<void(const server_http_req & req)> started;
+    // Server parameters with the host options of that model (endpoint guards).
+    std::function<common_params(const std::string & model)> host_params;
+};
 
 struct server_routes {
     server_routes(const common_params & params, server_context & ctx_server);
@@ -47,10 +63,15 @@ struct server_routes {
     // to be used in router mode
     json get_model_info() const;
 
+    // multi-model mode, set before the routes are used
+    std::optional<server_model_routing> routing;
+
 private:
+    // With routing, the model is the "model" field of the body, or the "model"
+    // query parameter when model_in_query (GET routes).
     std::unique_ptr<server_res_generator> handle_operation(const server_http_req & req,
             llama_engine::operation op, const json & body = nullptr,
-            const std::vector<llama_engine::attachment> & files = {});
+            const std::vector<llama_engine::attachment> & files = {}, bool model_in_query = false);
     std::unique_ptr<server_res_generator> handle_slots_save(const server_http_req & req, int id_slot);
     std::unique_ptr<server_res_generator> handle_slots_restore(const server_http_req & req, int id_slot);
     std::unique_ptr<server_res_generator> handle_slots_erase(const server_http_req &, int id_slot);

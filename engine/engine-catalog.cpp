@@ -6,13 +6,15 @@
 #include "arg.h"
 #include "download.h"
 #include "hf-cache.h"
+#include "mtmd.h"
 
 namespace llama_engine { namespace detail {
 
 std::map<std::string, catalog_preset> read_catalog_presets(const common_preset_context & ctx, bool cache,
                                                            const std::string & models_dir,
                                                            const std::string & presets_file,
-                                                           const common_preset & base) {
+                                                           const common_preset & base,
+                                                           const common_preset & under) {
     // 1. cached models
     common_presets cached_models;
     if (cache) {
@@ -55,10 +57,15 @@ std::map<std::string, catalog_preset> read_catalog_presets(const common_preset_c
         out[name].source = "preset";
     }
 
-    // overlay the base options (e.g. the router's own CLI args) on top of every
-    // model preset so that e.g. `llama-server --temp 0` is honoured by all models
+    // defaults (e.g. the host's environment) go under everything read for a
+    // model, then the base options (e.g. the router's own CLI args) on top of
+    // every model preset so that e.g. `llama-server --temp 0` is honoured by all models
     for (auto & [name, entry] : out) {
-        entry.preset.merge(base);
+        common_preset merged = under;
+        merged.name = entry.preset.name;
+        merged.merge(entry.preset);
+        merged.merge(base);
+        entry.preset = std::move(merged);
     }
 
     // hide cache models whose resolved file is already used by a preset with dedup-cache-models enabled
@@ -112,6 +119,28 @@ std::set<std::string> preset_list(const common_preset & preset, const char * env
     return out;
 }
 
+std::vector<std::string> local_modalities(const config & settings) {
+    std::vector<std::string> out {"text"};
+    try {
+        common_params params = build_params(settings);
+        params.offline = true; // the projector is only looked up locally
+        auto handler = common_models_handler_init(params, LLAMA_EXAMPLE_SERVER, nullptr);
+        common_models_handler_apply(handler, params, nullptr, nullptr);
+        if (!params.no_mmproj && !params.mmproj.path.empty()) {
+            const mtmd_caps caps = mtmd_get_cap_from_file(params.mmproj.path.c_str());
+            if (caps.inp_vision) {
+                out.push_back("image");
+            }
+            if (caps.inp_audio) {
+                out.push_back("audio");
+            }
+        }
+    } catch (const std::exception & e) {
+        SRV_DBG("multimodal capabilities not found locally: %s\n", e.what());
+    }
+    return out;
+}
+
 } } // namespace llama_engine::detail
 
 namespace llama_engine {
@@ -121,17 +150,21 @@ event read_catalog(const catalog_sources & sources, std::vector<model_entry> & m
     models.clear();
     try {
         const common_preset_context ctx(LLAMA_EXAMPLE_SERVER);
-        common_preset base = ctx.load_from_map(COMMON_PRESET_DEFAULT_NAME, sources.options);
-        for (const auto & [opt, value] : base.options) {
-            const auto * scope = find_option_scope(option_key(opt));
-            if (!scope || *scope == option_scope::catalog || opt.env == std::string("LLAMA_ARG_MODEL") ||
-                opt.env == std::string("LLAMA_ARG_MMPROJ") || opt.env == std::string("LLAMA_ARG_HF_REPO")) {
-                // model identity and catalog composition are per model, as in llama-server
-                return {event_type::error, nullptr, "invalid_config",
-                        "option '" + option_key(opt) + "' cannot apply to every model"};
+        common_preset base  = ctx.load_from_map(COMMON_PRESET_DEFAULT_NAME, sources.options);
+        common_preset under = ctx.load_from_map(COMMON_PRESET_DEFAULT_NAME, sources.defaults);
+        for (const auto * shared : {&base, &under}) {
+            for (const auto & [opt, value] : shared->options) {
+                const auto * scope = find_option_scope(option_key(opt));
+                const std::string env = opt.env ? opt.env : ""; // not every option has a variable
+                if (!scope || *scope == option_scope::catalog || env == "LLAMA_ARG_MODEL" ||
+                    env == "LLAMA_ARG_MMPROJ" || env == "LLAMA_ARG_HF_REPO") {
+                    // model identity and catalog composition are per model, as in llama-server
+                    return {event_type::error, nullptr, "invalid_config",
+                            "option '" + option_key(opt) + "' cannot apply to every model"};
+                }
             }
         }
-        const auto presets = read_catalog_presets(ctx, sources.cache, sources.models_dir, sources.presets, base);
+        const auto presets = read_catalog_presets(ctx, sources.cache, sources.models_dir, sources.presets, base, under);
 
         std::set<std::string> taken; // names, then aliases in order
         for (const auto & [name, found] : presets) {
@@ -171,6 +204,8 @@ event read_catalog(const catalog_sources & sources, std::vector<model_entry> & m
             std::string error;
             if (!valid_config(entry.settings, error)) {
                 entry.error = error; // listed, and fails to load with this message
+            } else {
+                entry.input_modalities = local_modalities(entry.settings);
             }
             models.push_back(std::move(entry));
         }

@@ -1,12 +1,14 @@
 #include "engine-models.h"
 #include "engine-context.h"
 #include "engine-options.h"
+#include "engine-operations.h"
 #include "download.h"
 #include "engine-catalog.h"
 #include "arg.h"
 #include "server-common.h"
 
 #include <filesystem>
+#include <limits>
 
 namespace llama_engine { namespace detail {
 
@@ -52,6 +54,9 @@ struct context_backend : model_backend {
             }
         });
         common_params params = build_params(entry.settings);
+        if (hooks.host_params) {
+            hooks.host_params(params);
+        }
         download_progress download(this);
         resolve_resources(params, &download); // may download; cancel_load() aborts it
         if (!context->load_model(params)) {
@@ -65,6 +70,10 @@ struct context_backend : model_backend {
     void cancel_load() override {
         cancelled = true;
         context->cancel_load();
+    }
+
+    json info() override {
+        return json::parse(safe_json_to_str(engine_model_info(context->get_meta())));
     }
 
     std::atomic<bool> cancelled {false};
@@ -249,14 +258,36 @@ std::function<void()> model_manager::release_hook(const record & r) {
 std::shared_ptr<request_state> model_manager::submit(operation op, const json & input, std::vector<attachment> files) {
     auto state = std::make_shared<request_state>();
     std::string name;
-    if (!single) {
-        if (input.is_object() && input.contains("model") && input.at("model").is_string()) {
-            name = input.at("model").get<std::string>();
+    if (input.is_object() && input.contains("model") && input.at("model").is_string()) {
+        name = input.at("model").get<std::string>();
+    }
+    const auto prepare = [&](const config & limits, ::json & data) {
+        return prepare_input(limits, *state, input, files, op, data);
+    };
+    return admit(name, state, op, std::move(files), std::nullopt, prepare);
+}
+
+std::shared_ptr<request_state> model_manager::submit_native(operation op, ::json data, std::vector<attachment> files,
+                                                            std::optional<bool> autoload) {
+    auto state = std::make_shared<request_state>();
+    const std::string name = data.is_object() ? json_value(data, "model", std::string()) : std::string();
+    const auto prepare = [&](const config & limits, ::json & out) {
+        constexpr size_t unbounded = std::numeric_limits<size_t>::max();
+        if (limits.max_request_bytes == unbounded && limits.generation_defaults.empty()) {
+            out = std::move(data); // nothing to check or merge: no conversion, as for one model
+            return true;
         }
-        if (name.empty()) {
-            state->finish({event_type::error, nullptr, "invalid_request", "model name is missing from the request"});
-            return state;
-        }
+        return prepare_input(limits, *state, json::parse(data.dump()), files, op, out);
+    };
+    return admit(name, state, op, std::move(files), autoload, prepare);
+}
+
+std::shared_ptr<request_state> model_manager::admit(const std::string & name, std::shared_ptr<request_state> state,
+        operation op, std::vector<attachment> files, std::optional<bool> autoload,
+        const std::function<bool(const config & limits, ::json & data)> & prepare) {
+    if (!single && name.empty()) {
+        state->finish({event_type::error, nullptr, "invalid_request", "model name is missing from the request"});
+        return state;
     }
     const auto not_found = [&] {
         state->finish({event_type::error, nullptr, "model_not_found", "model '" + name + "' not found"});
@@ -273,7 +304,7 @@ std::shared_ptr<request_state> model_manager::submit(operation op, const json & 
         limits = r->entry.settings;
     }
     ::json data;
-    if (!prepare_input(limits, *state, input, files, op, data)) {
+    if (!prepare(limits, data)) {
         return state;
     }
     lock_t lk(mutex);
@@ -302,12 +333,39 @@ std::shared_ptr<request_state> model_manager::submit(operation op, const json & 
         state->finish({event_type::error, nullptr, "model_downloading", "model is being downloaded"});
         return state;
     }
-    if (!settings.autoload && r->status != model_status::loading) {
+    if (!autoload.value_or(settings.autoload) && r->status != model_status::loading) {
         lk.unlock();
         state->finish({event_type::error, nullptr, "model_not_loaded", "model is not loaded"});
         return state;
     }
     return enqueue(lk, *r, state, std::move(data), op, std::move(files), false);
+}
+
+std::vector<model_entry> model_manager::entries() {
+    lock_t lk(mutex);
+    std::vector<model_entry> out;
+    for (const auto & [name, r] : records) {
+        if (!r.removed) {
+            out.push_back(r.entry);
+        }
+    }
+    return out;
+}
+
+std::optional<model_entry> model_manager::entry(const std::string & name) {
+    lock_t lk(mutex);
+    const record * r = resolve(name);
+    return r ? std::optional<model_entry>(r->entry) : std::nullopt;
+}
+
+std::string model_manager::status_of(const std::string & name) {
+    lock_t lk(mutex);
+    const record * r = resolve(name);
+    return r ? to_string(r->status) : "";
+}
+
+void model_manager::set_entry_adjust(std::function<void(model_entry &)> adjust_) {
+    adjust = std::move(adjust_);
 }
 
 std::shared_ptr<request_state> model_manager::load(const std::string & model) {
@@ -398,6 +456,7 @@ void model_manager::start_load(record & r) {
     r.active           = 0;
     r.error.clear();
     r.progress         = nullptr;
+    r.info             = nullptr;
     r.last_used        = ggml_time_ms();
     std::weak_ptr<model_manager> weak = shared_from_this();
     backend_hooks hooks;
@@ -449,6 +508,14 @@ void model_manager::run_load(const std::string & name, uint64_t generation, std:
     if (!ok && backend) {
         backend->stop({event_type::cancelled, nullptr, "stopped", "Engine stopped"}); // partial resources
     }
+    json info = nullptr;
+    if (ok) {
+        try {
+            info = backend->info();
+        } catch (const std::exception & e) {
+            SRV_WRN("model '%s' loaded without metadata: %s\n", name.c_str(), e.what());
+        }
+    }
     std::vector<std::shared_ptr<waiter>> waiters;
     std::vector<std::shared_ptr<waiter>> admitted;
     std::shared_ptr<model_backend> resident;
@@ -486,6 +553,7 @@ void model_manager::run_load(const std::string & name, uint64_t generation, std:
         } else {
             r.status    = r.asleep ? model_status::sleeping : model_status::loaded;
             r.last_used = ggml_time_ms();
+            r.info      = std::move(info);
             resident    = r.backend;
             for (auto & w : waiters) {
                 if (!w->load_only && w->state->attach_finish_hook(release_hook(r))) {
@@ -680,6 +748,11 @@ event model_manager::reload() {
         return read;
     }
     models.insert(models.end(), fixed.begin(), fixed.end());
+    if (adjust) {
+        for (auto & m : models) {
+            adjust(m);
+        }
+    }
     return update(std::move(models));
 }
 
@@ -785,6 +858,7 @@ void model_manager::run_download(const std::string & repo, uint64_t generation, 
         error = e.what();
     }
     const bool cancelled = job->cancel->load();
+    bool current = false;
     bool reload_after = false;
     {
         lock_t lk(mutex);
@@ -797,16 +871,23 @@ void model_manager::run_download(const std::string & repo, uint64_t generation, 
             r->status  = model_status::unloaded;
             r->removed = true;
             r->download_cancel.reset();
-            publish({{"type", "download"}, {"model", repo},
-                     {"result", ok ? "finished" : cancelled ? "cancelled" : "failed"}});
+            current      = true;
             reload_after = ok && sources && !stopped;
         }
         changed.notify_all();
     }
     if (reload_after) {
+        // before the event, so that subscribers that react to it find the model listed
         const event reloaded = reload();
         if (reloaded.type != event_type::success) {
             SRV_WRN("reload after downloading '%s' failed: %s\n", repo.c_str(), reloaded.message.c_str());
+        }
+    }
+    if (current) {
+        lock_t lk(mutex);
+        if (!stopped) {
+            publish({{"type", "download"}, {"model", repo},
+                     {"result", ok ? "finished" : cancelled ? "cancelled" : "failed"}});
         }
     }
     if (ok) {
@@ -938,6 +1019,13 @@ json model_manager::describe(const record & r) const {
     if (!r.error.empty()) {
         out["error"] = r.error;
     }
+    if (!r.entry.input_modalities.empty()) {
+        out["input_modalities"] = r.entry.input_modalities;
+    }
+    if (!r.info.is_null() && (r.status == model_status::loaded || r.status == model_status::sleeping ||
+                              r.status == model_status::unloading)) {
+        out["info"] = r.info;
+    }
     return out;
 }
 
@@ -973,6 +1061,9 @@ void model_manager::publish_status(const record & r) {
     if (r.status == model_status::failed) {
         data["error"] = r.error;
     }
+    if (r.status == model_status::loaded && !r.info.is_null()) {
+        data["info"] = r.info;
+    }
     publish(std::move(data));
 }
 
@@ -1005,6 +1096,7 @@ void model_manager::housekeeping() {
             if (r && r->generation == job.generation && r->status == model_status::unloading) {
                 r->status   = model_status::unloaded;
                 r->progress = nullptr;
+                r->info     = nullptr;
                 if (!r->removed) {
                     publish_status(*r);
                 }

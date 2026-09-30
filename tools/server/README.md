@@ -1675,7 +1675,7 @@ For further documentation about this endpoint, please refer to [server internal 
 
 ## Using multiple models
 
-`llama-server` can be launched in a **router mode** that exposes an API for dynamically loading and unloading models. The main process (the "router") automatically forwards each request to the appropriate model instance.
+`llama-server` can be launched in a **router mode** that exposes an API for dynamically loading and unloading models. The server (the "router") loads the models in its own process, without starting a process or opening a port per model, and routes each request to the model it names.
 
 To start in router mode, launch `llama-server` **without specifying any model**:
 
@@ -1726,13 +1726,13 @@ models_directory
  │    └─ Kimi-K2-Thinking-UD-IQ1_S-00006-of-00006.gguf
 ```
 
-You may also specify default arguments that will be passed to every model instance:
+You may also specify default arguments that will apply to every model:
 
 ```sh
 llama-server -ctx 8192 -n 1024 -np 2
 ```
 
-Note: model instances inherit both command line arguments and environment variables from the router server.
+Note: models inherit both command line arguments and environment variables (`LLAMA_ARG_*`, as well as the `config.ini` files) from the router server.
 
 Alternatively, you can also add GGUF based preset (see next section)
 
@@ -1783,16 +1783,17 @@ model-draft = /Users/abc/my-models/draft.gguf
 model = /Users/abc/my-awesome-model-Q4_K_M.gguf
 ```
 
-Note: some arguments are controlled by router (e.g., host, port, API key, HF repo, model alias). They will be removed or overwritten upon loading.
+Note: some arguments are controlled by router (e.g., host, port, API key, HF repo, model alias). They will be removed or overwritten upon loading. Server options set for one model in a preset (`metrics`, `props`, `slots`, `sse-ping-interval`, `webui*`, log verbosity) apply to that model's endpoints; other server or process options (e.g. `port`, `timeout`, `prio`, `numa`) have no effect per model and are reported with a warning.
 
 The precedence rule for preset options is as follows:
 1. **Command-line arguments** passed to `llama-server` (highest priority)
 2. **Model-specific options** defined in the preset file (e.g. `[ggml-org/MY-MODEL...]`)
 3. **Global options** defined in the preset file (`[*]`)
+4. **Environment variables** (`LLAMA_ARG_*`) and `config.ini` files (lowest priority)
 
 We also offer additional options that are exclusive to presets (these aren't treated as command-line arguments):
 - `load-on-startup` (boolean): Controls whether the model loads automatically when the server starts. Only applies at startup: if the model list is reloaded later (for example after editing the preset file), a newly added model is listed but not loaded
-- `stop-timeout` (int, seconds): After requested unload, wait for this many seconds before forcing termination (default: 10)
+- `stop-timeout` (int, seconds): accepted for compatibility and ignored: models run in the server process, an unload ends the model's requests and waits for them to stop
 - `dedup-cache-models` (boolean): When the preset uses `hf-repo` pointing to a model that is already downloaded, hide the corresponding cached model entry from `GET /models` (the preset entry remains visible). Set it in the `[*]` section to apply to all presets.
 
 ### Routing requests
@@ -1832,7 +1833,7 @@ Listing all models in cache. The model metadata will also include a field to ind
     "path": "/Users/REDACTED/Library/Caches/llama.cpp/ggml-org_gemma-3-4b-it-GGUF_gemma-3-4b-it-Q4_K_M.gguf",
     "status": {
       "value": "loaded",
-      "args": ["llama-server", "-ctx", "4096"]
+      "args": ["--ctx-size", "4096"]
     },
     "architecture": {
       "input_modalities": [
@@ -1852,7 +1853,8 @@ Note:
 1. Adding `?reload=1` to the query params will refresh the list of models. The behavior is as follow:
     - If a model is running but updated or removed from the source, it will be unloaded
     - If a model is not running, it will be added or updated according to the source
-2. When the model is loaded, the info from `/v1/models` is forwarded to router's `/v1/models`. This includes metadata about the model and the runtime instance.
+2. When the model is loaded, its info from `/v1/models` is merged into router's `/v1/models`. This includes metadata about the model and the runtime instance.
+3. `args` lists the arguments equivalent to the model's configuration (no binary, host or port: nothing is launched), `preset` the same configuration as an INI section.
 
 The `status` object can be:
 
@@ -1865,30 +1867,30 @@ The `status` object can be:
 ```json
 "status": {
   "value": "loading",
-  "args": ["llama-server", "-ctx", "4096"]
+  "args": ["--ctx-size", "4096"]
 }
 ```
 
 ```json
 "status": {
-  "value": "unloaded",
-  "args": ["llama-server", "-ctx", "4096"],
+  "value": "failed",
+  "args": ["--ctx-size", "4096"],
   "failed": true,
-  "exit_code": 1
+  "error": "Failed to load model: my-model.gguf"
 }
 ```
 
 ```json
 "status": {
   "value": "loaded",
-  "args": ["llama-server", "-ctx", "4096"]
+  "args": ["--ctx-size", "4096"]
 }
 ```
 
 ```json
 "status": {
   "value": "sleeping",
-  "args": ["llama-server", "-ctx", "4096"]
+  "args": ["--ctx-size", "4096"]
 }
 ```
 
@@ -1930,7 +1932,7 @@ Response:
 
 ### POST `/models/unload`: Unload a model
 
-Unload a model
+Unload a model: its requests, including those waiting for it, end with an error; the response is sent once the model is freed. Unloading a model being downloaded cancels the download.
 
 Payload:
 
@@ -2009,6 +2011,16 @@ Example events:
   }
 }
 
+// a load that failed: models run in the server process, there is no exit code
+{
+  "model": "...",
+  "event": "status_change",
+  "data": {
+    "status": "failed",
+    "error": "Failed to load model: ..."
+  }
+}
+
 {
   "model": "...",
   "event": "model_remove"
@@ -2031,7 +2043,7 @@ Download procedure:
 - Send POST request to `/models`
 - Subscribe to `/models/sse` for updates
 - On downloading completed, you will receive either `download_finished` or `download_failed` event
-- Call GET `/models` to trigger model list update. If the download success, you should see the new model in the list
+- If the download succeeded, the new model is already in the list returned by GET `/models`
 
 Payload:
 
