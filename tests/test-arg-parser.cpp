@@ -2,14 +2,21 @@
 #include "common.h"
 #include "download.h"
 #include "llama.h"
+#include "preset.h"
 #include "speculative.h"
 
 #include <cmath>
+#include <filesystem>
+#include <fstream>
 #include <limits>
 #include <string>
 #include <vector>
 #include <sstream>
 #include <unordered_set>
+
+#ifndef _WIN32
+#include <unistd.h>
+#endif
 
 #undef NDEBUG
 #include <cassert>
@@ -361,6 +368,42 @@ static void test(void) {
     assert(true == common_params_parse(argv.size(), list_str_to_char(argv).data(), params, LLAMA_EXAMPLE_COMMON));
     assert(params.model.path == "overwritten.gguf");
     assert(params.cpuparams.n_threads == 1010);
+
+    printf("test-arg-parser: test options of the configuration files and the environment\n\n");
+    {
+        // a user-level config.ini under the environment, as common_params_parse applies them
+        const auto dir = std::filesystem::temp_directory_path() / ("test-arg-parser-" + std::to_string(getpid()));
+        std::filesystem::create_directories(dir / "llama.cpp");
+        std::ofstream(dir / "llama.cpp" / "config.ini") << "[*]\nctx-size = 111\nthreads = 7\nunknown-key = 1\n[default]\nbatch-size = 64\n";
+        setenv("XDG_CONFIG_HOME", dir.string().c_str(), true);
+        setenv("LLAMA_ARG_SWA_FULL", "false", true); // a flag variable only enables
+
+        const common_preset_context ctx(LLAMA_EXAMPLE_CLI);
+        const common_preset preset = ctx.load_from_env();
+        std::string value;
+        assert(preset.get_option("LLAMA_ARG_CTX_SIZE", value) && value == "111");
+        assert(preset.get_option("LLAMA_ARG_THREADS", value) && value == "1010"); // environment over file
+        assert(preset.get_option("LLAMA_ARG_BATCH", value) && value == "64");
+        assert(preset.get_option("LLAMA_ARG_MODEL", value) && value == "blah.gguf");
+        assert(!preset.get_option("LLAMA_ARG_SWA_FULL", value));
+
+        // same result as the parser
+        common_params parsed;
+        argv = {"binary_name"};
+        assert(true == common_params_parse(argv.size(), list_str_to_char(argv).data(), parsed, LLAMA_EXAMPLE_CLI));
+        common_params applied;
+        common_params_parser_init(applied, LLAMA_EXAMPLE_CLI);
+        preset.apply_to_params(applied);
+        assert(parsed.n_ctx == applied.n_ctx && applied.n_ctx == 111);
+        assert(parsed.cpuparams.n_threads == applied.cpuparams.n_threads);
+        assert(parsed.n_batch == applied.n_batch);
+        assert(parsed.model.path == applied.model.path);
+        assert(parsed.swa_full == applied.swa_full && !applied.swa_full);
+
+        unsetenv("LLAMA_ARG_SWA_FULL");
+        unsetenv("XDG_CONFIG_HOME");
+        std::filesystem::remove_all(dir);
+    }
 #endif // _WIN32
 
     printf("test-arg-parser: test download functions\n\n");

@@ -28,8 +28,7 @@ static std::string join_path(const common_http_url & parts, const std::string & 
 std::string cli_client::get(const std::string & path) {
     auto [cli, parts] = common_http_client(server_base);
     cli.set_read_timeout(CLI_HTTP_READ_TIMEOUT_SEC, 0);
-    auto path_with_model = path + (model.empty() ? "" : ("?model=" + model));
-    auto res = cli.Get(join_path(parts, path_with_model));
+    auto res = cli.Get(join_path(parts, path));
     if (!res) {
         throw std::runtime_error("failed to connect to " + server_base + ": " + httplib::to_string(res.error()));
     }
@@ -127,4 +126,19 @@ bool cli_client::wait_health(const std::function<bool()> & is_aborted) {
     }
     last_error = "aborted while waiting for the server to become ready";
     return false;
+}
+
+std::string cli_client::models() {
+    return get("/v1/models");
+}
+
+std::string cli_client::properties(const std::string & model) {
+    // the router answers with its own properties unless a model is named
+    return get(model.empty() ? "/props" : "/props?model=" + model);
+}
+
+std::string cli_client::chat(const std::string & body,
+                             const std::function<bool()> & should_stop,
+                             const std::function<void(const std::string &)> & on_chunk) {
+    return post_sse("/v1/chat/completions", body, should_stop, on_chunk);
 }

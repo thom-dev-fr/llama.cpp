@@ -2,13 +2,20 @@
 
 set(TARGET llama-cli-impl)
 
+# the local model runs in the engine, --server-base goes through the HTTP client
 add_library(${TARGET} cli.cpp
+                      cli-backend.h
                       cli-client.cpp
-                      cli-context.cpp)
+                      cli-client.h
+                      cli-context.cpp
+                      cli-context.h
+                      cli-engine.cpp
+                      cli-engine.h
+                      cli-ui.h)
 set_target_properties(${TARGET} PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS ON)
 
-target_include_directories(${TARGET} PUBLIC ${CMAKE_CURRENT_SOURCE_DIR} ../server)
-target_link_libraries(${TARGET} PUBLIC llama-server-impl llama-common ${CMAKE_THREAD_LIBS_INIT})
+target_include_directories(${TARGET} PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(${TARGET} PUBLIC llama-engine llama-common cpp-httplib ${CMAKE_THREAD_LIBS_INIT})
 
 if(LLAMA_TOOLS_INSTALL)
     install(TARGETS ${TARGET} LIBRARY)

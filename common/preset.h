@@ -79,6 +79,11 @@ struct common_preset_context {
     // generate one preset from CLI arguments
     common_preset load_from_args(int argc, char ** argv) const;
 
+    // generate one preset from what common_params_parse applies before the command line:
+    // the configuration files (global section, then [default]; unknown keys ignored),
+    // then the LLAMA_ARG_* environment variables; a later source overrides an earlier one
+    common_preset load_from_env() const;
+
     // generate one preset from options named like INI keys (argument names without
     // leading dashes, negated boolean names or env names), with the rules of load_from_ini
     common_preset load_from_map(const std::string & name, const std::map<std::string, std::string> & options) const;

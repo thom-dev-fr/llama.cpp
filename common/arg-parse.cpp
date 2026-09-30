@@ -49,34 +49,6 @@ static bool parse_bool_value(const std::string & value) {
 // CLI argument parsing functions
 //
 
-std::vector<std::filesystem::path> common_params_config_files() {
-    std::vector<std::filesystem::path> paths;
-
-#if defined(_WIN32)
-    const std::filesystem::path program_data = common_get_path_from_env("PROGRAMDATA");
-    if (!program_data.empty()) {
-        paths.push_back(program_data / "llama.cpp" / "config.ini");
-    }
-#else
-    paths.push_back("/etc/llama.cpp/config.ini");
-#endif
-
-    try {
-        paths.push_back(fs_get_config_directory() / "config.ini");
-    } catch (const std::exception & e) {
-        LOG_DBG("cannot read user-level config file, skipping: %s\n", e.what());
-    }
-
-    std::vector<std::filesystem::path> found;
-    for (const auto & path : paths) {
-        std::error_code ec;
-        if (std::filesystem::exists(path, ec)) {
-            found.push_back(path);
-        }
-    }
-    return found;
-}
-
 // apply config files (if present), a later file overrides an earlier one
 static void common_params_apply_system_config(common_params & params, llama_example ex) {
     const std::vector<std::filesystem::path> found = common_params_config_files();
@@ -222,6 +194,8 @@ static bool common_params_parse_ex(int argc, char ** argv, common_params_context
     const bool skip_model_download =
         // server will call common_params_handle_models() later, so we skip it here
         ctx_arg.ex == LLAMA_EXAMPLE_SERVER ||
+        // the CLI's engine resolves and downloads the model while loading it
+        ctx_arg.ex == LLAMA_EXAMPLE_CLI ||
         // download calls common_params_handle_models() itself and prints the paths
         ctx_arg.ex == LLAMA_EXAMPLE_DOWNLOAD ||
         // export_graph_ops loads only metadata

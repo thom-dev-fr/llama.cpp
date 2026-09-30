@@ -58,7 +58,7 @@ int llama_cli(int argc, char ** argv) {
     SetConsoleCtrlHandler(reinterpret_cast<PHANDLER_ROUTINE>(console_ctrl_handler), true);
 #endif
 
-    cli_context ctx_cli(params);
+    cli_context ctx_cli(params, argc, argv);
 
     if (!ctx_cli.init()) {
         return 1;

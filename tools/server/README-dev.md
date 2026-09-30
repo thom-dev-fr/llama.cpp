@@ -52,8 +52,10 @@ embedding interface is [`include/llama-engine.h`](../../include/llama-engine.h),
 documented in the [API guide](../../docs/design/embedded-inference-engine-api.md).
 Single-model HTTP handlers call the same operation runtime as direct callers;
 the server configures upstream-compatible unbounded admission and buffering.
-Private `server-*.h` forwarding headers remain for the CLI transition and
-are not a public embedding interface. See the
+Private `server-*.h` forwarding headers remain for the HTTP adapter until the
+cleanup step and are not a public embedding interface. `llama-cli` no longer
+depends on the server: its local mode uses the public engine interface and its
+`--server-base` mode is an HTTP client. See the
 [progress journal](../../docs/design/embedded-inference-engine-progress.md) for
 qualified profiles and missing fixtures. SSE framing, keep-alives, replay,
 Prometheus text, HTTP guards, executed tools and MCP stay outside the engine.

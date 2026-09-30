@@ -855,6 +855,34 @@ void common_params_finalize(common_params & params) {
     }
 }
 
+std::vector<std::filesystem::path> common_params_config_files() {
+    std::vector<std::filesystem::path> paths;
+
+#if defined(_WIN32)
+    const std::filesystem::path program_data = common_get_path_from_env("PROGRAMDATA");
+    if (!program_data.empty()) {
+        paths.push_back(program_data / "llama.cpp" / "config.ini");
+    }
+#else
+    paths.push_back("/etc/llama.cpp/config.ini");
+#endif
+
+    try {
+        paths.push_back(fs_get_config_directory() / "config.ini");
+    } catch (const std::exception & e) {
+        LOG_DBG("cannot read user-level config file, skipping: %s\n", e.what());
+    }
+
+    std::vector<std::filesystem::path> found;
+    for (const auto & path : paths) {
+        std::error_code ec;
+        if (std::filesystem::exists(path, ec)) {
+            found.push_back(path);
+        }
+    }
+    return found;
+}
+
 bool common_params_to_map(int argc, char ** argv, llama_example ex, std::map<common_arg, std::string> & out_map) {
     common_params dummy_params;
     common_params_context ctx_arg = common_params_parser_init(dummy_params, ex, nullptr);
@@ -1076,7 +1104,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
     ));
     add_opt(common_arg(
         {"--server-base"}, "URL",
-        string_format("connect to this server instead of starting a new one, example: 'http://localhost:8080' (default: none)"),
+        string_format("connect to this server instead of loading the model in this process, example: 'http://localhost:8080' (default: none)"),
         [](common_params & params, const std::string & value) {
             params.server_base = value;
         }

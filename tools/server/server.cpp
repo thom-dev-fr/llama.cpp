@@ -43,14 +43,7 @@ static inline void signal_handler(int signal) {
 // satisfies -Wmissing-declarations (used by llama command)
 int llama_server(int argc, char ** argv);
 
-// to be used via CLI (argc / argv are used by router mode only)
-int llama_server(common_params & params, int argc, char ** argv);
-void llama_server_terminate();
-void llama_server_terminate() {
-    if (shutdown_handler) {
-        shutdown_handler(0);
-    }
-}
+static int llama_server(common_params & params, int argc, char ** argv);
 
 
 // wrapper function that handles exceptions and logs errors
@@ -124,13 +117,11 @@ int llama_server(int argc, char ** argv) {
     return result;
 }
 
-int llama_server(common_params & params, int argc, char ** argv) {
-    bool is_run_by_cli = (argv == nullptr);
-
+static int llama_server(common_params & params, int argc, char ** argv) {
     common_models_handler models_handler;
 
     // note: router mode also accepts -hf remote-preset, so we need to check that first
-    if (!is_run_by_cli && !params.model.hf_repo.empty()) {
+    if (!params.model.hf_repo.empty()) {
         try {
             models_handler = common_models_handler_init(params, LLAMA_EXAMPLE_SERVER);
             if (common_models_handler_is_preset_repo(models_handler)) {
@@ -343,9 +334,8 @@ int llama_server(common_params & params, int argc, char ** argv) {
     // Handle downloading model
     //
 
-    if (!is_router_server && !is_run_by_cli) {
-        // single-model mode (NOT spawned by router)
-        // if this is invoked by CLI, model downloading should be already handled
+    if (!is_router_server) {
+        // single-model mode
         try {
             common_models_handler_apply(models_handler, params);
         } catch (const std::exception & e) {
@@ -440,22 +430,20 @@ int llama_server(common_params & params, int argc, char ** argv) {
         };
     }
 
-    // register signal handler if not running by CLI
-    if (!is_run_by_cli) {
+    // register signal handler
 #if defined (__unix__) || (defined (__APPLE__) && defined (__MACH__))
-        struct sigaction sigint_action;
-        sigint_action.sa_handler = signal_handler;
-        sigemptyset (&sigint_action.sa_mask);
-        sigint_action.sa_flags = 0;
-        sigaction(SIGINT, &sigint_action, NULL);
-        sigaction(SIGTERM, &sigint_action, NULL);
+    struct sigaction sigint_action;
+    sigint_action.sa_handler = signal_handler;
+    sigemptyset (&sigint_action.sa_mask);
+    sigint_action.sa_flags = 0;
+    sigaction(SIGINT, &sigint_action, NULL);
+    sigaction(SIGTERM, &sigint_action, NULL);
 #elif defined (_WIN32)
-        auto console_ctrl_handler = +[](DWORD ctrl_type) -> BOOL {
-            return (ctrl_type == CTRL_C_EVENT) ? (signal_handler(SIGINT), true) : false;
-        };
-        SetConsoleCtrlHandler(reinterpret_cast<PHANDLER_ROUTINE>(console_ctrl_handler), true);
+    auto console_ctrl_handler = +[](DWORD ctrl_type) -> BOOL {
+        return (ctrl_type == CTRL_C_EVENT) ? (signal_handler(SIGINT), true) : false;
+    };
+    SetConsoleCtrlHandler(reinterpret_cast<PHANDLER_ROUTINE>(console_ctrl_handler), true);
 #endif
-    }
 
     bool uses_default_port = false;
     for (const auto & address : ctx_http.listening_addresses) {

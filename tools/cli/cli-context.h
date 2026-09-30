@@ -2,8 +2,7 @@
 
 #include "common.h"
 
-#include "cli-client.h"
-#include "cli-server.h"
+#include "cli-backend.h"
 
 #include <atomic>
 #include <memory>
@@ -21,10 +20,13 @@ struct cli_context_impl;
 struct cli_context {
     common_params params;
 
-    cli_client client;                // always initialized
-    std::optional<cli_server> server; // only set when no --server-base is given
+    // the local engine, or the server given by --server-base; set by init()
+    std::unique_ptr<cli_backend> backend;
 
-    // properties of the connected server
+    // model named in requests, when the server has multiple models (router mode)
+    std::string model;
+
+    // properties of the model
     // will be populated by fetch_server_props()
     std::string model_name;
     std::string model_ftype;
@@ -35,17 +37,18 @@ struct cli_context {
 
     std::optional<std::ofstream> output_file;
 
-    cli_context(const common_params & params);
+    // argc/argv are the command line that params was parsed from
+    cli_context(const common_params & params, int argc, char ** argv);
     ~cli_context();
 
-    // connect to --server-base or spawn a local llama-server child;
-    // argc/argv are needed to forward the server-relevant args to the child
+    // connect to --server-base or load the model in this process;
+    // the command line configures the local model
     bool init();
 
     // run the interactive chat loop, returns the process exit code
     int run();
 
-    // stop the local server child (if any)
+    // free the local model (if any)
     void shutdown();
 
     // set by the SIGINT handler; cleared once the interrupt has been handled
@@ -71,6 +74,9 @@ private:
 
     // no-op if output file is not set
     void write_output_file(const std::string & content);
+
+    int argc;
+    char ** argv;
 
     std::unique_ptr<cli_context_impl> impl;
 };

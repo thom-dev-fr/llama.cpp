@@ -66,40 +66,12 @@ std::map<std::string, std::string> command_line_options(int argc, char ** argv) 
 // read before its command line: explicit defaults under every model.
 std::map<std::string, std::string> environment_options() {
     std::map<std::string, std::string> out;
-    const auto engine_option = [](const common_arg & opt) {
+    for (const auto & [opt, value] : preset_context().load_from_env().options) {
         const std::string key = llama_engine::detail::option_key(opt);
         const option_scope * scope = llama_engine::detail::find_option_scope(key);
-        return scope && *scope == option_scope::engine && !names_a_model(key);
-    };
-    common_preset_context ctx(LLAMA_EXAMPLE_SERVER);
-    ctx.ignore_unknown_keys = true; // the same config file is shared by all programs
-    for (const auto & path : common_params_config_files()) {
-        common_preset global;
-        common_presets presets = ctx.load_from_ini(path, global);
-        std::vector<const common_preset *> sections = {&global};
-        auto it = presets.find(COMMON_PRESET_DEFAULT_NAME);
-        if (it != presets.end()) {
-            sections.push_back(&it->second);
+        if (scope && *scope == option_scope::engine && !names_a_model(key)) {
+            out[key] = value;
         }
-        for (const auto * section : sections) {
-            for (const auto & [opt, value] : section->options) {
-                if (engine_option(opt)) {
-                    out[llama_engine::detail::option_key(opt)] = value;
-                }
-            }
-        }
-    }
-    common_params unused;
-    auto ctx_arg = common_params_parser_init(unused, LLAMA_EXAMPLE_SERVER);
-    for (const auto & opt : ctx_arg.options) {
-        std::string value;
-        if (!engine_option(opt) || !opt.get_value_from_env(value)) {
-            continue;
-        }
-        if (opt.handler_void && !common_arg_utils::is_truthy(value)) {
-            continue; // as common_params_parse: a flag variable only enables
-        }
-        out[llama_engine::detail::option_key(opt)] = value;
     }
     return out;
 }

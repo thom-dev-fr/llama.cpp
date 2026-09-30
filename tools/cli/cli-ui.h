@@ -9,6 +9,12 @@
 #include <filesystem>
 #include <string_view>
 
+#if defined(_WIN32)
+#include <io.h>
+#else
+#include <unistd.h>
+#endif
+
 // TODO?: Make this reusable, enums, docs
 static const std::array<std::string_view, 8> cmds = {
     "/audio ",
@@ -241,6 +247,20 @@ namespace ui {
 
     static void show_message(const std::string & message) {
         console::log("%s\n", message.c_str());
+    }
+
+    static bool is_terminal() {
+#if defined(_WIN32)
+        return _isatty(_fileno(stdout));
+#else
+        return isatty(1);
+#endif
+    }
+
+    // rewrites the current line, e.g. with the progress of a download
+    static void show_progress(const std::string & message) {
+        console::log("\r%s\033[K", message.c_str());
+        console::flush();
     }
 
     static void show_info(const std::string & message) {

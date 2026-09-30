@@ -1,5 +1,11 @@
 # llama.cpp/tools/cli
 
+`llama-cli` loads its model in the process with the [embedded inference engine](../../include/llama-engine.h):
+no server is started and no port is opened. Options of the command line, the `LLAMA_ARG_*` variables and the
+`config.ini` files configure the model as they configure `llama-server`; remote resources (`-hf`, `-mu`, `-dr`)
+are downloaded by the engine while the model loads (Ctrl+C interrupts the download). With `--server-base`, the CLI
+is an HTTP client of a running `llama-server` instead, in single-model or router mode.
+
 ## Usage
 
 <!-- HELP_START -->
@@ -142,7 +148,7 @@
 
 | Argument | Explanation |
 | -------- | ----------- |
-| `--server-base URL` | connect to this server instead of starting a new one, example: 'http://localhost:8080' (default: none) |
+| `--server-base URL` | connect to this server instead of loading the model in this process, example: 'http://localhost:8080' (default: none) |
 | `--verbose-prompt` | print a verbose prompt before generation (default: false) |
 | `--display-prompt, --no-display-prompt` | whether to print prompt at generation (default: true) |
 | `-co, --color [on\|off\|auto]` | Colorize output to distinguish prompt and user input from generations ('on', 'off', or 'auto', default: 'auto')<br/>'auto' enables colors when output is to a terminal |

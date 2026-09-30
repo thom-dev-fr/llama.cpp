@@ -488,6 +488,36 @@ common_preset common_preset_context::load_from_args(int argc, char ** argv) cons
     return preset;
 }
 
+common_preset common_preset_context::load_from_env() const {
+    common_preset preset;
+    preset.name = COMMON_PRESET_DEFAULT_NAME;
+
+    common_preset_context ctx_files = *this;
+    ctx_files.ignore_unknown_keys = true; // the same config file is shared by all programs
+    for (const auto & path : common_params_config_files()) {
+        common_preset global;
+        common_presets presets = ctx_files.load_from_ini(path, global);
+        preset.merge(global);
+        auto it = presets.find(COMMON_PRESET_DEFAULT_NAME);
+        if (it != presets.end()) {
+            preset.merge(it->second);
+        }
+    }
+
+    for (const auto & opt : ctx_params.options) {
+        std::string value;
+        if (!opt.get_value_from_env(value)) {
+            continue;
+        }
+        if (opt.handler_void && !common_arg_utils::is_truthy(value)) {
+            continue; // as common_params_parse: a flag variable only enables
+        }
+        preset.options[opt] = value;
+    }
+
+    return preset;
+}
+
 common_presets common_preset_context::cascade(const common_presets & base, const common_presets & added) const {
     common_presets out = base; // copy
     for (const auto & [name, preset_added] : added) {

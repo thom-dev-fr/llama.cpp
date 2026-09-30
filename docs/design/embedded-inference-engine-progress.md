@@ -7,6 +7,7 @@
 - **P3 revérifié puis P4 implémenté le 29 septembre 2026** (section P4) : cycle de vie multi-modèles dans le processus, sans sous-processus ni port.
 - **P4 revérifié puis P5 implémenté le 29 septembre 2026** (section P5) : configuration complète par options nommées, sources de catalogue partagées avec le routeur, rechargement, acquisition optionnelle sans sous-processus. **P5 commité dans `756173951`, arbre propre. Prochaine étape : P6.** Le drop complet P0–P9 n’est pas terminé.
 - **P6 implémenté le 29 septembre 2026** (section P6) : le mode multi-modèles de `llama-server` utilise le catalogue du moteur dans le processus ; routeur/proxy/enfants et `server-process.*` supprimés. **Commité (message « engine : run llama-server multi-model mode in process »). Prochaine étape : P7 (CLI local).**
+- **P7 implémenté le 30 septembre 2026** (section P7) : le CLI local charge son modèle dans le processus par l’API publique du moteur (catalogue d’un modèle, téléchargements `-hf` par l’acquisition partagée) ; `cli-server.h`, le serveur loopback, l’attente `/health` et les points d’entrée `llama_server(params, 0, nullptr)`/`llama_server_terminate` sont supprimés ; `llama-cli-impl` ne dépend plus de `llama-server-impl`. `--server-base` reste un client HTTP. **Commité (message « engine : run llama-cli local mode in process »). Prochaine étape : P8.**
 - **Commits** : correctif de revue P2 `8dd3003e9`, P3 `675bf4fd0`, P4 `825f7f3b0`, P5 `756173951`. Arbre propre après P4 ; revalidation après commit ci-dessous (« P4 — Revalidation après commit »).
 - P0/P1 : inventaire, références et graphe recontrôlés ; 16/16 tests locaux dans chaque profil et 9/9 tests C++ ciblés repassés avant P2. Les réserves de performance et capacités consignées à P1 restent ouvertes.
 - P2 : `include/llama-engine.h`, décodeur unique dans `engine/`, handlers `/completion` et `/completions` migrés. Voir la section P2 et [le guide API](embedded-inference-engine-api.md). CLI local et routeur conservent leurs chemins legacy jusqu’à P6/P7.
@@ -57,9 +58,9 @@ La completion native est **migrée à P2** ; les contrats mono-modèle sont **mi
 | GET/POST `/tools` | Outils exécutés/MCP, streaming propre, sinon 403 | Serveur/hôte uniquement | `test_tools_builtin`, `test_mcp_servers` |
 | GCP (`register_gcp_compat`) | Alias configurés par environnement vers handlers, enveloppe transport | Serveur uniquement, opérations sous-jacentes moteur | `test_compat_gcp` |
 | UI/statique/auth/CORS/OPTIONS/préfixes | `server-http.cpp`, contenu intégré ou public_path | Serveur uniquement | `test_security`, `test_basic` ; smoke UI manuel à ajouter |
-| CLI local initialisation | `cli-context.cpp::init`, `cli-server.h` lance llama_server sur thread et port loopback, attend health | Moteur direct P7, sans serveur | Ajouter smoke local sans port, arrêt/rechargement |
-| CLI distant | `server_base`, `/health`, `/props`, `/v1/models`, POST SSE chat | `cli-client` reste HTTP | Ajouter mono/multi-modèles distant |
-| CLI conversation | Choix modèle, system_prompt, prompt/image, fichiers/globs, historique, pièces jointes, sorties, timings, single_turn, interruption | Historique/rendu/IO CLI ; opérations moteur | Ajouter plusieurs tours, interruption puis requête, fichiers |
+| CLI local initialisation | ~~`cli-server.h` lançait llama_server sur thread et port loopback, attendait health~~ | **P7** : `cli_engine` (`tools/cli/cli-engine.*`) — `create_catalog` d’un modèle, `load`, progression/annulation des téléchargements ; aucun serveur ni port | `test_cli.py` (local, sans socket ni enfant, erreurs) |
+| CLI distant | `server_base`, `/health`, `/props`, `/v1/models`, POST SSE chat | `cli_client` reste HTTP (même interface `cli_backend`) | `test_cli.py` : mono, routeur, erreurs HTTP/connexion |
+| CLI conversation | Choix modèle, system_prompt, prompt/image, fichiers/globs, historique, pièces jointes, sorties, timings, single_turn, interruption | **P7** : historique/rendu/IO dans `cli_context`, opérations `models`/`properties`/`chat` via `cli_backend` | `test_cli.py` : plusieurs tours, `/regen`, `/clear`, fichier de sortie, interruption puis requête ; parité vision/texte à `--temp 0` contre legacy |
 
 ### Profils multimédias et champs historiques
 
@@ -370,7 +371,9 @@ RSS maximale CPU 90 914 816, Metal 93 274 112 octets. La baisse CPU agrégée vs
 
 | Élément | Rôle actuel | Échéance |
 | --- | --- | --- |
-| `llama-common` | Agrégat args/presets/subprocess qui lie local + acquisition ; pas de copies de code | Les autres outils peuvent le conserver ; inférence serveur/CLI quitte cet agrégat P6/P7 |
+| `llama-common` | Agrégat args/presets/subprocess qui lie local + acquisition ; pas de copies de code | Les autres outils peuvent le conserver. **P7** : le CLI ne l’utilise plus que pour argv, console et le client `--server-base` ; son inférence passe par `llama-engine` |
+| `engine/engine-options.h` inclus par `server-models.cpp` et `cli-engine.cpp` | Portée des options (moteur/hôte/catalogue) pour filtrer la ligne de commande ; en-tête privé exporté | P8 : exposer la classification ou garder ce détail documenté |
+| `server_context::get_response_reader()`, `server_task::cli/cli_prompt/cli_files` | Restes du premier CLI dans le processus ; **aucun appelant** (le drapeau `cli` n’est jamais positionné) | P8 (code mort) |
 | `tools/server/server-{common,chat,task,queue,schema}.h` | Cinq includes de compatibilité vers engine, zéro implémentation | P8 |
 | Noms internes server_* et include dirs privés exportés temporairement par llama-engine | Adapter existant et tests internes utilisent encore les types historiques ; API publique P2 disponible séparément | Migration P3, nettoyage P8 |
 | `server-process.*` et routeur/proxy enfants | **Supprimés P6** ; `server_http_proxy` déplacé dans `server-http-proxy.*` pour le seul proxy CORS de l’UI | — |
@@ -991,3 +994,82 @@ LLAMA_SERVER_BIN_PATH="$PWD/build-agent-engine-p6-nosubproc/bin/llama-server" [m
 3. Traduire les options du CLI comme le serveur P6 : ligne de commande en options explicites, environnement/`config.ini` par `common_params_config_files()` ; options hôte du terminal hors moteur.
 4. Garder `cli-client` pour `--server-base` et le tester contre un serveur mono et multi-modèles (ce dernier est désormais sans processus).
 5. P8 : `server_context ctx_server` vide en mode multi-modèles, headers de compatibilité, noms `server_*` privés.
+
+## P7 — CLI local sur le moteur, client distant conservé
+
+### Vérification préalable
+
+Arbre au commit P6 `0dabee9d8`, propre. Consignes de reprise P7 suivies ; points d’entrée du plan recontrôlés (`cli-context.*`, `cli-client.*`, `cli-server.h`, `tools/cli/CMakeLists.txt`, `app/CMakeLists.txt`).
+
+### Implémentation
+
+- **Deux adapters derrière une interface d’opérations** (`tools/cli/cli-backend.h`) : `models()`, `properties(model)`, `chat(body, should_stop, on_chunk)`, documents JSON de l’API serveur. `cli_context` garde seul historique, commandes, rendu des deltas, pièces jointes, fichier de sortie, timings et interruption ; il n’appelle plus de chemin HTTP. Aucun serveur HTTP en mémoire.
+- **Local** (`tools/cli/cli-engine.{h,cpp}`) : API publique `llama-engine.h` uniquement pour l’inférence — `engine::create_catalog` d’**un** modèle, `subscribe()` + `load()` interrogés toutes les 100 ms (Ctrl+C → `engine::stop()` interrompt téléchargement ou chargement), puis `submit(chat)` streamé (`next_for`, `cancel()` à l’interruption, payloads tableau/objet). `models()` vient de `engine::catalog()`, `properties()` de l’opération `properties`. Catalogue plutôt que `engine::create()` : seul moyen public de suivre la progression et d’interrompre le chargement.
+- **Traduction des options** (consigne P6) : `common_preset_context(LLAMA_EXAMPLE_CLI)` — `load_from_env()` (nouveau, `common/preset.*` : fichiers `config.ini` puis `LLAMA_ARG_*`, priorités de `common_params_parse`) sous `load_from_args(argc, argv)` ; seules les options de portée moteur sont transmises (`config::from_options`), les options du terminal restent au CLI. Défaut propre au CLI conservé : `parallel = 1` (le moteur part des défauts serveur, slots automatiques). Limites : `max_events`/`max_request_bytes` non bornés comme l’ancien serveur local (l’historique contient les médias base64).
+- **Acquisition** : `-hf`/`-mu`/`-dr` ne sont plus téléchargés pendant le parsing du CLI (`LLAMA_EXAMPLE_CLI` rejoint `SERVER` dans `skip_model_download`) mais par le moteur au chargement (même résolution que `llama-server`, une seule) ; progression agrégée affichée sur une ligne (terminal seulement), fichiers incomplets supprimés à l’interruption.
+- **Distant** : `cli_client` implémente la même interface (`/v1/models`, `/props[?model=]`, SSE `/v1/chat/completions`) ; `model` sélectionné vit dans `cli_context`.
+- **Supprimés** : `tools/cli/cli-server.h` (thread serveur, port loopback, attente `/health`), `llama_server(params, 0, nullptr)`, `llama_server_terminate()` et la branche `is_run_by_cli` de `server.cpp`. `llama-cli-impl` lie `llama-engine llama-common cpp-httplib`, plus `llama-server-impl` ni `../server` en include. `llama_cli()` reste le point d’entrée de `llama-app`.
+- **Partage avec le serveur** : `common_params_config_files()` déplacé de `arg-parse.cpp` vers `arg.cpp` (`llama-common-options`, fichiers locaux uniquement) ; `server-models.cpp::environment_options()` utilise `load_from_env()` au lieu de sa copie.
+- Aide de `--server-base` et `tools/cli/README.md` (section d’introduction), `README-dev` serveur mis à jour.
+
+### Décisions et différences de compatibilité
+
+| Avant P7 | Après |
+| --- | --- |
+| Téléchargement `-hf` pendant le parsing, barres par fichier ; Ctrl+C tuait le processus (gestionnaire pas encore installé) | Téléchargement par le moteur pendant « Loading model... », une ligne agrégée ; Ctrl+C l’annule proprement (code 1, fichier incomplet supprimé) |
+| `--server-base` avec `-hf` téléchargeait inutilement le modèle | Rien n’est téléchargé en mode distant |
+| Sans modèle : erreur du parseur « --model is required » | Erreur de l’UI « no model specified » (code 1 dans les deux cas) |
+| Échec de chargement : « the server exited before becoming ready » | « failed to load the model » + message du moteur |
+| Médias en data URL base64 dans l’historique | Inchangé (pas de pièces jointes `attachment:` : l’historique est renvoyé à chaque tour, comme en distant) |
+| Mode local : un seul modèle | Inchangé ; `list_and_ask_models` s’applique aussi en local (sélection automatique du modèle unique) |
+
+### Validation réellement exécutée
+
+| Vérification | Résultat |
+| --- | --- |
+| Build serveur/CLI/app + tests, profil complet (partagé) | **PASS**, 0 warning (`p7-build-2.log`) |
+| C++ ciblé (moteur, chat, arg-parser, model-resolution, acquisition, hf-cache, schema, sampling) | **PASS 22/22** (`p7-cpp-final.log`) ; `test-arg-parser` étendu : `load_from_env()` (section `[*]`/`[default]`, clé inconnue ignorée, environnement au-dessus du fichier, drapeau `false` ignoré) et parité avec `common_params_parse` |
+| Nouveaux tests `tools/server/tests/unit/test_cli.py` (8) : local single-turn ; **aucun socket ni processus enfant** (`lsof`/`pgrep` pendant la session) ; plusieurs tours + `/regen` + `/clear` + `-o` ; **interruption puis nouvelle requête** ; erreurs (fichier absent, dépôt absent du cache `--offline`, aucun modèle) ; distant mono-modèle ; distant routeur (sélection interactive) ; distant injoignable et erreur HTTP pendant le chat (session poursuivie) | **PASS 8/8** (`p7-http-cli.log`) ; contre le CLI legacy (`0dabee9d8`) : **2 FAIL attendus** (socket en écoute, libellé d’erreur), 6 PASS |
+| Suite HTTP complète `not slow` | **PASS 393, 6 SKIP** (`p7-http-all.log`, 334 s) = 385 P6 + 8 CLI ; skips habituels |
+| Parité de sortie contre le CLI legacy à `--temp 0` | **identique** : session vision (`/image`, tinygemma3) et session texte multi-tours (`-sys`, `/regen`, `/read`, erreur de contexte dépassé), hors horodatage d’un log |
+| A/B temps total single-turn (stories260K, 128 tokens, ×3, CPU et Metal) | legacy 0,40–0,55 s, moteur **0,17–0,33 s** (plus de serveur ni d’attente `/health`) ; débits équivalents (bruit du modèle minuscule) |
+| `-hf` dans un cache vide (réseau) sous pseudo-terminal | **PASS** : progression jusqu’à 100 %, spinner rétabli, chat |
+| Ctrl+C pendant le téléchargement de `stories15M_MOE` | **PASS** : sortie code 1 en 1,6 s, seul `refs/main` reste dans le cache |
+| `llama cli` (local), `llama cli --server-base` contre `llama serve`, `llama download -hf` | **PASS**, codes 0 ; `llama serve` arrêté par SIGINT, code 0 |
+| Graphe | `libllama-cli-impl` : aucune dépendance `llama-server-impl`, 0 symbole `server_*`/`llama_server` non défini, 17 symboles `llama_engine::` utilisés. Le code `httplib::Server` reste présent via la bibliothèque cpp-httplib monolithique du client `--server-base` ; le mode local n’ouvre aucun socket (vérifié à l’exécution) |
+| Profils locaux statique / partagé sans HTTP (rebuild, `llama-common-options` modifié) | **PASS 28/28** / **25/25**, 0 warning ; `nm -u` sans httplib/subprocess/transport réseau |
+| ASan + UBSan (nouveau profil Debug CPU `build-agent-engine-p7-cli-sanitize`, CLI **et** serveur instrumentés) | **PASS 8/8** `test_cli.py`, 0 rapport ; interruption de téléchargement : 0 rapport. LeakSanitizer **BLOCKED** (macOS) |
+| TSan (nouveau profil `build-agent-engine-p7-cli-tsan`, CLI instrumenté) | **PASS 8/8**, 0 rapport |
+| `git diff --check` | **PASS** |
+
+Échecs intermédiaires corrigés, non comptés : `getpid` non déclaré dans le test ; fixture INI mal formée (des clés hors section appartiennent à `default`, réinitialisée par l’en-tête `[default]`) ; dernière progression de téléchargement perdue quand le chargement finissait avant la lecture des événements (vidage ajouté) ; mesure de durée faussée par un script de test ne détectant pas l’EOF du pty sur macOS.
+
+Non qualifié à P7 : Linux/Windows (`lsof`/`pgrep` requis par le test d’absence de socket, sauté ailleurs ; affichage Windows de la progression), audio/vidéo réels dans le CLI (seule l’image est vérifiée), modèles de brouillon via `-hfd` par le CLI.
+
+### Commandes P7 reproductibles
+
+```sh
+MODEL="$PWD/tools/server/tests/tmp/models--ggml-org--test-model-stories260K/snapshots/479896ec924af6d40fd419ab8f4d1eb2101de00d/stories260K-f32.gguf"
+# build et C++ ciblé : commandes P6 inchangées (build-agent-engine-baseline)
+PATH="$PWD/.venv-server-tests/bin:$PATH" \
+  SSL_CERT_FILE="$(.venv-server-tests/bin/python -c 'import certifi; print(certifi.where())')" \
+  LLAMA_SERVER_BIN_PATH="$PWD/build-agent-engine-baseline/bin/llama-server" \
+  N_GPU_LAYERS=0 PYTEST_WORKERS=1 ./tools/server/tests/tests.sh unit/test_cli.py -q -rs
+# LLAMA_CLI_BIN_PATH choisit un autre llama-cli (défaut : à côté de llama-server)
+cmake -S . -B build-agent-engine-p7-cli-sanitize -DLLAMA_SANITIZE_ADDRESS=ON -DLLAMA_SANITIZE_UNDEFINED=ON \
+  -DGGML_METAL=OFF -DLLAMA_BUILD_TESTS=OFF -DCMAKE_BUILD_TYPE=Debug
+cmake --build build-agent-engine-p7-cli-sanitize --parallel 8 --target llama-cli llama-server
+ASAN_OPTIONS=detect_leaks=0:abort_on_error=1 UBSAN_OPTIONS=halt_on_error=1 \
+  LLAMA_SERVER_BIN_PATH=$PWD/build-agent-engine-p7-cli-sanitize/bin/llama-server [même environnement] \
+  ./tools/server/tests/tests.sh unit/test_cli.py -q
+# TSan : -DLLAMA_SANITIZE_THREAD=ON (build-agent-engine-p7-cli-tsan), TSAN_OPTIONS=halt_on_error=1,
+#        LLAMA_CLI_BIN_PATH vers ce llama-cli
+# Profils locaux : commandes P5 (build-agent-engine-p3-local, build-agent-engine-core-shared)
+```
+
+## Consignes de reprise P8
+
+1. P7 est commité : vérifier `git status` (ajouts `tools/cli/cli-backend.h`, `cli-engine.*`, `tools/server/tests/unit/test_cli.py` ; suppression `tools/cli/cli-server.h`).
+2. Code mort laissé par le CLI : `server_context::get_response_reader()`, `server_task::cli/cli_prompt/cli_files` et la branche de tokenisation associée dans `engine-context.cpp`.
+3. Façades du tableau : forwarding headers `tools/server/server-*.h`, `server_context ctx_server` vide en multi-modèles, noms `server_*` privés, include dir privé exporté par `llama-engine` (utilisé par `server-models.cpp` et `cli-engine.cpp` pour `engine-options.h`).
+4. Vérifier qu’aucun header moteur ne tire `common_params`, `server-http.h` ou des types de tâches ; documenter l’interface finale avec un exemple compilé.

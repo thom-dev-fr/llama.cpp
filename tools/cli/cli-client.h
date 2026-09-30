@@ -1,14 +1,14 @@
 #pragma once
 
+#include "cli-backend.h"
+
 #include <functional>
 #include <string>
 
-// openai-like client for CLI
-struct cli_client {
+// openai-like client for CLI, used with --server-base
+struct cli_client : cli_backend {
     std::string server_base; // base url, for example "http://127.0.0.1:8080"
     std::string last_error;  // set when wait_health() fails
-
-    std::string model; // optional, set when the server has multiple models (router mode)
 
     // simple GET request, returns the raw response body
     // throws std::runtime_error on transport error or non-2xx status
@@ -30,4 +30,10 @@ struct cli_client {
     // poll /health until the server is ready to accept requests
     // returns false if is_aborted returned true or the server is unreachable
     bool wait_health(const std::function<bool()> & is_aborted);
+
+    std::string models() override;
+    std::string properties(const std::string & model) override;
+    std::string chat(const std::string & body,
+                     const std::function<bool()> & should_stop,
+                     const std::function<void(const std::string &)> & on_chunk) override;
 };

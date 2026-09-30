@@ -1,4 +1,6 @@
 #include "cli-context.h"
+#include "cli-client.h"
+#include "cli-engine.h"
 #include "cli-ui.h"
 
 #include "arg.h"
@@ -22,7 +24,8 @@ struct cli_context_impl {
     json pending_media = json::array(); // staged multimodal content parts
 };
 
-cli_context::cli_context(const common_params & params) : params(params), impl(new cli_context_impl()) {}
+cli_context::cli_context(const common_params & params, int argc, char ** argv)
+    : params(params), argc(argc), argv(argv), impl(new cli_context_impl()) {}
 
 cli_context::~cli_context() {
     shutdown();
@@ -102,9 +105,24 @@ bool cli_context::init() {
         while (!base.empty() && base.back() == '/') {
             base.pop_back();
         }
-        client.server_base = base;
+        auto client = std::make_unique<cli_client>();
+        client->server_base = base;
 
         spinner.emplace("Connecting to server at " + base);
+
+        bool healthy = false;
+        try {
+            healthy = client->wait_health(should_stop);
+        } catch (const std::exception & e) {
+            client->last_error = e.what();
+        }
+        if (!healthy) {
+            if (!should_stop()) {
+                ui::show_error(client->last_error);
+            }
+            return false;
+        }
+        backend = std::move(client);
     } else {
         if (params.model.path.empty() && params.model.url.empty() &&
                 params.model.hf_repo.empty() && params.model.docker_repo.empty()) {
@@ -118,53 +136,53 @@ bool cli_context::init() {
 
         spinner.emplace("\n\nLoading model...");
 
-        server.emplace();
-        if (!server->start(params)) {
-            ui::show_error("server start failed");
-            return false;
-        }
-        if (!server->wait_ready(should_stop)) {
+        // downloads replace the spinner with a progress line while they run
+        bool downloading = false;
+        auto on_download = [&](const cli_engine::download_progress & p) {
+            if (!ui::is_terminal() || p.total == 0) {
+                return;
+            }
+            if (!downloading) {
+                spinner.reset();
+                downloading = true;
+            }
+            constexpr double MiB = 1024.0 * 1024.0;
+            ui::show_progress(string_format("Downloading %zu file(s): %.1f / %.1f MiB (%zu%%)",
+                p.files, p.downloaded / MiB, p.total / MiB, (size_t) (100 * p.downloaded / p.total)));
+            if (p.downloaded >= p.total) {
+                downloading = false;
+                spinner.emplace("\nLoading model...");
+            }
+        };
+
+        auto local = std::make_unique<cli_engine>();
+        std::string error;
+        if (!local->load(params, argc, argv, should_stop, on_download, error)) {
             if (!should_stop()) {
-                ui::show_error("the server exited before becoming ready");
+                ui::show_error("failed to load the model", error);
             }
             return false;
         }
-        client.server_base = server->address();
+        backend = std::move(local);
     }
 
-    // for --server-base this is the main availability check; for a spawned
-    // server it is a cheap sanity check on top of the ready signal
-    auto is_aborted = [this]() {
-        return should_stop() || (server && !server->alive());
-    };
-    bool healthy = false;
+    spinner.reset();
     try {
-        healthy = client.wait_health(is_aborted);
-    } catch (const std::exception & e) {
-        client.last_error = e.what();
-    }
-    if (!healthy) {
-        if (!should_stop()) {
-            ui::show_error(client.last_error);
+        if (!list_and_ask_models()) {
+            return false;
         }
+    } catch (const common_json_error & e) {
+        ui::show_error(e.what());
+        if (use_external_server) {
+            ui::show_message("This might be caused by an incorrect server-base endpoint URL");
+        }
+        return false;
+    } catch (const std::exception & e) {
+        ui::show_error(e.what());
         return false;
     }
 
     if (use_external_server) {
-        spinner.reset();
-        try {
-            if (!list_and_ask_models()) {
-                return false;
-            }
-        } catch (const common_json_error & e) {
-            ui::show_error(e.what());
-            ui::show_message("This might be caused by an incorrect server-base endpoint URL");
-            return false;
-        } catch (const std::exception & e) {
-            ui::show_error(e.what());
-            return false;
-        }
-
         // restore the spinner for the next step
         spinner.emplace("Waiting for server...");
     }
@@ -184,7 +202,7 @@ bool cli_context::init() {
 
 void cli_context::fetch_server_props() {
     try {
-        json props = json::parse(client.get("/props"));
+        json props = json::parse(backend->properties(model));
         model_name = props.value("model_alias", "");
         if (model_name.empty()) {
             const std::string path = props.value("model_path", "");
@@ -207,7 +225,7 @@ void cli_context::fetch_server_props() {
 }
 
 bool cli_context::list_and_ask_models() {
-    json resp = json::parse(client.get("/v1/models"));
+    json resp = json::parse(backend->models());
     if (!resp.contains("data") || !resp.at("data").is_array()) {
         throw std::runtime_error("invalid response from /v1/models");
     }
@@ -234,10 +252,10 @@ bool cli_context::list_and_ask_models() {
         models_display.push_back(display);
     }
 
-    // only one model: use it without asking
+    // only one model (always the case for a local one): use it without asking
     if (models.size() == 1) {
         model_name = models[0];
-        client.model = model_name;
+        model = model_name;
         return true;
     }
 
@@ -261,7 +279,7 @@ bool cli_context::list_and_ask_models() {
             size_t idx = std::stoul(selection);
             if (idx > 0 && idx <= models.size()) {
                 model_name = models[idx - 1];
-                client.model = model_name;
+                model = model_name;
                 ui::show_message("Selected model: " + model_name);
                 break;
             }
@@ -354,15 +372,15 @@ bool cli_context::generate_completion(generated_content & content_out, cli_timin
         // in order to get timings even when we cancel mid-way
         {"timings_per_token", true},
     };
-    if (!client.model.empty()) {
-        body["model"] = client.model;
+    if (!model.empty()) {
+        body["model"] = model;
     }
 
     bool stream_error = false;
 
     ui::assistant_turn a;
 
-    std::string err = client.post_sse("/v1/chat/completions", body.dump(), should_stop, [&](const std::string & payload) {
+    std::string err = backend->chat(body.dump(), should_stop, [&](const std::string & payload) {
         json chunk = json::parse_no_throw(payload);
         if (chunk.is_discarded()) {
             return;
@@ -671,10 +689,8 @@ int cli_context::run() {
 }
 
 void cli_context::shutdown() {
-    if (server) {
-        server->stop();
-        server.reset();
-    }
+    // requests end and the local model is freed before the process exits
+    backend.reset();
     if (output_file) {
         output_file->close();
         output_file.reset();
