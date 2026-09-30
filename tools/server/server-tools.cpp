@@ -1755,43 +1755,33 @@ struct server_tool_get_info : server_tool {
     }
 };
 
-struct server_tool_stream_result : server_task_result {
-    std::string chunk;
-    bool done = false;
-    std::string error_msg;
-
-    json to_json() override {
-        if (!done) {
-            return {{"chunk", chunk}};
-        } else {
-            json result = {{"done", true}};
-            if (!error_msg.empty()) {
-                result["error"] = error_msg;
-            }
-            return result;
-        }
+void server_tool::channel::send(json item) {
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        items.push_back(std::move(item));
     }
-};
+    ready.notify_one();
+}
+
+json server_tool::channel::receive() {
+    std::unique_lock<std::mutex> lock(mutex);
+    ready.wait(lock, [this] { return !items.empty(); });
+    json item = std::move(items.front());
+    items.pop_front();
+    return item;
+}
 
 void server_tool::stream::push(const std::string & chunk) {
     if (chunk.empty()) return;
-    auto r = std::make_unique<server_tool_stream_result>();
-    r->id    = id;
-    r->chunk = chunk;
-    qr.send(std::move(r));
+    out.send({{"chunk", chunk}});
 }
 
 struct server_tools_res : server_http_res {
     std::thread worker;
-    server_response * qr = nullptr; // set only for streaming responses
-    int id = -1;
 
     ~server_tools_res() override {
         if (worker.joinable()) {
             worker.join();
-        }
-        if (qr) {
-            qr->remove_waiting_task_id(id);
         }
     }
 };
@@ -2115,41 +2105,30 @@ void server_tools::setup(const std::vector<std::string> & enabled_tools,
             server_tool & tool = find_tool(tools, tool_name, stream);
 
             if (stream) {
-                int id = res_id.fetch_add(1);
-                queue_res.add_waiting_task_id(id);
-                res->qr = &queue_res;
-                res->id = id;
+                auto out = std::make_shared<server_tool::channel>();
 
-                res->worker = std::thread([this, id, &req, &tool, params]() mutable {
-                    server_tool::stream st{queue_res, id, [&req]() {
+                res->worker = std::thread([out, &req, &tool, params]() mutable {
+                    server_tool::stream st{*out, [&req]() {
                         return !req.should_stop();
                     }};
 
-                    auto done = std::make_unique<server_tool_stream_result>();
+                    json done = {{"done", true}};
                     try {
                         tool.invoke(params, &st);
                     } catch (const std::exception & e) {
-                        done->error_msg = e.what();
+                        done["error"] = e.what();
                     } catch (...) {
-                        done->error_msg = "An unknown error occurred";
+                        done["error"] = "An unknown error occurred";
                     }
-                    done->id    = st.id;
-                    done->done  = true;
-                    st.qr.send(std::move(done));
+                    out->send(std::move(done));
                 });
 
                 res->content_type = "text/event-stream";
                 res->status = 200;
-                res->next   = [this, id](std::string & output) -> bool {
-                    auto result = queue_res.recv(id);
-                    auto * r = dynamic_cast<server_tool_stream_result *>(result.get());
-                    GGML_ASSERT(r != nullptr);
-                    output = "data: " + safe_json_to_str(r->to_json()) + "\n\n";
-                    if (r->done) {
-                        queue_res.remove_waiting_task_id(id);
-                        return false;
-                    }
-                    return true;
+                res->next   = [out](std::string & output) -> bool {
+                    json item = out->receive();
+                    output = "data: " + safe_json_to_str(item) + "\n\n";
+                    return !item.contains("done");
                 };
             } else {
                 json result = tool.invoke(params, nullptr);

@@ -154,9 +154,9 @@ event read_catalog(const catalog_sources & sources, std::vector<model_entry> & m
         common_preset under = ctx.load_from_map(COMMON_PRESET_DEFAULT_NAME, sources.defaults);
         for (const auto * shared : {&base, &under}) {
             for (const auto & [opt, value] : shared->options) {
-                const auto * scope = find_option_scope(option_key(opt));
+                const option_scope scope = find_option_scope(option_key(opt));
                 const std::string env = opt.env ? opt.env : ""; // not every option has a variable
-                if (!scope || *scope == option_scope::catalog || env == "LLAMA_ARG_MODEL" ||
+                if (scope == option_scope::unknown || scope == option_scope::catalog || env == "LLAMA_ARG_MODEL" ||
                     env == "LLAMA_ARG_MMPROJ" || env == "LLAMA_ARG_HF_REPO") {
                     // model identity and catalog composition are per model, as in llama-server
                     return {event_type::error, nullptr, "invalid_config",
@@ -190,12 +190,12 @@ event read_catalog(const catalog_sources & sources, std::vector<model_entry> & m
             std::map<std::string, std::string> options;
             for (const auto & [opt, value] : found.preset.options) {
                 const std::string key = option_key(opt);
-                const auto * scope = find_option_scope(key);
+                const option_scope scope = find_option_scope(key);
                 if (opt.env && std::string(opt.env) == COMMON_ARG_PRESET_LOAD_ON_STARTUP) {
                     entry.load_on_startup = common_arg_utils::is_truthy(value);
-                } else if (scope && *scope == option_scope::engine) {
+                } else if (scope == option_scope::engine) {
                     options[key] = value;
-                } else if (scope && *scope == option_scope::host) {
+                } else if (scope == option_scope::host) {
                     entry.host_options[key] = value; // e.g. stop-timeout, per-model HTTP settings
                 }
                 // other catalog options (alias, tags, models-*) are consumed here

@@ -93,6 +93,23 @@ cmake --build build --config Release
   - **Fedora / RHEL / Rocky / Alma:** `sudo dnf install openssl-devel`
   - **Arch / Manjaro:** `sudo pacman -S openssl`
 
+### Embeddable inference engine only
+
+`llama-engine` (header `include/llama-engine.h`) runs models in the calling process, without HTTP, UI or
+subprocess; `llama-server` and `llama-cli` are built on it. To build only the library and its tests:
+
+```bash
+cmake -B build-engine -DLLAMA_BUILD_ENGINE=ON -DLLAMA_BUILD_COMMON=OFF -DLLAMA_BUILD_TOOLS=OFF \
+      -DLLAMA_BUILD_EXAMPLES=OFF -DLLAMA_BUILD_SERVER=OFF -DLLAMA_BUILD_APP=OFF -DLLAMA_SUBPROCESS=OFF
+cmake --build build-engine --config Release
+```
+
+This profile has no network code: models are local files or already in the cache. Add
+`-DLLAMA_BUILD_COMMON_ACQUISITION=ON` to download remote models (`hf-repo`, `model-url`) through
+`cpp-httplib`. With `LLAMA_SUBPROCESS=OFF`, video input and the WebP fallback of `mtmd` (both through
+`ffmpeg`) are disabled. See the [API guide](design/embedded-inference-engine-api.md) and
+[examples/engine-simple](../examples/engine-simple).
+
 ## BLAS Build
 
 Building the program with BLAS support may lead to some performance improvements in prompt processing using batch sizes higher than 32 (the default is 512). Using BLAS doesn't affect the generation performance. There are currently several different BLAS implementations available for build and use:

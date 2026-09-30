@@ -1,5 +1,5 @@
 #pragma once
-#include "../../engine/engine-context.h"
+#include "engine-context.h"
 #include "engine-runtime.h"
 #include "server-http.h"
 
@@ -22,7 +22,8 @@ struct server_model_routing {
 };
 
 struct server_routes {
-    server_routes(const common_params & params, server_context & ctx_server);
+    // ctx_server is the single model, nullptr with several models (routing).
+    server_routes(const common_params & params, server_context * ctx_server);
 
     void init_routes();
 
@@ -80,9 +81,8 @@ private:
     std::unique_ptr<const server_context_meta> meta;
 
     const common_params & params;
-    server_context & ctx_server;
+    server_context * ctx_server;
 
-    server_queue & queue_tasks;
     std::unique_ptr<server_res_generator> create_response(bool bypass_sleep = false);
 
 };

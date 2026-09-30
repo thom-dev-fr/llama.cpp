@@ -23,7 +23,7 @@ int main(int argc, char ** argv) {
     params.sleep_idle_seconds = -1;
     server_context context;
     llama_engine::detail::apply_http_compat_limits(*context.runtime);
-    server_routes routes(params, context);
+    server_routes routes(params, &context);
     assert(context.load_model(params));
     routes.update_meta(context);
     std::atomic<int> task_id {-1};

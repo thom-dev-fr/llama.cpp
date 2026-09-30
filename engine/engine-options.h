@@ -11,13 +11,9 @@ struct common_download_remote;
 
 namespace llama_engine { namespace detail {
 
-// Owner of each named option (see the table in engine-options.cpp).
-enum class option_scope { engine, host, catalog };
-
 // Canonical key of a registry option: its last spelling without leading dashes.
+// Its owner is llama_engine::find_option_scope (see the table in engine-options.cpp).
 std::string option_key(const common_arg & opt);
-// nullptr when the option is not classified.
-const option_scope * find_option_scope(const std::string & key);
 
 // Model configuration -> common_params: llama-server defaults, typed fields,
 // options (engine scope only), common_params_finalize, apply_server_defaults.
@@ -38,9 +34,6 @@ void resolve_resources(common_params & params, common_download_callback * callba
 
 // Same loading configuration and limits (a model loaded with a must be reloaded for b otherwise).
 bool same_config(const config & a, const config & b);
-
-// Catalog id of a single-model configuration: model file name or repository.
-std::string model_name(const config & settings);
 
 // Whether this build includes network acquisition.
 bool has_acquisition();

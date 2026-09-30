@@ -11,8 +11,7 @@
 #include <unordered_set>
 #include <unordered_map>
 
-// struct for managing server tasks
-// in most cases, use server_response_reader to post new tasks and retrieve results
+// Task queue of one decoder: requests post tasks, the decoder thread runs them.
 struct server_queue {
 private:
     int id = 0;
@@ -160,24 +159,14 @@ private:
     void worker_stop();
 };
 
-// struct for managing server responses
-// in most cases, use server_response_reader to retrieve results
+// Delivery of decoder results to the requests that own the tasks.
 struct server_response {
 public:
     using sink_t = std::function<void(server_task_result_ptr)>;
 private:
-    bool running = true;
     std::unordered_map<int, sink_t> sinks;
     std::unordered_set<int> cancelling_sinks;
-
-    // for keeping track of all tasks waiting for the result
-    std::unordered_set<int> waiting_task_ids;
-
-    // the main result queue (using ptr for polymorphism)
-    std::vector<server_task_result_ptr> queue_results;
-
     std::mutex mutex_results;
-    std::condition_variable condition_results;
 
 public:
     // Direct bounded engine delivery. Sink registrations are admission leases:
@@ -186,80 +175,6 @@ public:
     void finish_sink(int id);
     void cancel_sinks(const std::unordered_set<int> & ids, server_queue & tasks);
 
-    // add the id_task to the list of tasks waiting for response
-    void add_waiting_task_id(int id_task);
-
-    void add_waiting_task_ids(const std::unordered_set<int> & id_tasks);
-
-    // when the request is finished, we can remove task associated with it
-    void remove_waiting_task_id(int id_task);
-
-    // remove multiple tasks from waiting list
-    void remove_waiting_task_ids(const std::unordered_set<int> & id_tasks);
-
-    // This function blocks the thread until there is a response for one of the id_tasks
-    server_task_result_ptr recv(const std::unordered_set<int> & id_tasks);
-
-    // same as recv(), but have timeout in seconds
-    // if timeout is reached, nullptr is returned
-    server_task_result_ptr recv_with_timeout(const std::unordered_set<int> & id_tasks, int timeout);
-
-    // single-task version of recv()
-    server_task_result_ptr recv(int id_task);
-
-    // Send a new result to a waiting id_task
+    // Passes a result to the sink of its task; results of unknown tasks are dropped.
     void send(server_task_result_ptr && result);
-
-    // broadcast a new result to all waiting tasks
-    // (used by router mode)
-    void broadcast(server_task_result_ptr && result);
-
-    // terminate the waiting loop
-    void terminate();
-};
-
-// RAII wrapper to make working with server_queue and server_response easier
-// it provides a generator-like API for server responses
-// support pooling connection state and aggregating multiple results
-struct server_response_reader {
-    std::unordered_set<int> id_tasks;
-    server_queue & queue_tasks;
-    server_response & queue_results;
-    size_t received_count = 0;
-    bool cancelled = false;
-    int polling_interval_seconds;
-
-    // tracking generation state and partial tool calls
-    // only used by streaming completions
-    std::vector<task_result_state> states;
-
-    // should_stop function will be called each polling_interval_seconds
-    server_response_reader(server_queue & queue_tasks, server_response & queue_results, int polling_interval_seconds)
-        : queue_tasks(queue_tasks), queue_results(queue_results), polling_interval_seconds(polling_interval_seconds) {}
-    ~server_response_reader() {
-        stop();
-    }
-
-    int get_new_id() {
-        return queue_tasks.get_new_id();
-    }
-
-    // if front = true, the task will be posted to the front of the queue (high priority)
-    void post_task(server_task && task, bool front = false);
-    void post_tasks(std::vector<server_task> && tasks, bool front = false);
-    bool has_next() const;
-
-    // return nullptr if should_stop() is true before receiving a result
-    // note: if one error is received, it will stop further processing and return error result
-    server_task_result_ptr next(const std::function<bool()> & should_stop);
-
-    struct batch_response {
-        bool is_terminated = false; // if true, indicates that processing was stopped before all results were received
-        std::vector<server_task_result_ptr> results;
-        server_task_result_ptr error; // nullptr if no error
-    };
-    // aggregate multiple results
-    batch_response wait_for_all(const std::function<bool()> & should_stop);
-
-    void stop();
 };

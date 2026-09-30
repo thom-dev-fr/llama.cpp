@@ -1,6 +1,17 @@
 # Moteur d’inférence embarquable — synthèse du design
 
-Statut : arbitrages validés pendant l’entretien ; référence pour le plan d’implémentation demandé ensuite. Les noms et signatures illustratifs ci-dessous ne constituent pas encore un header public.
+Statut : arbitrages validés pendant l’entretien ; implémentés par le plan (P0–P8). Les noms et signatures illustratifs ci-dessous ont précédé le header ; l’interface retenue est décrite dans le [guide API](embedded-inference-engine-api.md).
+
+Correspondance avec le code :
+
+| Élément du design | Réalisation |
+| --- | --- |
+| Interface publique | `include/llama-engine.h`, cible CMake `llama-engine` (namespace `llama_engine`) ; exemple compilé `examples/engine-simple` |
+| Moteur (décodeur, opérations JSON, catalogue, cycle de vie) | `engine/` : `llama-engine.cpp`, `engine-context.*` (boucle d’un modèle), `engine-operations.*`, `engine-models.*` et `engine-scheduler.h` (multi-modèles), `engine-catalog.*` (sources), `engine-options.*` (configuration), `server-{task,queue,chat,schema,common}.*` (types hérités du serveur) |
+| Interface privée des consommateurs internes | cible `llama-engine-internal`, non installée (adapter HTTP du serveur, tests internes) |
+| Utilitaires locaux / acquisition réseau optionnelle | `llama-common-local`, `llama-common-options` / `llama-common-acquisition` (`LLAMA_BUILD_COMMON_ACQUISITION`) |
+| Consommateur serveur (HTTP, SSE, reprise, outils, MCP, UI) | `tools/server/` : `server-context.*` (routes), `server-models.*` (mode multi-modèles), `server-stream.*`, `server-tools.*`, `server-mcp.*` |
+| Consommateur CLI | `tools/cli/cli-engine.*` (local, API publique), `cli-client.*` (`--server-base`, HTTP) |
 
 Références : [vocabulaire](../../CONTEXT.md), [décision architecturale](../adr/0001-embedded-inference-engine.md).
 

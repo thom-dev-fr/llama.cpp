@@ -15,7 +15,7 @@
 #include <tuple>
 
 using llama_engine::detail::model_manager;
-using llama_engine::detail::option_scope;
+using llama_engine::option_scope;
 
 namespace {
 
@@ -52,8 +52,8 @@ std::map<std::string, std::string> command_line_options(int argc, char ** argv) 
     }
     for (const auto & [opt, value] : base.options) {
         const std::string key = llama_engine::detail::option_key(opt);
-        const option_scope * scope = llama_engine::detail::find_option_scope(key);
-        if (!scope || *scope == option_scope::catalog) {
+        const option_scope scope = llama_engine::find_option_scope(key);
+        if (scope == option_scope::unknown || scope == option_scope::catalog) {
             SRV_WRN("option '%s' of the command line is not applied to each model\n", key.c_str());
             continue;
         }
@@ -68,8 +68,7 @@ std::map<std::string, std::string> environment_options() {
     std::map<std::string, std::string> out;
     for (const auto & [opt, value] : preset_context().load_from_env().options) {
         const std::string key = llama_engine::detail::option_key(opt);
-        const option_scope * scope = llama_engine::detail::find_option_scope(key);
-        if (scope && *scope == option_scope::engine && !names_a_model(key)) {
+        if (llama_engine::find_option_scope(key) == option_scope::engine && !names_a_model(key)) {
             out[key] = value;
         }
     }

@@ -131,7 +131,7 @@ option(LLAMA_BUILD_COMMON_LOCAL "llama: build local inference utilities without 
 option(LLAMA_BUILD_COMMON_ACQUISITION "llama: build optional model acquisition without executable utilities" OFF)
 
 # extra artifacts
-option(LLAMA_BUILD_ENGINE    "llama: build transport-independent inference components" OFF)
+option(LLAMA_BUILD_ENGINE    "llama: build the embeddable inference engine (llama-engine.h)" OFF)
 option(LLAMA_BUILD_MTMD      "llama: build tools/mtmd library standalone" OFF)
 option(LLAMA_BUILD_TESTS     "llama: build tests"                                                                ${LLAMA_STANDALONE})
 option(LLAMA_BUILD_TOOLS     "llama: build tools"                                                                ${LLAMA_STANDALONE})
@@ -146,7 +146,7 @@ option(LLAMA_TESTS_INSTALL "llama: install tests" ON)
 
 # 3rd party libs
 option(LLAMA_OPENSSL    "llama: use openssl to support HTTPS" ON)
-option(LLAMA_SUBPROCESS "llama-common: use subprocess, required by server tools and server router mode" ${LLAMA_SUBPROCESS_DEFAULT})
+option(LLAMA_SUBPROCESS "llama-common: use subprocess, required by server tools, MCP servers and video input" ${LLAMA_SUBPROCESS_DEFAULT})
 option(LLAMA_LLGUIDANCE "llama-common: include LLGuidance library for structured output in common utils" OFF)
 
 

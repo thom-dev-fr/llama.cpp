@@ -1,12 +1,25 @@
-# API C++ du moteur — mono-modèle P3, multi-modèles P4, catalogue et configuration P5
+# API C++ du moteur d’inférence embarquable
 
-L’interface expérimentale est `include/llama-engine.h`, dans le namespace
-`llama_engine`. Lier `llama-engine` suffit dans le graphe CMake du dépôt ; le
-header public utilise `nlohmann::ordered_json` (alias `llama_engine::json`), fourni par
-la cible `vendor::nlohmann`, afin de conserver l’ordre natif des champs.
-Aucune stabilité ABI ni installation autonome complète n’est promise pendant cette extraction.
-Les consommateurs compilés sont `tests/test-engine.cpp`, `test-engine-operations.cpp`, `test-engine-fixtures.cpp`,
-`test-engine-options.cpp`, `test-engine-sources.cpp` et `test-engine-acquisition.cpp`.
+L’interface est `include/llama-engine.h`, dans le namespace `llama_engine`. Elle
+est expérimentale : aucune stabilité ABI n’est promise. Lier la cible CMake
+`llama-engine` suffit ; elle n’expose que ce header et `nlohmann::ordered_json`
+(alias `llama_engine::json`, cible `vendor::nlohmann`, qui conserve l’ordre natif
+des champs). Ni `common_params`, ni types de tâches, ni header serveur/CLI/HTTP
+ne sont visibles : `tests/test-engine.cpp` échoue à la compilation si un header
+privé devient accessible.
+
+- **Exemple compilé** : [`examples/engine-simple/engine-simple.cpp`](../../examples/engine-simple/engine-simple.cpp)
+  (chat streamé puis requête complète), construit aussi par les tests sous le nom
+  `test-engine-example` dans tous les profils, y compris sans HTTP.
+- **Consommateurs** : `llama-cli` en mode local (API publique uniquement,
+  `tools/cli/cli-engine.cpp`) ; `llama-server`, qui lie en plus
+  `llama-engine-internal` (voir « Interface interne ») ; les tests publics
+  `test-engine`, `test-engine-operations`, `test-engine-fixtures`,
+  `test-engine-catalog`, `test-engine-sources` et `test-engine-acquisition`.
+- **Build** : `LLAMA_BUILD_ENGINE=ON` ; acquisition réseau optionnelle avec
+  `LLAMA_BUILD_COMMON_ACQUISITION=ON` (commandes dans [docs/build.md](../build.md)).
+
+Exemple minimal :
 
 ```cpp
 #include "llama-engine.h"
@@ -65,6 +78,14 @@ les alias de paramètres et l’ordonnanceur sont ceux du chemin natif existant.
   batch des embeddings, pool KV par slot, alias par défaut). Ressources :
   `model`, `hf-repo`, `hf-file`, `model-url`, `docker-repo`, `hf-token`, `offline`,
   `mmproj*`, modèles de brouillon.
+
+`find_option_scope(name)` indique à qui appartient une option, quelle que soit
+son écriture (`ctx-size`, `--ctx-size`, `no-warmup`, `LLAMA_ARG_CTX_SIZE`) :
+`engine` (acceptée par `config::options`), `host`, `catalog` ou `unknown`. Un
+hôte qui lit une ligne de commande ou un preset complet ne transmet ainsi au
+moteur que les options du modèle (c’est ce que fait `llama-cli`). `model_id(config)`
+donne l’identifiant que `create()` attribue au modèle dans le catalogue (nom du
+fichier ou du dépôt).
 
 `config::from_options(options)` ignore les champs typés : le modèle est configuré
 exactement comme par la ligne de commande de `llama-server` (c’est ce que font
@@ -171,7 +192,8 @@ propres offsets, rétention et contrôle d’accès.
   le décodeur. Une annulation est coalescée par tâche. Les tâches différées ne
   créent pas de nouvelles réservations.
 - `max_events` (256) borne la file de **résultats bruts**, avant conversion JSON.
-  Aucune opération publique ne traverse la file de résultats legacy non bornée. Un
+  Le décodeur livre chaque résultat directement à la file de sa requête ; il n’existe
+  pas d’autre file de résultats. Un
   dépassement termine la requête avec `queue_full`, annule son travail et
   conserve son issue dans un emplacement séparé de la file. Les autres
   requêtes continuent. `max_request_bytes` (16 MiB) borne le JSON sérialisé et les noms/octets des pièces jointes.
@@ -199,13 +221,13 @@ Les erreurs du décodeur conservent leurs détails JSON natifs. `cancelled` et
 `stopped` accompagnent une issue d’annulation. Les erreurs fatales natives des
 backends restent soumises aux limites du design.
 
-## Plusieurs modèles dans le processus (P4)
+## Plusieurs modèles dans le processus
 
 `engine::create_catalog(catalog_config, error)` crée un moteur sans rien charger.
 Chaque `model_entry` a un identifiant, des alias, des tags informatifs et sa
 propre `config` (chargement et bornes par modèle). Les identifiants et alias
 doivent être uniques entre eux (`invalid_config` sinon). Un catalogue vide est
-valide : des modèles peuvent être ajoutés ensuite (P5). `engine::create(config)`
+valide : des modèles peuvent être ajoutés ensuite. `engine::create(config)`
 reste le raccourci mono-modèle : même gestionnaire avec une seule entrée,
 chargée avant le retour, et le champ `model` des requêtes n’est pas utilisé.
 
@@ -225,7 +247,7 @@ engine->unload("small");                      // bloquant : admissions fermées,
   Absent : `invalid_request` ; inconnu : `model_not_found` ; `autoload=false`
   et modèle ni chargé ni en chargement : `model_not_loaded`.
 - **États** (`catalog()`, événements) : `unloaded`, `loading`, `loaded`,
-  `sleeping`, `unloading`, `failed` (+ `error`), `downloading` (P5). Présence au catalogue,
+  `sleeping`, `unloading`, `failed` (+ `error`), `downloading`. Présence au catalogue,
   résidence (`status`), attentes (`waiting`) et requêtes admises (`active`)
   sont distinctes. Un échec de chargement est récupérable : la demande suivante
   relance le chargement.
@@ -233,7 +255,7 @@ engine->unload("small");                      // bloquant : admissions fermées,
   chargés, endormis et en cours de déchargement. Seul un modèle sans requête
   admise ni attente peut être évincé, le moins récemment utilisé d’abord. La
   politique (`engine/engine-scheduler.h`) est celle de l’ancien routeur de
-  processus ; depuis P6, le mode multi-modèles de `llama-server` est ce moteur.
+  processus ; le mode multi-modèles de `llama-server` est ce moteur.
 - **Attente** : une requête pour un modèle non résident est mise en file et le
   handle est rendu immédiatement ; `cancel()`/destruction la retire. Les demandes
   pour un même modèle partagent une entrée et **un seul chargement**. Ordre de
@@ -279,7 +301,7 @@ déchargements, jointures), un thread de chargement par chargement en cours
 (borné par `max_loaded`), et pour chaque modèle résident son décodeur et son
 worker. Aucun thread par requête.
 
-## Sources du catalogue, rechargement et acquisition (P5)
+## Sources du catalogue, rechargement et acquisition
 
 `read_catalog(catalog_sources, models)` lit uniquement les sources demandées :
 cache Hugging Face (`cache = true`, chemin de `LLAMA_CACHE`/`HF_HUB_CACHE`/…),
@@ -344,18 +366,34 @@ engine->remove("ggml-org/model:Q4_K_M");        // cache uniquement
 Téléchargements et chargements partagent l’annulation coopérative : aucun
 sous-processus. Un thread par téléchargement en cours, joint par l’entretien.
 
-## Ressources globales et transition
+## Ressources globales
 
 L’initialisation des backends est partagée par `std::call_once` entre moteurs et
 serveur. Registres/tables globaux restent à durée de vie processus ; détruire un
 moteur ne les libère pas sous un autre. Ne pas appeler `llama_backend_free()`
 manuellement pendant qu’un moteur ou un autre consommateur de llama fonctionne.
 Le moteur ne configure ni signaux, ni priorité processus, ni NUMA global, ni
-callback global de logging. Le serveur conserve ses choix explicites d’hôte.
+callback global de logging : les options correspondantes sont de portée `host`
+et restent aux exécutables.
 
-`engine/engine-context.*` possède l’unique boucle extraite. Son nom interne
-historique `server_context`, ses accesseurs et son `start_loop()` de compatibilité
-servent encore l’initialisation serveur et les consommateurs legacy ; ce dernier
-démarre/attend le thread possédé, sans décoder sur le thread appelant. Aucun handler
-mono-modèle n’utilise le lecteur legacy. Ces façades restent à nettoyer en P8 après
-les bascules routeur et CLI (P6/P7).
+## Interface interne (serveur et tests)
+
+`llama-engine-internal` (cible CMake `INTERFACE`, non installée) donne accès aux
+headers privés de `engine/`. Elle sert uniquement :
+
+- à l’adapter HTTP de `llama-server`, qui lit les résultats natifs
+  (`detail::request_state::read_native`) pour les sérialiser octet pour octet
+  comme avant le moteur, applique `detail::apply_http_compat_limits` et pilote
+  le catalogue par `detail::model_manager` (routes `/models`, SSE, sélection par
+  requête) ;
+- aux tests des courses et politiques internes (`test-engine-lifecycle`,
+  `test-engine-models`, `test-engine-events`, `test-engine-options`,
+  `test-engine-transport`, `test-engine-replay`, `test-chat`).
+
+Ce n’est pas une seconde interface : chaque opération n’a qu’une
+implémentation, que l’API publique et le serveur appellent. Les types privés
+gardent les noms `server_*` hérités de `llama-server` (`server_context` pour la
+boucle d’un modèle dans `engine/engine-context.*`, `server_task`, `server_queue`,
+…) pour que les évolutions amont du serveur continuent de s’y appliquer. La
+boucle d’un modèle tourne sur un thread possédé par le moteur (`start()`,
+`join()`, `terminate()`) ; aucun appelant ne fournit de boucle de décodage.

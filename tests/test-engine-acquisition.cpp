@@ -5,13 +5,13 @@
 // endpoint (no Internet): download with progress, a real load of the result,
 // cancellation with cleanup, failure, removal and the catalog around them.
 #include "llama-engine.h"
-#include "common.h"
 
 #include <cpp-httplib/httplib.h>
 
 #include <atomic>
 #include <cassert>
 #include <chrono>
+#include <cstdlib>
 #include <condition_variable>
 #include <filesystem>
 #include <fstream>
@@ -21,6 +21,15 @@
 #include <set>
 #include <string>
 #include <thread>
+
+// the engine reads the cache location and the endpoint from the environment
+static void set_env(const char * name, const std::string & value) {
+#ifdef _WIN32
+    _putenv_s(name, value.c_str());
+#else
+    setenv(name, value.c_str(), 1);
+#endif
+}
 
 using namespace llama_engine;
 using namespace std::chrono_literals;
@@ -58,7 +67,7 @@ int main(int argc, char ** argv) {
     const auto id = std::chrono::steady_clock::now().time_since_epoch().count();
     const fs::path root = fs::temp_directory_path() / ("test-engine-acquisition-" + std::to_string(id));
     const fs::path cache = root / "hub";
-    common_set_env("LLAMA_CACHE", cache.string());
+    set_env("LLAMA_CACHE", cache.string());
 
     const std::string commit(40, 'a');
     std::mutex gate_mutex;
@@ -101,7 +110,7 @@ int main(int argc, char ** argv) {
     assert(port > 0);
     std::thread worker([&] { server.listen_after_bind(); });
     server.wait_until_ready();
-    common_set_env("MODEL_ENDPOINT", "http://127.0.0.1:" + std::to_string(port) + "/");
+    set_env("MODEL_ENDPOINT", "http://127.0.0.1:" + std::to_string(port) + "/");
 
     catalog_config settings;
     settings.sources = catalog_sources{};

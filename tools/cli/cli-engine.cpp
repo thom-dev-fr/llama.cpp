@@ -1,6 +1,5 @@
 #include "cli-engine.h"
 
-#include "engine-options.h" // option scopes: which options configure the model
 #include "preset.h"
 
 #include <chrono>
@@ -31,10 +30,10 @@ static std::map<std::string, std::string> model_options(const common_params & pa
 
     std::map<std::string, std::string> out;
     for (const auto & [opt, value] : preset.options) {
-        const std::string key = llama_engine::detail::option_key(opt);
-        const auto * scope = llama_engine::detail::find_option_scope(key);
-        if (scope && *scope == llama_engine::detail::option_scope::engine) {
-            out[key] = value;
+        // the last spelling, as in preset files
+        const std::string & name = opt.args.back();
+        if (llama_engine::find_option_scope(name) == llama_engine::option_scope::engine) {
+            out[name.substr(name.find_first_not_of('-'))] = value;
         }
     }
     // the engine starts from llama-server's defaults, whose number of slots is automatic
@@ -52,7 +51,7 @@ bool cli_engine::load(const common_params & params, int argc, char ** argv,
         // as llama-server: no limit on buffered events or request size (the history holds media)
         settings.max_events        = std::numeric_limits<size_t>::max();
         settings.max_request_bytes = std::numeric_limits<size_t>::max();
-        model = llama_engine::detail::model_name(settings);
+        model = llama_engine::model_id(settings);
         catalog.models.emplace_back(model, std::vector<std::string>{}, std::vector<std::string>{}, settings);
     } catch (const std::exception & e) {
         error = e.what();

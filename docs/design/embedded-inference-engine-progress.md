@@ -8,6 +8,7 @@
 - **P4 revérifié puis P5 implémenté le 29 septembre 2026** (section P5) : configuration complète par options nommées, sources de catalogue partagées avec le routeur, rechargement, acquisition optionnelle sans sous-processus. **P5 commité dans `756173951`, arbre propre. Prochaine étape : P6.** Le drop complet P0–P9 n’est pas terminé.
 - **P6 implémenté le 29 septembre 2026** (section P6) : le mode multi-modèles de `llama-server` utilise le catalogue du moteur dans le processus ; routeur/proxy/enfants et `server-process.*` supprimés. **Commité (message « engine : run llama-server multi-model mode in process »). Prochaine étape : P7 (CLI local).**
 - **P7 implémenté le 30 septembre 2026** (section P7) : le CLI local charge son modèle dans le processus par l’API publique du moteur (catalogue d’un modèle, téléchargements `-hf` par l’acquisition partagée) ; `cli-server.h`, le serveur loopback, l’attente `/health` et les points d’entrée `llama_server(params, 0, nullptr)`/`llama_server_terminate` sont supprimés ; `llama-cli-impl` ne dépend plus de `llama-server-impl`. `--server-base` reste un client HTTP. **Commité (message « engine : run llama-cli local mode in process »). Prochaine étape : P8.**
+- **P8 implémenté le 30 septembre 2026** (section P8) : chemins transitoires supprimés (lecteur legacy, branche CLI du décodeur, file de résultats « waiting ids », headers de compatibilité, `start_loop()`, `server_context` vide du mode multi-modèles), interface publique de `llama-engine` limitée à `include/llama-engine.h` (+ `vendor::nlohmann`), interface interne explicite `llama-engine-internal` pour le serveur et les tests internes, CLI sur l’API publique seule, exemple compilé `examples/engine-simple`, documentation finale. **Commité (message « engine : remove transitional paths and finish the separation »).** Tableau des façades vide. **Prochaine étape : P9 (qualification finale).**
 - **Commits** : correctif de revue P2 `8dd3003e9`, P3 `675bf4fd0`, P4 `825f7f3b0`, P5 `756173951`. Arbre propre après P4 ; revalidation après commit ci-dessous (« P4 — Revalidation après commit »).
 - P0/P1 : inventaire, références et graphe recontrôlés ; 16/16 tests locaux dans chaque profil et 9/9 tests C++ ciblés repassés avant P2. Les réserves de performance et capacités consignées à P1 restent ouvertes.
 - P2 : `include/llama-engine.h`, décodeur unique dans `engine/`, handlers `/completion` et `/completions` migrés. Voir la section P2 et [le guide API](embedded-inference-engine-api.md). CLI local et routeur conservent leurs chemins legacy jusqu’à P6/P7.
@@ -369,22 +370,25 @@ RSS maximale CPU 90 914 816, Metal 93 274 112 octets. La baisse CPU agrégée vs
 
 ## Façades temporaires et dette de migration
 
-| Élément | Rôle actuel | Échéance |
-| --- | --- | --- |
-| `llama-common` | Agrégat args/presets/subprocess qui lie local + acquisition ; pas de copies de code | Les autres outils peuvent le conserver. **P7** : le CLI ne l’utilise plus que pour argv, console et le client `--server-base` ; son inférence passe par `llama-engine` |
-| `engine/engine-options.h` inclus par `server-models.cpp` et `cli-engine.cpp` | Portée des options (moteur/hôte/catalogue) pour filtrer la ligne de commande ; en-tête privé exporté | P8 : exposer la classification ou garder ce détail documenté |
-| `server_context::get_response_reader()`, `server_task::cli/cli_prompt/cli_files` | Restes du premier CLI dans le processus ; **aucun appelant** (le drapeau `cli` n’est jamais positionné) | P8 (code mort) |
-| `tools/server/server-{common,chat,task,queue,schema}.h` | Cinq includes de compatibilité vers engine, zéro implémentation | P8 |
-| Noms internes server_* et include dirs privés exportés temporairement par llama-engine | Adapter existant et tests internes utilisent encore les types historiques ; API publique P2 disponible séparément | Migration P3, nettoyage P8 |
-| `server-process.*` et routeur/proxy enfants | **Supprimés P6** ; `server_http_proxy` déplacé dans `server-http-proxy.*` pour le seul proxy CORS de l’UI | — |
-| `tools/server/server-context.cpp` et accesseurs privés `engine/engine-context.h` | Handlers restants, snapshots référencés et lecteurs legacy ; décodeur extrait et natif migré à P2 | P3/P8 |
-| `server-task.cpp::to_metrics`, champs legacy SSE/config UI/HTTP | Restes de responsabilités à séparer sémantiquement ; pas de dépendance réseau nécessaire dans le profil local | P3/P6/P8 |
-| `download.cpp` helpers cache/sélection, `arg.cpp` résolution, `preset.cpp` cascades | Réutilisés, pas encore disponibles comme catalogue local autonome | P5 ; auditer avant intégration de chargement P2 |
-| `server_lru_sched`, `ensure_model_ready`, phase 2 de `load_models`, `add_model`, enfant de téléchargement, `server_task_result_router` | **Supprimés P6** : le serveur utilise `model_manager` (file, LRU, rechargement, téléchargement) | — |
-| `server_context ctx_server` construit en mode multi-modèles | Objet vide (jamais chargé) : `server_routes` le référence encore pour le mode mono | P8 |
-| Surcharges `common_models_handler_init/apply` et `common_download_*` sans transport (`arg-parse.cpp`, `download.cpp`) | API historique des exécutables, déléguant aux versions à transport explicite ; pas une seconde implémentation | Conservées (outils hors périmètre) |
+**Aucune façade temporaire restante depuis P8.** Historique et sort final :
 
-Aucune façade appelant le serveur depuis un moteur n’a été ajoutée. Un seul exemplaire de chaque algorithme extrait. Les suppressions `.cpp` dans tools/server sont des **déplacements vers engine non encore suivis par Git**, pas des fonctionnalités supprimées.
+| Élément | Sort final |
+| --- | --- |
+| `llama-common` | Agrégat conservé pour les autres outils (hors périmètre) ; le CLI ne l’utilise que pour argv, console et le client `--server-base`. Pas une façade d’inférence |
+| `engine/engine-options.h` dans `server-models.cpp`/`cli-engine.cpp` | **P8** : classification publique `llama_engine::find_option_scope` + `model_id` ; le CLI n’inclut plus aucun header privé. Le serveur garde `detail::option_key`/`apply_server_defaults` par `llama-engine-internal` |
+| `server_context::get_response_reader()`, `server_task::cli/cli_prompt/cli_files`, `tokenize_cli_input` | **Supprimés P8** |
+| `server_response_reader`, file « waiting ids » de `server_response` (`recv*`, `broadcast`, `terminate`), `server_task_result::clone` | **Supprimés P8** ; `server_response` ne livre plus qu’aux sinks bornés des requêtes. Les outils HTTP, seuls utilisateurs restants de la file, ont leur propre canal (`server_tool::channel`) |
+| `tools/server/server-{common,chat,task,queue,schema}.h` | **Supprimés P8** |
+| Include dir privé exporté PUBLIC par `llama-engine` | **P8** : `llama-engine` n’exporte que `include/` et nlohmann ; `llama-engine-internal` (INTERFACE, non installée) pour le serveur et les tests internes |
+| Noms internes `server_*` et fichiers `engine/server-*.cpp` | **Décision P8 : conservés** (noms amont du serveur, pour appliquer ses évolutions). Ce ne sont pas des façades : une seule implémentation, appelée par l’API publique et par le serveur |
+| `server_context::start_loop()` | **Remplacé P8** par `start()` + `join()` explicites (le thread reste possédé par le moteur) ; états `SERVER_STATE_DOWNLOADING`, `server_state_{to,from}_str` inutilisés supprimés |
+| `server_context ctx_server` vide en mode multi-modèles | **Supprimé P8** : construit seulement en mode mono-modèle ; `server_routes` reçoit `nullptr` avec `routing` |
+| `server-process.*`, routeur/proxy enfants, `server_lru_sched`, `ensure_model_ready`, `add_model`, enfant de téléchargement, `server_task_result_router` | Supprimés P6 |
+| `download.cpp` helpers, `arg.cpp` résolution, `preset.cpp` cascades | Extraits P5 (`llama-common-local`/`-options`) |
+| Surcharges `common_models_handler_*`/`common_download_*` sans transport | API historique des exécutables hors périmètre, déléguant aux versions à transport explicite ; pas une seconde implémentation |
+| Champs `sse_ping_interval` (requête) et `ui_settings` (propriétés) dans le moteur | Données des contrats JSON existants (schéma de requête, `/props`), sans SSE ni UI dans le moteur ; conservés |
+
+Aucune façade appelant le serveur depuis un moteur n’a été ajoutée. Un seul exemplaire de chaque algorithme extrait.
 
 ## P2 — Tranche verticale mono-modèle finalisée
 
@@ -1073,3 +1077,87 @@ ASAN_OPTIONS=detect_leaks=0:abort_on_error=1 UBSAN_OPTIONS=halt_on_error=1 \
 2. Code mort laissé par le CLI : `server_context::get_response_reader()`, `server_task::cli/cli_prompt/cli_files` et la branche de tokenisation associée dans `engine-context.cpp`.
 3. Façades du tableau : forwarding headers `tools/server/server-*.h`, `server_context ctx_server` vide en multi-modèles, noms `server_*` privés, include dir privé exporté par `llama-engine` (utilisé par `server-models.cpp` et `cli-engine.cpp` pour `engine-options.h`).
 4. Vérifier qu’aucun header moteur ne tire `common_params`, `server-http.h` ou des types de tâches ; documenter l’interface finale avec un exemple compilé.
+
+## P8 — Chemins transitoires supprimés, séparation terminée
+
+### Vérification préalable
+
+Arbre au commit P7 `1c0c5ae7c`, propre. Consignes de reprise P8 suivies ; plan P8 relu (suppression des façades, headers moteur, tests, documentation).
+
+### Implémentation
+
+- **Code mort supprimé** : `server_context::get_response_reader()`, `server_response_reader` (déclaration et implémentation), `server_task::cli/cli_prompt/cli_files` et `tokenize_cli_input` du décodeur, `server_task_result::clone`, la file « waiting ids » de `server_response` (`add/remove_waiting_task_id(s)`, `recv`, `recv_with_timeout`, `broadcast`, `terminate`). `server_response` ne fait plus que livrer au sink de la requête propriétaire ; un résultat sans sink est ignoré (comme avant, faute d’attente enregistrée).
+- **Outils exécutés hors des types du moteur** : `/tools` en streaming utilisait la file de résultats du moteur comme boîte aux lettres. Remplacée par `server_tool::channel` (mutex + file de JSON) dans `server-tools.*` ; mêmes événements SSE (`{"chunk"}`, puis `{"done", "error"?}`). `server-tools.h` n’inclut plus `server-queue.h`.
+- **Headers de compatibilité** `tools/server/server-{common,chat,task,queue,schema}.h` supprimés.
+- **Interface publique limitée** (`engine/CMakeLists.txt`) : `llama-engine` n’exporte que `include/` (BUILD_INTERFACE) et `vendor::nlohmann` ; `llama-common-local`, `llama-common-options`, `mtmd`, threads deviennent PRIVATE. Nouvelle cible **`llama-engine-internal`** (INTERFACE, non installée) : headers de `engine/` et leurs dépendances, pour l’adapter HTTP (`server-context`) et les tests internes (`lifecycle`, `models`, `events`, `options`, `chat`, `transport`/`replay` via `server-context`). `test-engine.cpp` échoue à la **compilation** si `engine-context.h`, `server-task.h`, `common.h`, `server-http.h`, `cli-context.h` ou `httplib.h` deviennent accessibles.
+- **API publique ajoutée** (besoins du CLI, sans header privé) : `enum class option_scope { engine, host, catalog, unknown }`, `find_option_scope(name)` (toutes les écritures : tirets, forme négative, `LLAMA_ARG_*`) et `model_id(config)` (identifiant donné par `create()`). `detail::find_option_scope`/`detail::model_name` supprimés (une seule implémentation). `cli-engine.cpp` n’inclut plus que `llama-engine.h` et `preset.h`.
+- **Serveur** : `server_context` construit uniquement en mode mono-modèle (`std::unique_ptr`), `server_routes(params, server_context *)` (`nullptr` avec `routing`) ; `server_res_generator` ne consulte la file de sommeil que s’il y a un modèle unique. `start_loop()` remplacé par `start()` (après `update_meta`) et `join()` (attente de l’arrêt) ; états de modèle inutilisés supprimés.
+- **Tests publics indépendants de `common`** : `test-engine-sources` et `test-engine-acquisition` n’incluent plus `common.h` (`setenv` local) et ne lient que `llama-engine` (+ `cpp-httplib` pour le serveur de test). Corrige aussi l’avertissement d’édition de liens « duplicate libraries » apparu dans le profil statique quand ils liaient `llama-common-local` explicitement.
+- **Exemple compilé** : `examples/engine-simple/engine-simple.cpp` (`llama-engine-simple`, chat streamé puis `tokenize` complet), construit aussi comme `test-engine-example` dans tous les profils de tests, lié au seul `llama-engine`.
+- **Documentation** : guide API réécrit comme interface finale (lien de la cible, exemple, `find_option_scope`/`model_id`, interface interne, ressources globales ; étiquettes d’étapes retirées) ; design relié aux fichiers finalement retenus (tableau de correspondance) ; README-dev serveur (architecture, graphe, composants, sommeil sur le thread du décodeur, reprise sans lecteur legacy, décision sur les noms `server_*`) ; `docs/build.md` (profil moteur seul, acquisition optionnelle, vidéo/WebP sans subprocess) ; descriptions CMake `LLAMA_BUILD_ENGINE` et `LLAMA_SUBPROCESS` (le mode routeur ne requiert plus de subprocess).
+
+### Différences de compatibilité
+
+- Aucune différence observable par HTTP ni par le CLI (suite HTTP identique à P7).
+- Consommateurs CMake **dans le dépôt** de `llama-engine` : ils ne reçoivent plus transitivement les headers privés, `common` ni `mtmd` ; lier `llama-engine-internal` ou la cible utilitaire voulue. Pas de consommateur externe connu (ABI non promise).
+
+### Vérification des headers moteur (critère du plan)
+
+`include/llama-engine.h` n’inclut que la STL et `nlohmann/json.hpp` : ni `common_params`, ni types de tâches, ni `server-http.h`, ni header CLI/UI (garde de compilation dans `test-engine.cpp`, include paths des consommateurs publics : `include/` et `vendor/` seulement). Aucun fichier de `engine/` n’inclut de header de `tools/server` ou `tools/cli`, `httplib` ou `subproc`. Les headers **privés** du moteur utilisent `common_params`/`server_task` par construction : ils ne sont accessibles que par `llama-engine-internal`.
+
+### Validation réellement exécutée
+
+| Vérification | Résultat |
+| --- | --- |
+| Build serveur/CLI/app/exemple + tests, profil complet (partagé) | **PASS**, 0 warning (`p8-build-final.log`) ; première tentative **FAIL** (constructeur `server_routes` dans `test-engine-transport`), corrigée |
+| C++ ciblé (moteur, exemple, chat, arg-parser, model-resolution, acquisition, hf-cache, schema, sampling) | **PASS 23/23** (`p8-cpp-final.log`) = 22 de P7 + `test-engine-example` |
+| Include paths des consommateurs publics (`compile_commands.json`) | `test-engine`, exemple : `include/`, `vendor/` uniquement ; `cli-engine.cpp` sans `engine/` |
+| Suite HTTP complète `not slow` | **PASS 393, 6 SKIP** (`p8-http-all.log`, 321 s) ; mêmes skips que P7 (Linux, 2 slow, docker ×2, podman) ; streaming `/tools` couvert par `test_tools_builtin_exec_shell_command_stream` |
+| Profil local statique sans HTTP (`build-agent-engine-p3-local`) | **PASS 29/29**, 0 warning après correctif (`p8-...-ctest-final.log`) ; premier build : avertissement ld « duplicate libraries » (corrigé, voir ci-dessus) |
+| Profil local partagé (`build-agent-engine-core-shared`) | **PASS 26/26**, 0 warning ; `otool -L` engine : mtmd, common-options, common-local, llama, ggml, système ; `test-engine-example` lié à `libllama-engine` seul |
+| `nm -u` engine/options statiques | aucun symbole httplib/subprocess/spawn/fork/exec/socket/transport réseau |
+| ASan + UBSan (10 tests moteur dont exemple) | **PASS 10/10**, 0 rapport (`p8-asan-tests.log`) ; LeakSanitizer toujours **BLOCKED** (macOS) |
+| TSan (11 tests moteur dont acquisition et exemple) | **PASS 11/11**, 0 rapport (`p8-tsan-tests.log`) |
+| ASan + UBSan serveur et CLI instrumentés : `test_cli`, `test_tools_builtin`, `test_router`, `test_basic`, `test_stream`, `test_sleep` | **PASS 67, 3 SKIP** (docker ×2, podman), 0 rapport (`p8-http-asan.log`) |
+| `llama --version`, `llama cli` single-turn local | **PASS**, codes 0 |
+| `git diff --check` | **PASS** |
+
+Non qualifié à P8 : TSan des binaires serveur/CLI sur la suite HTTP complète, Linux/Windows (notamment `_putenv_s` des tests et l’export des symboles internes de `llama-engine` partagé sous Windows, déjà via `WINDOWS_EXPORT_ALL_SYMBOLS`), Metal. Les réserves antérieures restent ouvertes pour P9 : performances A/B, audio réel, vidéo/WebP sans subprocess, LeakSanitizer, iOS.
+
+### Commandes P8 reproductibles
+
+```sh
+MODEL="$PWD/tools/server/tests/tmp/models--ggml-org--test-model-stories260K/snapshots/479896ec924af6d40fd419ab8f4d1eb2101de00d/stories260K-f32.gguf"
+cmake -S . -B build-agent-engine-baseline -DLLAMA_ENGINE_TEST_MODEL="$MODEL"
+cmake --build build-agent-engine-baseline --parallel 8 --target llama-server llama-cli llama-app llama-engine-simple \
+  test-engine test-engine-example test-engine-lifecycle test-engine-models test-engine-catalog test-engine-events \
+  test-engine-operations test-engine-fixtures test-engine-replay test-engine-transport test-engine-options \
+  test-engine-sources test-engine-acquisition test-chat test-arg-parser test-model-resolution test-acquisition \
+  test-hf-cache test-json-schema-to-grammar test-sampling
+ctest --test-dir build-agent-engine-baseline --output-on-failure \
+  -R '^(test-engine.*|test-chat|test-arg-parser|test-model-resolution|test-acquisition|test-hf-cache|test-json-schema-to-grammar|test-sampling)$'
+build-agent-engine-baseline/bin/llama-engine-simple -m "$MODEL" -n 16
+PATH="$PWD/.venv-server-tests/bin:$PATH" \
+  SSL_CERT_FILE="$(.venv-server-tests/bin/python -c 'import certifi; print(certifi.where())')" \
+  LLAMA_SERVER_BIN_PATH="$PWD/build-agent-engine-baseline/bin/llama-server" \
+  N_GPU_LAYERS=0 PYTEST_WORKERS=1 ./tools/server/tests/tests.sh -m 'not slow' -q -rs
+for d in build-agent-engine-p3-local build-agent-engine-core-shared; do
+  cmake -S . -B $d && cmake --build $d --parallel 6 && ctest --test-dir $d --output-on-failure
+done
+nm -u build-agent-engine-p3-local/engine/libllama-engine.a build-agent-engine-p3-local/common/libllama-common-options.a \
+  | grep -iE 'httplib|subproc|posix_spawn|_fork|execv|get_repo_files|common_download_network|common_docker|socket'  # vide
+# ASan/UBSan et TSan moteur : commandes P5 avec en plus test-engine-example
+# ASan/UBSan serveur + CLI :
+cmake --build build-agent-engine-p7-cli-sanitize --parallel 8 --target llama-cli llama-server
+ASAN_OPTIONS=detect_leaks=0:abort_on_error=1 UBSAN_OPTIONS=halt_on_error=1 \
+  LLAMA_SERVER_BIN_PATH=$PWD/build-agent-engine-p7-cli-sanitize/bin/llama-server [même environnement] \
+  ./tools/server/tests/tests.sh unit/test_cli.py unit/test_tools_builtin.py unit/test_router.py \
+  unit/test_basic.py unit/test_stream.py unit/test_sleep.py -m 'not slow' -q -rs
+```
+
+## Consignes de reprise P9
+
+1. P8 est commité : vérifier `git status` (ajout `examples/engine-simple/`, suppression des cinq headers `tools/server/server-*.h`).
+2. Rejouer la matrice obligatoire du plan P9 à partir des commandes P0–P8 : profil CPU local (neuf), complet desktop, statique/partagé, concurrence (ASan/UBSan, TSan dont les binaires serveur/CLI sur la suite HTTP), Metal (smoke inférence, multi-modèles, arrêt, comparaison au relevé P0), multimodal/outils/sorties structurées.
+3. Performances : A/B de séries longues contre `e4c142c` (signal CPU concurrent ouvert depuis P1-C), hôte au repos, modèle représentatif si disponible.
+4. Rapport final : correspondance complète de la matrice P0, écarts de compatibilité (P6, P7, P8), limites restantes (audio **BLOCKED**, vidéo/WebP sans subprocess, LeakSanitizer, Linux/Windows/iOS), exemple compilé.

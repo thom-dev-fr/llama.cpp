@@ -11,7 +11,7 @@
 
 void engine_backend_init() {
     // llama_backend_free currently frees process-wide quantization tables. An
-    // instance must not free those while another instance/legacy consumer runs.
+    // instance must not free those while another instance or the server runs.
     // Keep the backend registry/tables for process lifetime, as llama's registry
     // already does; per-model allocations are still released on engine stop.
     static std::once_flag initialized;
@@ -469,7 +469,7 @@ std::unique_ptr<engine> engine::create(const config & settings, event & error) {
         // One catalog entry, loaded now; its model field is not used for selection.
         catalog_config catalog;
         model_entry entry;
-        entry.id       = detail::model_name(settings);
+        entry.id       = model_id(settings);
         entry.settings = settings;
         catalog.models.push_back(std::move(entry));
         catalog.max_loaded  = 1;
@@ -484,7 +484,7 @@ std::unique_ptr<engine> engine::create(const config & settings, event & error) {
         auto loaded = owner->impl->models->load(catalog.models.front().id)->read(std::chrono::milliseconds::max());
         if (loaded.type != event_type::success) {
             error = loaded.category == "load_failed"
-                ? event {event_type::error, nullptr, "load_failed", "Failed to load model: " + detail::model_name(settings)}
+                ? event {event_type::error, nullptr, "load_failed", "Failed to load model: " + model_id(settings)}
                 : loaded;
             return nullptr;
         }

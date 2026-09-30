@@ -6,8 +6,8 @@
 
 struct server_context;
 
-// Process-lifetime backend initialization, shared by local engines and legacy
-// consumers. Does not change logging, signals, NUMA policy or process priority.
+// Process-lifetime backend initialization, shared by the engines and the
+// server's single model. Does not change logging, signals, NUMA policy or process priority.
 void engine_backend_init();
 
 namespace llama_engine { namespace detail {
@@ -72,10 +72,9 @@ struct runtime {
     void cancel(const std::unordered_set<int> & ids);
 };
 
-// Limits of the legacy HTTP adapter. Before the engine, HTTP handlers queued
-// every request, buffered every result and left body size to the transport.
-// The public engine keeps bounded defaults; the server keeps this compatibility
-// as a permanent compatibility policy, independent of the embedding defaults.
+// Limits of the HTTP server: as before the engine, requests are queued without
+// limit, results are buffered without limit and body size is left to the
+// transport. The public engine keeps bounded defaults for embedding.
 void apply_http_compat_limits(runtime & run);
 
 std::unique_ptr<request> submit(const std::shared_ptr<runtime> & run, json input,

@@ -21,9 +21,7 @@
 
 using namespace llama_engine;
 using llama_engine::detail::build_params;
-using llama_engine::detail::find_option_scope;
 using llama_engine::detail::option_key;
-using llama_engine::detail::option_scope;
 namespace fs = std::filesystem;
 
 static std::string invalid(const config & settings) {
@@ -43,7 +41,7 @@ static void audit_registry() {
         common_params_add_preset_options(ctx.options);
         for (const auto & opt : ctx.options) {
             const auto key = option_key(opt);
-            if (!find_option_scope(key)) {
+            if (find_option_scope(key) == option_scope::unknown) {
                 std::cerr << "unclassified option: " << key << "\n";
                 assert(false);
             }
@@ -54,11 +52,17 @@ static void audit_registry() {
     for (const auto * key : {"ctx-size", "port", "alias", "hf-repo", "stop-timeout", "prompt"}) {
         assert(keys.count(key));
     }
-    assert(*find_option_scope("ctx-size") == option_scope::engine);
-    assert(*find_option_scope("hf-repo") == option_scope::engine);
-    assert(*find_option_scope("port") == option_scope::host);
-    assert(*find_option_scope("prio") == option_scope::host);
-    assert(*find_option_scope("models-dir") == option_scope::catalog);
+    assert(find_option_scope("ctx-size") == option_scope::engine);
+    assert(find_option_scope("hf-repo") == option_scope::engine);
+    assert(find_option_scope("port") == option_scope::host);
+    assert(find_option_scope("prio") == option_scope::host);
+    assert(find_option_scope("models-dir") == option_scope::catalog);
+    // other spellings of config::options: dashes, negated form, variable
+    assert(find_option_scope("--ctx-size") == option_scope::engine);
+    assert(find_option_scope("no-warmup") == option_scope::engine);
+    assert(find_option_scope("LLAMA_ARG_CTX_SIZE") == option_scope::engine);
+    assert(find_option_scope("LLAMA_ARG_PORT") == option_scope::host);
+    assert(find_option_scope("not-an-option") == option_scope::unknown);
 }
 
 static void rejections() {

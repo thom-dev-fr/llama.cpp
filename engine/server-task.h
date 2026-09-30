@@ -153,12 +153,6 @@ struct server_task {
     task_params   params;
     server_tokens tokens;
 
-    // only used by CLI, this allow tokenizing CLI inputs on server side
-    // we need this because mtmd_context and vocab are not accessible outside of server_context
-    bool                    cli = false;
-    std::string             cli_prompt;
-    std::vector<raw_buffer> cli_files;
-
     server_task_type type;
 
     // used by SERVER_TASK_TYPE_SLOT_SAVE, SERVER_TASK_TYPE_SLOT_RESTORE, SERVER_TASK_TYPE_SLOT_ERASE
@@ -288,9 +282,6 @@ struct server_task_result {
     }
     virtual json to_json() = 0;
     virtual ~server_task_result() = default;
-    virtual server_task_result * clone() const {
-        GGML_ABORT("not implemented for this task type");
-    }
 };
 
 // using shared_ptr for polymorphism of server_task_result

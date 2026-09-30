@@ -1,0 +1,5 @@
+set(TARGET llama-engine-simple)
+add_executable(${TARGET} engine-simple.cpp)
+install(TARGETS ${TARGET} RUNTIME)
+target_link_libraries(${TARGET} PRIVATE llama-engine)
+target_compile_features(${TARGET} PRIVATE cxx_std_17)

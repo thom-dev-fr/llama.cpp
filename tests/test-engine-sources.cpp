@@ -5,7 +5,6 @@
 // presets with llama-server's priorities, then reloads while models are used or
 // awaited. Real GGUF loads on CPU; no network, no process, no port.
 #include "llama-engine.h"
-#include "common.h" // common_set_env
 
 #include <cassert>
 #include <chrono>
@@ -16,6 +15,15 @@
 #include <iostream>
 #include <set>
 #include <string>
+
+// the engine reads the cache location from the environment
+static void set_env(const char * name, const std::string & value) {
+#ifdef _WIN32
+    _putenv_s(name, value.c_str());
+#else
+    setenv(name, value.c_str(), 1);
+#endif
+}
 
 using namespace llama_engine;
 using namespace std::chrono_literals;
@@ -81,7 +89,7 @@ int main(int argc, char ** argv) {
     write(cache / "models--test--tiny" / "refs" / "main", commit);
     fs::create_directories(cache / "models--test--tiny" / "snapshots" / commit);
     fs::copy_file(model, cache / "models--test--tiny" / "snapshots" / commit / "tiny-F32.gguf");
-    common_set_env("LLAMA_CACHE", cache.string()); // before any cache access
+    set_env("LLAMA_CACHE", cache.string()); // before any cache access
 
     const auto presets = [&](const std::string & alpha_ctx, const std::string & custom_extra) {
         write(ini,

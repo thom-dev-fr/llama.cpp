@@ -65,6 +65,18 @@ struct config {
     static config from_options(std::map<std::string, std::string> options);
 };
 
+// Owner of a named option: a model's configuration (engine, accepted in
+// config::options), the host application (HTTP, UI, tools, logging, terminal,
+// process-wide state) or the catalog (alias, models-dir, ...). Lets a host that
+// reads a whole command line or preset keep the options it passes to the engine.
+enum class option_scope { engine, host, catalog, unknown };
+// Any spelling of config::options, with or without leading dashes.
+option_scope find_option_scope(const std::string & name);
+
+// Catalog id that create() gives a model: its file name, or its repository.
+// Throws std::invalid_argument when the configuration is invalid.
+std::string model_id(const config & settings);
+
 enum class event_type { payload, success, error, cancelled, timeout };
 struct event {
     event_type type = event_type::success;

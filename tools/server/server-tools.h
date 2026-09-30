@@ -2,12 +2,13 @@
 
 #include "server-common.h"
 #include "server-http.h"
-#include "server-queue.h"
 #include "server-mcp.h"
 
-#include <atomic>
+#include <condition_variable>
+#include <deque>
 #include <functional>
 #include <memory>
+#include <mutex>
 
 struct server_tool {
     std::string name;
@@ -20,9 +21,18 @@ struct server_tool {
     virtual json get_definition() const = 0;
     virtual std::string type() const { return "server"; }
 
+    // Chunks of one streamed call, from its worker thread to the HTTP writer.
+    struct channel {
+        void send(json item);
+        json receive(); // blocks until the next item
+    private:
+        std::mutex mutex;
+        std::condition_variable ready;
+        std::deque<json> items;
+    };
+
     struct stream {
-        server_response & qr;
-        int id;
+        channel & out;
         std::function<bool()> alive;
         void push(const std::string & chunk);
     };
@@ -35,10 +45,6 @@ struct server_tools_runtime; // impl detail, defined in server-tools.cpp
 
 struct server_tools {
     std::vector<std::unique_ptr<server_tool>> tools;
-
-    // for streaming
-    server_response queue_res;
-    std::atomic<int> res_id{0};
 
     // set when --tools-runtime is configured; routes every tool call through an isolate
     std::unique_ptr<server_tools_runtime> runtime;

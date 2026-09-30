@@ -148,16 +148,20 @@ static int llama_server(common_params & params, int argc, char ** argv) {
     // note: this is guaranteed to out-live ctx_http and tools
     server_mcp mcp_mgr;
 
-    // struct that contains llama context and inference
-    server_context ctx_server;
-    llama_engine::detail::apply_http_compat_limits(*ctx_server.runtime);
+    // single-model mode: the model and its decoder; with several models, the
+    // engine's catalog owns them (server_models_routes)
+    std::unique_ptr<server_context> ctx_server;
+    if (!is_router_server) {
+        ctx_server = std::make_unique<server_context>();
+        llama_engine::detail::apply_http_compat_limits(*ctx_server->runtime);
+    }
 
     //
     // Router
     //
 
     // register API routes
-    server_routes routes(params, ctx_server);
+    server_routes routes(params, ctx_server.get());
     server_tools tools;
 
     std::optional<server_models_routes> models_routes{};
@@ -399,7 +403,7 @@ static int llama_server(common_params & params, int argc, char ** argv) {
             // stop the session GC first, it finalizes live sessions and wakes pending readers
             server_stream_session_manager_stop();
             ctx_http.stop();
-            ctx_server.terminate();
+            ctx_server->terminate();
             mcp_mgr.shutdown();
 
         };
@@ -411,22 +415,23 @@ static int llama_server(common_params & params, int argc, char ** argv) {
             return 1;
         }
 
-        if (!ctx_server.load_model(params)) {
+        if (!ctx_server->load_model(params)) {
             clean_up();
             ctx_http.join();
             SRV_ERR("%s", "exiting due to model loading error\n");
             return 1;
         }
 
-        routes.update_meta(ctx_server);
+        routes.update_meta(*ctx_server);
+        ctx_server->start();
         ctx_http.is_ready.store(true);
 
         SRV_INF("%s", "model loaded\n");
 
         shutdown_handler = [&](int) {
             mcp_mgr.shutdown();
-            // this will unblock start_loop()
-            ctx_server.terminate();
+            // this will unblock ctx_server->join()
+            ctx_server->terminate();
         };
     }
 
@@ -475,13 +480,13 @@ static int llama_server(common_params & params, int argc, char ** argv) {
         // when the HTTP server stops, clean up and exit
         clean_up();
     } else {
-        // this call blocks the main thread until queue_tasks.terminate() is called
-        ctx_server.start_loop();
+        // blocks the main thread until the decoder stops (see shutdown_handler)
+        ctx_server->join();
 
         clean_up();
         ctx_http.join();
 
-        auto * ll_ctx = ctx_server.get_llama_context();
+        auto * ll_ctx = ctx_server->get_llama_context();
         if (ll_ctx != nullptr) {
             common_memory_breakdown_print(ll_ctx);
         }

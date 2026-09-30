@@ -19,11 +19,12 @@ constexpr int HTTP_POLLING_SECONDS = 1;
 // may have bypass_sleep = true if the task does not use ctx_server
 struct server_res_generator : server_res_spipe {
     std::shared_ptr<llama_engine::request> engine_request;
-    server_res_generator(server_queue & queue_tasks, int sleep_idle_seconds, bool bypass_sleep = false) {
+    // queue_tasks: the single model's, nullptr with several models (sleeping is per model)
+    server_res_generator(server_queue * queue_tasks, int sleep_idle_seconds, bool bypass_sleep = false) {
         // fast path in case sleeping is disabled
         bypass_sleep |= sleep_idle_seconds < 0;
-        if (!bypass_sleep) {
-            queue_tasks.wait_until_no_sleep();
+        if (!bypass_sleep && queue_tasks) {
+            queue_tasks->wait_until_no_sleep();
         }
     }
     void ok(const json & response_data) {
@@ -74,7 +75,7 @@ std::unique_ptr<server_res_generator> server_routes::handle_operation(
         const json input = body.is_null() ? json::parse(req.body) : body;
         res->set_req(&req);
         state = std::make_shared<llama_engine::detail::request_state>();
-        llama_engine::detail::submit_native(ctx_server.runtime, state, input, op, files);
+        llama_engine::detail::submit_native(ctx_server->runtime, state, input, op, files);
     }
     res->engine_request = std::make_shared<llama_engine::request>(state); // cancels on destruction
     auto error_json = [model](const llama_engine::event & item) {
@@ -219,16 +220,14 @@ std::unique_ptr<server_res_generator> server_routes::handle_operation(
 }
 
 std::unique_ptr<server_res_generator> server_routes::create_response(bool bypass_sleep) {
-    return std::make_unique<server_res_generator>(queue_tasks, params.sleep_idle_seconds, bypass_sleep);
+    return std::make_unique<server_res_generator>(ctx_server ? &ctx_server->tasks() : nullptr,
+                                                  params.sleep_idle_seconds, bypass_sleep);
 }
 
-server_routes::server_routes(const common_params & params, server_context & ctx_server)
+server_routes::server_routes(const common_params & params, server_context * ctx_server)
         : params(params),
-          ctx_server(ctx_server),
-          queue_tasks(ctx_server.tasks()) {
+          ctx_server(ctx_server) {
     init_routes();
-
-
 }
 
 json server_routes::get_model_info() const {

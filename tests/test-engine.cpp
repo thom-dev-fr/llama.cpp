@@ -3,6 +3,13 @@
 #endif
 // Public consumer: no common_params, internal queues, server or loop entry point.
 #include "llama-engine.h"
+
+// Linking llama-engine exposes its public header only: neither the engine's
+// private types nor llama.cpp's common utilities, HTTP or CLI headers.
+#if __has_include("engine-context.h") || __has_include("server-task.h") || __has_include("common.h") || \
+    __has_include("server-http.h") || __has_include("cli-context.h") || __has_include("httplib.h")
+#error "a private header is reachable from the public interface of llama-engine"
+#endif
 #include <cassert>
 #include <future>
 #include <filesystem>
@@ -46,6 +53,12 @@ int main(int argc, char ** argv) {
     auto failed = engine::create(settings, error);
     std::filesystem::remove(corrupt);
     assert(!failed && error.category == "load_failed");
+    // id of a single model, as create() names it in the catalog
+    assert(model_id(settings) == corrupt.filename().string());
+    try {
+        model_id(config {});
+        assert(false);
+    } catch (const std::invalid_argument &) {}
     if (argc != 2) {
         std::cout << "PASS configuration/load errors; GGUF integration NOT RUN (pass model path)\n";
         return 0;

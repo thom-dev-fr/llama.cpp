@@ -66,8 +66,8 @@ int main() {
     { request handle(abandoned); }
     assert(cancelled == 1 && abandoned->terminal.type == event_type::cancelled);
 
-    // HTTP compatibility: the legacy handlers queued any number of requests and
-    // buffered every result. Public engine defaults stay bounded.
+    // HTTP compatibility: the server queues any number of requests and buffers
+    // every result, as before the engine. Public engine defaults stay bounded.
     runtime http;
     assert(http.limits.max_tasks == config().max_tasks && http.limits.max_events == config().max_events);
     apply_http_compat_limits(http);

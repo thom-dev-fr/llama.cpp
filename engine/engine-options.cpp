@@ -151,11 +151,6 @@ std::string option_key(const common_arg & opt) {
     return opt.args.empty() ? std::string() : rm_dashes(opt.args.back());
 }
 
-const option_scope * find_option_scope(const std::string & key) {
-    const auto & table = scopes();
-    auto it = table.find(key);
-    return it == table.end() ? nullptr : &it->second;
-}
 
 common_params build_params(const config & settings) {
     const auto & ctx = preset_context();
@@ -176,14 +171,14 @@ common_params build_params(const config & settings) {
     }
     for (const auto & [opt, value] : user.options) {
         const std::string key = option_key(opt);
-        const option_scope * scope = find_option_scope(key);
-        if (!scope) {
+        const option_scope scope = find_option_scope(key);
+        if (scope == option_scope::unknown) {
             throw std::invalid_argument("option '" + key + "' is not supported by the engine");
         }
-        if (*scope == option_scope::host) {
+        if (scope == option_scope::host) {
             throw std::invalid_argument("option '" + key + "' belongs to the host application, not the engine");
         }
-        if (*scope == option_scope::catalog) {
+        if (scope == option_scope::catalog) {
             throw std::invalid_argument("option '" + key + "' configures the catalog, not a model");
         }
         auto field = typed_fields.find(opt);
@@ -270,23 +265,6 @@ bool same_config(const config & a, const config & b) {
     return fields(a) == fields(b);
 }
 
-std::string model_name(const config & settings) {
-    if (!settings.model_path.empty()) {
-        return std::filesystem::path(settings.model_path).filename().string();
-    }
-    const common_params params = build_params(settings);
-    if (!params.model.path.empty()) {
-        return std::filesystem::path(params.model.path).filename().string();
-    }
-    if (!params.model.get_name().empty()) {
-        return params.model.get_name(); // repository
-    }
-    // plain URL: its file name, as the download would name it
-    auto file = string_split<std::string>(params.model.url, '#').front();
-    file = string_split<std::string>(file, '?').front();
-    return string_split<std::string>(file, '/').back();
-}
-
 bool has_acquisition() {
 #ifdef LLAMA_ENGINE_ACQUISITION
     return true;
@@ -313,3 +291,36 @@ void resolve_resources(common_params & params, common_download_callback * callba
 }
 
 } } // namespace llama_engine::detail
+
+namespace llama_engine {
+
+option_scope find_option_scope(const std::string & name) {
+    std::string key = detail::rm_dashes(name);
+    const auto & ctx = detail::preset_context();
+    auto opt = ctx.key_to_opt.find(key); // other spellings: negated form, LLAMA_ARG_*
+    if (opt != ctx.key_to_opt.end()) {
+        key = detail::option_key(opt->second);
+    }
+    const auto & table = detail::scopes();
+    auto it = table.find(key);
+    return it == table.end() ? option_scope::unknown : it->second;
+}
+
+std::string model_id(const config & settings) {
+    if (!settings.model_path.empty()) {
+        return std::filesystem::path(settings.model_path).filename().string();
+    }
+    const common_params params = detail::build_params(settings);
+    if (!params.model.path.empty()) {
+        return std::filesystem::path(params.model.path).filename().string();
+    }
+    if (!params.model.get_name().empty()) {
+        return params.model.get_name(); // repository
+    }
+    // plain URL: its file name, as the download would name it
+    auto file = string_split<std::string>(params.model.url, '#').front();
+    file = string_split<std::string>(file, '?').front();
+    return string_split<std::string>(file, '/').back();
+}
+
+} // namespace llama_engine

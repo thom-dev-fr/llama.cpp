@@ -36,7 +36,6 @@
 #include <windows.h>
 #endif
 
-constexpr int HTTP_POLLING_SECONDS = 1; // legacy reader polling, removed with P3
 
 static common_speculative_output_limits server_output_limits(const common_params & params) {
     if (params.embedding ||
@@ -2237,24 +2236,6 @@ private:
     // Functions to process the task
     //
 
-    // tokenize the input if it's set by CLI, return false on error
-    bool tokenize_cli_input(server_task & task) {
-        try {
-            auto & prompt = task.cli_prompt;
-            if (mctx != nullptr) {
-                task.tokens = process_mtmd_prompt(mctx, prompt, task.cli_files, init_opt);
-            } else {
-                task.tokens = std::move(tokenize_input_prompts(vocab, mctx, prompt, true, true, init_opt)[0]);
-            }
-            task.cli_prompt.clear();
-            task.cli_files.clear();
-        } catch (const std::exception & e) {
-            send_error(task, std::string("Failed to format input: ") + e.what(), ERROR_TYPE_INVALID_REQUEST);
-            return false;
-        }
-        return true;
-    }
-
     std::vector<server_slot *> get_free_slots(size_t n_slots_needed, int exclude_id_slot) {
         std::vector<server_slot *> free_slots;
         for (auto & slot : slots) {
@@ -2393,14 +2374,6 @@ private:
             case SERVER_TASK_TYPE_EMBEDDING:
             case SERVER_TASK_TYPE_RERANK:
                 {
-                    // special case: if input is provided via CLI, tokenize it first
-                    // otherwise, no need to tokenize as it's already done inside the HTTP thread
-                    if (task.cli) {
-                        if (!tokenize_cli_input(task)) {
-                            break;
-                        }
-                    }
-
                     const int id_task = task.id;
 
                     server_slot * slot = get_available_slot(task);
@@ -4043,10 +4016,6 @@ private:
         return std::min(res, llama_model_n_ctx_train(model_tgt));
     }
 
-    server_response_reader get_response_reader() {
-        return server_response_reader(queue_tasks, queue_results, HTTP_POLLING_SECONDS);
-    }
-
     //
     // metrics helpers
     //
@@ -4196,8 +4165,7 @@ void server_context::start() {
     }
 }
 
-void server_context::start_loop() {
-    start();
+void server_context::join() {
     std::lock_guard<std::mutex> lock(runtime->join_mutex);
     if (runtime->decoder.joinable()) { runtime->decoder.join(); }
 }
@@ -4208,10 +4176,6 @@ void server_context::terminate() {
 
 llama_context * server_context::get_llama_context() const {
     return impl->ctx_tgt;
-}
-
-server_response_reader server_context::get_response_reader() {
-    return impl->get_response_reader();
 }
 
 server_context_meta server_context::get_meta() const {
