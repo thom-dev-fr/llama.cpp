@@ -1,6 +1,6 @@
 # Moteur d’inférence embarquable — synthèse du design
 
-Statut : arbitrages validés pendant l’entretien ; implémentés par le plan (P0–P8). Les noms et signatures illustratifs ci-dessous ont précédé le header ; l’interface retenue est décrite dans le [guide API](embedded-inference-engine-api.md).
+Statut : arbitrages validés pendant l’entretien ; implémentés par le plan (P0–P8) et qualifiés à P9 ([rapport final](embedded-inference-engine-report.md), dont les points encore ouverts). Les noms et signatures illustratifs ci-dessous ont précédé le header ; l’interface retenue est décrite dans le [guide API](embedded-inference-engine-api.md).
 
 Correspondance avec le code :
 

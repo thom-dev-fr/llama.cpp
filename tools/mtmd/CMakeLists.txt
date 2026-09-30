@@ -1,5 +1,8 @@
 # mtmd
 
+# added from the root CMakeLists.txt (not tools/), so apply the project flags here
+llama_add_compile_flags()
+
 set(MTMD_VIDEO_HELP "enable video support in mtmd (requires ffmpeg binary in PATH)")
 
 set(MTMD_VIDEO ON CACHE BOOL "${MTMD_VIDEO_HELP}")

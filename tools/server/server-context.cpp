@@ -14,6 +14,9 @@
 #include <utility>
 
 constexpr int HTTP_POLLING_SECONDS = 1;
+// while a request waits for its model, as the former router: a client that
+// leaves must stop counting as a waiter before the busy model goes idle
+constexpr std::chrono::milliseconds MODEL_WAIT_POLLING {200};
 
 // generator-like API for HTTP response generation
 // may have bypass_sleep = true if the task does not use ctx_server
@@ -95,18 +98,19 @@ std::unique_ptr<server_res_generator> server_routes::handle_operation(
                     item.category == "capacity_exceeded" ? ERROR_TYPE_UNAVAILABLE : ERROR_TYPE_SERVER;
         return format_error_response(item.message, type);
     };
-    auto next = [state](const std::function<bool()> & should_stop) {
+    auto next = [state](const std::function<bool()> & should_stop,
+                        std::chrono::milliseconds polling = std::chrono::seconds(HTTP_POLLING_SECONDS)) {
         for (;;) {
             if (should_stop()) {
                 return llama_engine::detail::native_item {{llama_engine::event_type::cancelled, nullptr, "closed", {}}, nullptr};
             }
-            auto item = state->read_native(std::chrono::seconds(HTTP_POLLING_SECONDS));
+            auto item = state->read_native(polling);
             if (item.status.type != llama_engine::event_type::timeout) { return item; }
         }
     };
     // A request that waits for its model: a resumable session survives its client
     // until a stop (DELETE /v1/stream), like any other request of that session.
-    auto first = routing ? next([&res] { return res->should_stop(); }) : next(req.should_stop);
+    auto first = routing ? next([&res] { return res->should_stop(); }, MODEL_WAIT_POLLING) : next(req.should_stop);
     if (routing) {
         routing->started(req);
     }

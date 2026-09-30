@@ -304,7 +304,7 @@ There is no `[DONE]` sentinel (unlike `/chat/completions`), the stream ends afte
 - `--models-max`, `--models-autoload` (overridden per request by `?autoload=`), requests that wait for their model without time or count limit, and the unbounded admission/event/body limits of the single-model server,
 - a backend factory that gives each model the HTTP-facing settings its requests and properties read (SSE ping interval, verbosity, UI settings, endpoint flags, per-model host options of its preset) and names it with its catalog id.
 
-The engine keeps the queue order (first come, first served per model), LRU eviction of idle models only, coalesced loads, per-model sleep and unloads that end the model's requests. `LLAMA_SERVER_DEBUG_FAKE_TIMING` still delays loads and admissions by 2 s so that tests can observe queued, loading and busy models.
+The engine keeps the queue order (first come, first served per model), LRU eviction of idle models only, coalesced loads, per-model sleep and unloads that end the model's requests. `LLAMA_SERVER_DEBUG_FAKE_TIMING` still delays loads and admissions by 2 s so that tests can observe queued, loading and busy models. While a request waits for its model, the handler checks its client every 200 ms (`MODEL_WAIT_POLLING`, the former router's interval): a client that left stops counting as a waiter before the busy model goes idle, so it cannot cause an eviction.
 
 Fields and options that described a child process are adapted, not emulated:
 

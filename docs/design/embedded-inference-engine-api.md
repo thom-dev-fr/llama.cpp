@@ -16,6 +16,14 @@ privé devient accessible.
   `llama-engine-internal` (voir « Interface interne ») ; les tests publics
   `test-engine`, `test-engine-operations`, `test-engine-fixtures`,
   `test-engine-catalog`, `test-engine-sources` et `test-engine-acquisition`.
+- **Qualification sur modèles représentatifs** : `test-engine-qualification`
+  (API publique seule) exerce, sur le backend choisi, chat complet/streamé,
+  appels d’outils streamés et tour de résultat, sortie structurée, reasoning,
+  événements Responses/Anthropic, annulation, arrêt avec lecteur bloqué,
+  moteurs coexistants, éviction multi-modèles, vision et audio (transcription
+  et chat). Toujours compilé ; exécuté par CTest (label `heavy`) seulement si
+  `LLAMA_ENGINE_QUALIFY_ARGS` fournit ses arguments (`--model`, `--gpu-layers`,
+  `--second-model`, `--mmproj`/`--image`, `--audio-model`/`--audio-mmproj`/`--audio`).
 - **Build** : `LLAMA_BUILD_ENGINE=ON` ; acquisition réseau optionnelle avec
   `LLAMA_BUILD_COMMON_ACQUISITION=ON` (commandes dans [docs/build.md](../build.md)).
 

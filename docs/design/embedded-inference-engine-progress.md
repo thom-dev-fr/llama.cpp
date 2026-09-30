@@ -9,6 +9,7 @@
 - **P6 implémenté le 29 septembre 2026** (section P6) : le mode multi-modèles de `llama-server` utilise le catalogue du moteur dans le processus ; routeur/proxy/enfants et `server-process.*` supprimés. **Commité (message « engine : run llama-server multi-model mode in process »). Prochaine étape : P7 (CLI local).**
 - **P7 implémenté le 30 septembre 2026** (section P7) : le CLI local charge son modèle dans le processus par l’API publique du moteur (catalogue d’un modèle, téléchargements `-hf` par l’acquisition partagée) ; `cli-server.h`, le serveur loopback, l’attente `/health` et les points d’entrée `llama_server(params, 0, nullptr)`/`llama_server_terminate` sont supprimés ; `llama-cli-impl` ne dépend plus de `llama-server-impl`. `--server-base` reste un client HTTP. **Commité (message « engine : run llama-cli local mode in process »). Prochaine étape : P8.**
 - **P8 implémenté le 30 septembre 2026** (section P8) : chemins transitoires supprimés (lecteur legacy, branche CLI du décodeur, file de résultats « waiting ids », headers de compatibilité, `start_loop()`, `server_context` vide du mode multi-modèles), interface publique de `llama-engine` limitée à `include/llama-engine.h` (+ `vendor::nlohmann`), interface interne explicite `llama-engine-internal` pour le serveur et les tests internes, CLI sur l’API publique seule, exemple compilé `examples/engine-simple`, documentation finale. **Commité (message « engine : remove transitional paths and finish the separation »).** Tableau des façades vide. **Prochaine étape : P9 (qualification finale).**
+- **P9 exécuté le 30 septembre 2026** (section P9, [rapport final](embedded-inference-engine-report.md)) : matrice obligatoire rejouée sur builds neufs, deux régressions trouvées et corrigées (flags de compilation de mtmd perdus depuis P1 ; détection du départ d’un client en attente de modèle à 1 s au lieu de 200 ms depuis P6), qualification sur modèles réels (Metal) dont **audio réel**, A/B de performance sans régression. **Drop non clos** : arbitrage vidéo/WebP sans sous-processus et qualifications BLOCKED listées dans le rapport.
 - **Commits** : correctif de revue P2 `8dd3003e9`, P3 `675bf4fd0`, P4 `825f7f3b0`, P5 `756173951`. Arbre propre après P4 ; revalidation après commit ci-dessous (« P4 — Revalidation après commit »).
 - P0/P1 : inventaire, références et graphe recontrôlés ; 16/16 tests locaux dans chaque profil et 9/9 tests C++ ciblés repassés avant P2. Les réserves de performance et capacités consignées à P1 restent ouvertes.
 - P2 : `include/llama-engine.h`, décodeur unique dans `engine/`, handlers `/completion` et `/completions` migrés. Voir la section P2 et [le guide API](embedded-inference-engine-api.md). CLI local et routeur conservent leurs chemins legacy jusqu’à P6/P7.
@@ -1161,3 +1162,75 @@ ASAN_OPTIONS=detect_leaks=0:abort_on_error=1 UBSAN_OPTIONS=halt_on_error=1 \
 2. Rejouer la matrice obligatoire du plan P9 à partir des commandes P0–P8 : profil CPU local (neuf), complet desktop, statique/partagé, concurrence (ASan/UBSan, TSan dont les binaires serveur/CLI sur la suite HTTP), Metal (smoke inférence, multi-modèles, arrêt, comparaison au relevé P0), multimodal/outils/sorties structurées.
 3. Performances : A/B de séries longues contre `e4c142c` (signal CPU concurrent ouvert depuis P1-C), hôte au repos, modèle représentatif si disponible.
 4. Rapport final : correspondance complète de la matrice P0, écarts de compatibilité (P6, P7, P8), limites restantes (audio **BLOCKED**, vidéo/WebP sans subprocess, LeakSanitizer, Linux/Windows/iOS), exemple compilé.
+
+## P9 — Qualification finale
+
+### Vérification préalable
+
+Reprise sur `b536fde9a` (P8), arbre propre. Plan P9, design (critères de fin) et consignes de reprise P9 relus. Hôte : Apple M1 Pro 16 GiB, macOS 26 (Darwin 25.6), Xcode avec SDK iPhoneOS 27.0. **L’hôte n’était pas au repos** (visioconférence, processus de sécurité ; charge 15–45) ; un `llama-server` orphelin d’une session antérieure (PID 37090, 13 h 44 d’ancienneté, port 8099, PPID 1) a été arrêté avant les mesures. Rapport final autonome : [embedded-inference-engine-report.md](embedded-inference-engine-report.md).
+
+### Régressions trouvées et corrigées
+
+1. **Flags de compilation de mtmd (depuis P1)** : `tools/mtmd` ajouté par la racine ne recevait plus `llama_add_compile_flags()` (appelé par `tools/CMakeLists.txt`) : ni sanitizers ni `LLAMA_ALL_WARNINGS`. Découvert par un `container-overflow` ASan dans `test-engine-vision` du build partagé serveur (instanciation instrumentée de `vector::insert` fusionnée entre dylibs, écriture non instrumentée dans `mtmd_tokenizer`) ; même test PASS en statique. Correctif dans `tools/mtmd/CMakeLists.txt`. Build complet : 0 warning avec les warnings restaurés ; mtmd maintenant instrumenté dans les quatre arbres sanitizers.
+2. **Attente d’un modèle et départ du client (depuis P6)** : le routeur de processus vérifiait `should_stop` toutes les 200 ms pendant `ensure_model_ready` ; le handler moteur le faisait toutes les `HTTP_POLLING_SECONDS` (1 s). `test_router_queue_client_disconnect_keeps_model` échouait selon la phase (observé avec `N_GPU_LAYERS=99`) : le client de B parti à ~1,5 s restait compté en attente quand A devenait inactif à ~2 s, et A était évincé. Correctif : `MODEL_WAIT_POLLING` = 200 ms pour la première lecture en mode multi-modèles ; README-dev mis à jour. Suite routeur 5/5 (Metal, CPU, Metal, CPU, Metal), 23 PASS chacune.
+3. **Test de qualification** `tests/test-engine-qualification.cpp` (API publique seule, toujours compilé ; CTest `heavy` si `LLAMA_ENGINE_QUALIFY_ARGS`). Deux échecs initiaux dus au test : budgets de 96 et 32 tokens insuffisants pour gemma-4 qui raisonne avant de transcrire — **upstream renvoie aussi un texte vide à 96 tokens** (vérifié par la même requête multipart sur `llama-server` `e4c142c` et HEAD) ; budgets portés à 512.
+
+### Validation réellement exécutée
+
+| Vérification | Résultat |
+| --- | --- |
+| Build complet desktop, toutes cibles (`build-agent-engine-baseline`) | **PASS**, 0 warning (`p9-full-build.log`, puis `p9-full-build-mtmdflags.log` après correctif 1) |
+| CTest complet desktop | **82/82** ; `test-jinja-py` FAIL avec le `python3` système (module `jinja2` absent), **PASS** avec le venv (`p9-full-ctest.log`, `p9-jinja-py.log`) |
+| Profils locaux **neufs** statique/partagé (`build-agent-engine-p9-local-{static,shared}`, flags dans `p9-local-flags.txt`) | **PASS 29/29** chacun, 0 warning ; configure sans téléchargement. Première tentative invalide (drapeaux non découpés par zsh : build complet produit) ; refaite avec bash, cache vérifié |
+| Audit du profil local | Aucune source `httplib`/`subproc`/`download.cpp`/`tools/server`/`tools/cli` ; `arg.cpp`/`preset.cpp` = registre d’options (`llama-common-options`, P5), argv dans `arg-parse.cpp` hors profil ; aucun flag `CPPHTTPLIB`/`LLAMA_SUBPROCESS`/`MTMD_VIDEO`/`OPENSSL` ; `nm -u` moteur/common/mtmd sans symbole réseau ni processus ; `otool -L` conforme |
+| ASan+UBSan moteur (`p2-sanitize`, + modèles vision/infill/rerank) | **13/13** (`p9-p2-sanitize-engine-tests.log`) |
+| ASan+UBSan moteur, arbre serveur partagé (`p7-cli-sanitize`, tests activés) | **FAIL** puis **16/16** après correctif 1 (`p9-p7-cli-sanitize-engine-tests.log`) |
+| ASan+UBSan serveur + CLI, **suite HTTP complète** `not slow` | **393 PASS, 6 SKIP**, 0 rapport (`p9-http-asan-all.log`, 15 min 24 ; avant correctif 2, qui ne touche que l’attente) |
+| TSan moteur (`p4-tsan` 14/14, `p7-cli-tsan` 16/16) | **PASS**, 0 rapport |
+| TSan serveur + CLI, **suite HTTP complète** `not slow` (binaire avec correctif 2) | **393 PASS, 6 SKIP**, 0 rapport (`p9-http-tsan-all.log`, 37 min 28) — ferme la réserve P8 |
+| ASan+UBSan routeur + stream après correctif 2 | **26 PASS** (`p9-http-asan-router-fix2.log`) |
+| Profils locaux reconstruits après correctifs 1–3 | **29/29** chacun, 0 warning ; mtmd avec `-Wall` ; `test-engine-qualification` compilé dans les deux |
+| `ctest -L heavy` avec `LLAMA_ENGINE_QUALIFY_ARGS` ; sans : 0 test enregistré | **PASS** (52 s) (`p9-ctest-heavy.log`) |
+| Suite HTTP complète desktop CPU | **393 PASS, 6 SKIP** (`p9-http-all.log`) ; skips : Linux ×1, `SLOW_TESTS` ×2, docker ×2, podman ×1 |
+| HTTP Metal (`N_GPU_LAYERS=99`) : router, basic, stream, sleep, cli, completion, chat, vision, embedding | **1 FAIL** (régression 2) puis **183 PASS, 1 SKIP** (`p9-http-metal.log`) |
+| Qualification Metal modèles réels | **PASS** tous scénarios, 51 s (`p9-qualify-metal.log`, arguments `p9-qualify-args.txt`) |
+| Transcription : parité HTTP upstream/HEAD, gemma-4-E2B, `test-2.mp3`, 96 et 512 tokens | Texte et usage **identiques** (`p9-asr-*.json`) |
+| iOS arm64 : bibliothèques du profil moteur (Xcode, `-DCMAKE_SYSTEM_NAME=iOS`, Metal embarqué) + édition de liens de `engine-simple.cpp` | **PASS** (`p9-ios-*.log`) ; 2240 `-Wshorten-64-to-32` du générateur Xcode (ggml/src amont surtout) ; `_fork` référencé par `ggml_print_backtrace` (chemin d’abort fatal amont, `GGML_NO_BACKTRACE`) |
+| A/B performance contre upstream (CPU/Metal × stories260K/Qwen3.5-2B, alterné 3×5) | Pas de régression (`p9-ab-summary.md`) ; cellule Qwen/Metal/4 à −10,1 % refaite 6 tours en ordre inversé : **+0,3 %** (`p9-abq-*`) |
+| Tests HTTP `slow` (199) et `SLOW_TESTS` | **Non exécutés** : téléchargements 0,7–5 Go par modèle, non lancés sans accord |
+| Vidéo/WebP desktop | **BLOCKED** : ffmpeg/ffprobe absents, aucun test existant |
+| LeakSanitizer | **BLOCKED** (macOS) |
+| `git diff --check` | **PASS** |
+
+### Commandes P9 reproductibles
+
+```sh
+# desktop complet
+cmake --build build-agent-engine-baseline --parallel 10
+ctest --test-dir build-agent-engine-baseline --output-on-failure -j 4      # avec .venv-server-tests/bin en tête de PATH pour test-jinja-py
+# profils locaux neufs (bash : les drapeaux doivent être découpés)
+bash -c 'F=$(cat build-agent-engine-evidence/p9-local-flags.txt); for s in static:OFF shared:ON; do
+  d=build-agent-engine-p9-local-${s%%:*}; cmake -S . -B $d $F -DBUILD_SHARED_LIBS=${s##*:} && cmake --build $d --parallel 5 && ctest --test-dir $d -j 4; done'
+# sanitizers : modèles vision/infill/rerank ajoutés aux arbres moteur, tests activés dans les arbres serveur
+ASAN_OPTIONS=detect_leaks=0:abort_on_error=1 UBSAN_OPTIONS=halt_on_error=1 ctest --test-dir build-agent-engine-p7-cli-sanitize -R '^test-engine' -j 3
+TSAN_OPTIONS=halt_on_error=1:second_deadlock_stack=1 ctest --test-dir build-agent-engine-p7-cli-tsan -R '^test-engine' -j 3
+ASAN_OPTIONS=detect_leaks=0:abort_on_error=1 UBSAN_OPTIONS=halt_on_error=1 \
+  LLAMA_SERVER_BIN_PATH=$PWD/build-agent-engine-p7-cli-sanitize/bin/llama-server [environnement P8] ./tools/server/tests/tests.sh -m 'not slow' -q -rs
+TSAN_OPTIONS=halt_on_error=1 LLAMA_SERVER_BIN_PATH=$PWD/build-agent-engine-p7-cli-tsan/bin/llama-server [environnement P8] ./tools/server/tests/tests.sh -m 'not slow' -q -rs
+# Metal
+N_GPU_LAYERS=99 [environnement P8] ./tools/server/tests/tests.sh unit/test_router.py unit/test_basic.py unit/test_stream.py \
+  unit/test_sleep.py unit/test_cli.py unit/test_completion.py unit/test_chat_completion.py unit/test_vision_api.py unit/test_embedding.py -m 'not slow'
+build-agent-engine-baseline/bin/test-engine-qualification $(cat build-agent-engine-evidence/p9-qualify-args.txt)
+# ou : cmake -S . -B build-agent-engine-baseline -DLLAMA_ENGINE_QUALIFY_ARGS="$(cat build-agent-engine-evidence/p9-qualify-args.txt)" && ctest -L heavy
+# iOS (configure dans p9-ios-configure.log)
+cmake --build build-agent-engine-p9-ios --config Release --target llama-engine -- -jobs 2
+# A/B : upstream construit dans un worktree détaché de e4c142c (llama-server seul)
+build-agent-engine-evidence/p9-ab.sh && build-agent-engine-evidence/p9-ab-qwen-metal.sh
+python3 build-agent-engine-evidence/p9-ab-summary.py
+```
+
+Le worktree upstream temporaire (`git worktree add --detach <scratch>/upstream-e4c142c e4c142c`, build `llama-server` Release par défaut) a été retiré après les mesures ; le recréer ainsi pour rejouer `p9-ab*.sh` (chemin `UP=` en tête des scripts).
+
+### Passation
+
+P9 exécuté ; matrice, correctifs et limites résumés dans le [rapport final](embedded-inference-engine-report.md). **Prochaine action : arbitrage vidéo/WebP sans sous-processus** (décodeur embarqué ou contrat de frames prétraitées), puis, selon les moyens disponibles : tests `slow` (téléchargements), Linux/Windows, LeakSanitizer sous Linux, exécution iOS sur appareil. Aucun travail de fond laissé en cours.
