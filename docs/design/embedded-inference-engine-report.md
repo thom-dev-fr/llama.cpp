@@ -9,7 +9,7 @@ Légende : **PASS** exécuté et vérifié ; **FAIL** exécuté et en échec ; *
 Les neuf critères de fin du design sont satisfaits et vérifiés sur macOS arm64 (CPU, Metal). Le drop reste **non clos sur deux points hors de ma décision** :
 
 1. **Vidéo et WebP sans sous-processus** (profil local) : aucun décodeur embarqué n’existe ; `MTMD_VIDEO=OFF` retire aussi le repli WebP. **Arbitrage requis** (décodeur embarqué ou contrat d’entrée de frames prétraitées). Aucune parité n’est revendiquée.
-2. **Qualifications non exécutables sur cet hôte** : Linux/Windows, LeakSanitizer (non supporté par ASan sur macOS arm64), chemin vidéo desktop (ffmpeg absent), 199 tests HTTP `slow` qui téléchargent 0,7–5 Go par modèle, packaging iOS exécuté sur appareil.
+2. **Qualifications non exécutables sur cet hôte** : Linux/Windows, LeakSanitizer (non supporté par ASan sur macOS arm64), chemin vidéo desktop (ffmpeg absent), exécution iOS sur appareil. Les tests HTTP `slow` ont été exécutés ensuite (section « Tests lents contre upstream »).
 
 ## Critères de fin du drop
 
@@ -55,6 +55,32 @@ Les neuf critères de fin du design sont satisfaits et vérifiés sur macOS arm6
 | Transcription (pièce `file`) : **texte et usage identiques à `llama-server` upstream** sur la même requête | PASS |
 | Chat audio (`input_audio` → `attachment:`) | PASS |
 
+## Tests lents contre upstream
+
+Les 199 tests HTTP marqués `slow` et les 2 tests conditionnés par `SLOW_TESTS` (infill Qwen2.5-Coder, LoRA 8B) ont été exécutés **sur le moteur et sur `llama-server` upstream `e4c142c`**, même modèle en cache, mêmes tests, Metal (`N_GPU_LAYERS=99`). 16 lots, un par modèle (15 modèles de 0,8 à 8,5 Go, environ 70 Go téléchargés au total), chaque modèle étant supprimé du cache de test après son lot (28 Gio libres sur le disque).
+
+| Lot (modèle) | Moteur réussis/échecs | Upstream réussis/échecs | Ensembles d’échecs |
+| --- | ---: | ---: | --- |
+| Llama-3.2-1B | 8/2 | 8/2 | identiques |
+| Qwen2.5-1.5B | 4/6 | 4/6 | identiques |
+| gemma-2-2b | 0/12 | 0/12 | identiques |
+| Llama-3.2-3B | 12/8 | 12/8 | identiques |
+| Qwen2.5-Coder-3B | 4/10 | 4/10 | identiques |
+| Phi-3.5-mini (+ arrêts OpenAI) | 4/19 | 4/19 | identiques |
+| Qwen2.5-Coder-1.5B (infill) | 1/0 | 1/0 | — |
+| Qwen2.5-7B | 8/8 | 8/8 | identiques |
+| DeepSeek-R1-7B (+ thinking Anthropic) | 2/14 | 2/14 | identiques |
+| Hermes-2-Pro-8B | 6/10 | 6/10 | identiques |
+| Hermes-3-8B | 8/8 | 8/8 | identiques |
+| Llama-3.1-8B | 6/6 | 6/6 | identiques |
+| Llama-3.1-8B IQ2_M + LoRA | 1/0 | 1/0 | — |
+| functionary-small v3.2 (Q8_0, Q4_K_M) | 8/16 | 8/16 | identiques |
+| Mistral-Nemo-12B | 6/2 | 6/2 | identiques |
+| command-r7b | 2/0 | 2/0 | — |
+| **Total** | **80/121** | **80/121** | **aucun écart** |
+
+Les échecs sont des réponses en prose au lieu d’un appel d’outil, ou des textes attendus devenus obsolètes (`test_completion_stream_with_openai_library_stops` : « Sure! Here's one… » contre « Sure, here's one… » attendu, **sortie identique** upstream). Les deux tests Anthropic « thinking » (DeepSeek-R1) passent. Durée du test LoRA : le premier binaire exécuté paie le téléchargement de l’adaptateur (~48 s) ; ordre inversé, à chaud, 19,9 s (moteur) contre 18,1 s (upstream).
+
 ## Performances : A/B contre upstream `e4c142c`
 
 Binaires alternés sur le même hôte (upstream puis moteur, 3 tours × 5 répétitions, soit 15 échantillons par cellule), `scripts/bench-server-baseline.py`, paramètres P0 (ctx 1024, 4 slots, 64 tokens, température 0). **L’hôte n’était pas au repos** (visioconférence, charge 20–45) : seules les comparaisons alternées sont interprétables, pas les valeurs absolues.
@@ -97,7 +123,7 @@ Mémoire des files : bornée par `max_events`/`max_tasks` dans l’API embarqué
 | `/tokenize`, `/detokenize` | `tokenize`, `detokenize` | `test_tokenize` |
 | `/apply-template` | `apply_template` | `test_template` |
 | Comptages chat/Responses/Messages | `chat_tokens`, `response_tokens`, `message_tokens` | `test_chat_completion`, `test_compat_*` |
-| `/lora-adapters` | `lora_list`, `lora_apply` | `test_lora` (le test `slow` 8B non exécuté) |
+| `/lora-adapters` | `lora_list`, `lora_apply` | `test_lora`, dont le test lent 8B + adaptateur (PASS, comme upstream) |
 | `/slots`, `/slots/:id` | `slots`, `slot_save/restore/erase` ; gardes HTTP | `test_basic`, `test_slot_save`, `test_security` |
 | `/models/load`, `/models/unload` | `load`, `unload` | `test_router`, `test-engine-models` |
 | POST/DELETE `/models` | `download`, `remove` | `test_router`, `test-engine-acquisition`, `test-engine-sources` |
@@ -122,7 +148,7 @@ Mémoire des files : bornée par `max_events`/`max_tasks` dans l’API embarqué
 | --- | --- |
 | Vidéo/WebP sans sous-processus | **OUVERT — arbitrage requis** |
 | Chemin vidéo desktop (ffmpeg) | BLOCKED : ffmpeg absent ; code inchangé depuis upstream ; aucun test existant |
-| 199 tests HTTP `slow` (+ infill/LoRA sous `SLOW_TESTS`) | Non exécutés : téléchargements de 0,7 à 5 Go par modèle. Les capacités correspondantes sont couvertes par la qualification sur modèles locaux |
+| 121 échecs des tests lents d’appels d’outils | **Identiques sur upstream `e4c142c`** (même ensemble, test par test) : comportement des modèles quantifiés et attentes de texte figées, pas une régression du moteur |
 | LeakSanitizer | BLOCKED (macOS arm64) |
 | Linux, Windows | Non qualifiés (hôte macOS) ; points d’attention : `lsof`/`pgrep` du test CLI, `_putenv_s`, export des symboles internes sous Windows |
 | iOS | Compilation et édition de liens seulement ; ni exécution sur appareil ni packaging (hors périmètre) |

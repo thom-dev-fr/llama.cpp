@@ -1197,7 +1197,7 @@ Reprise sur `b536fde9a` (P8), arbre propre. Plan P9, design (critères de fin) e
 | Transcription : parité HTTP upstream/HEAD, gemma-4-E2B, `test-2.mp3`, 96 et 512 tokens | Texte et usage **identiques** (`p9-asr-*.json`) |
 | iOS arm64 : bibliothèques du profil moteur (Xcode, `-DCMAKE_SYSTEM_NAME=iOS`, Metal embarqué) + édition de liens de `engine-simple.cpp` | **PASS** (`p9-ios-*.log`) ; 2240 `-Wshorten-64-to-32` du générateur Xcode (ggml/src amont surtout) ; `_fork` référencé par `ggml_print_backtrace` (chemin d’abort fatal amont, `GGML_NO_BACKTRACE`) |
 | A/B performance contre upstream (CPU/Metal × stories260K/Qwen3.5-2B, alterné 3×5) | Pas de régression (`p9-ab-summary.md`) ; cellule Qwen/Metal/4 à −10,1 % refaite 6 tours en ordre inversé : **+0,3 %** (`p9-abq-*`) |
-| Tests HTTP `slow` (199) et `SLOW_TESTS` | **Non exécutés** : téléchargements 0,7–5 Go par modèle, non lancés sans accord |
+| Tests HTTP `slow` (199) et `SLOW_TESTS` (2) | Exécutés après accord (section « Tests lents ») : **80 PASS / 121 FAIL sur le moteur comme sur upstream, ensembles d’échecs identiques dans les 16 lots** |
 | Vidéo/WebP desktop | **BLOCKED** : ffmpeg/ffprobe absents, aucun test existant |
 | LeakSanitizer | **BLOCKED** (macOS) |
 | `git diff --check` | **PASS** |
@@ -1231,6 +1231,12 @@ python3 build-agent-engine-evidence/p9-ab-summary.py
 
 Le worktree upstream temporaire (`git worktree add --detach <scratch>/upstream-e4c142c e4c142c`, build `llama-server` Release par défaut) a été retiré après les mesures ; le recréer ainsi pour rejouer `p9-ab*.sh` (chemin `UP=` en tête des scripts).
 
+### Tests lents (après accord)
+
+`build-agent-engine-evidence/p9-slow-all.sh` enchaîne 16 lots `p9-slow-batch.sh` : `llama download -hf` de chaque modèle dans `tools/server/tests/tmp` (les presets démarrent le serveur en `--offline`), mêmes tests avec `SLOW_TESTS=1 N_GPU_LAYERS=99` sur le moteur puis sur upstream `e4c142c` (worktree détaché, `llama-server` Release), comparaison des ensembles `FAILED`/`ERROR` test par test, puis suppression des seules entrées ajoutées au cache depuis `p9-slow-tmp-before.txt` (disque : 28 Gio libres). Couverture vérifiée : l’union des filtres `-k` collecte les 199 tests `slow`. Débit ~7 Mo/s, environ 3 h 30 au total.
+
+Résultat : **80 PASS / 121 FAIL des deux côtés, aucun écart** (tableau dans le rapport). Échecs = comportements des modèles et textes attendus obsolètes, identiques upstream ; gemma-2-2b échoue sur ses 12 tests des deux côtés (pas de format d’appel d’outil natif). Faux départs consignés : un premier lot sans `llama download` (serveurs `--offline` : 10 échecs de démarrage), un lot lancé avec un mauvais chemin de test (aucun test), un script non exécutable ; tous rejoués. Test LoRA rejoué en ordre inversé (`ORDER="upstream engine"`) : l’écart de durée initial venait du téléchargement de l’adaptateur par le premier binaire.
+
 ### Passation
 
-P9 exécuté ; matrice, correctifs et limites résumés dans le [rapport final](embedded-inference-engine-report.md). **Prochaine action : arbitrage vidéo/WebP sans sous-processus** (décodeur embarqué ou contrat de frames prétraitées), puis, selon les moyens disponibles : tests `slow` (téléchargements), Linux/Windows, LeakSanitizer sous Linux, exécution iOS sur appareil. Aucun travail de fond laissé en cours.
+P9 exécuté ; matrice, correctifs et limites résumés dans le [rapport final](embedded-inference-engine-report.md). **Prochaine action : arbitrage vidéo/WebP sans sous-processus** (décodeur embarqué ou contrat de frames prétraitées), puis, selon les moyens disponibles : Linux/Windows, LeakSanitizer sous Linux, exécution iOS sur appareil. Aucun travail de fond laissé en cours.
