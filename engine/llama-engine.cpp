@@ -78,8 +78,10 @@ void request_state::push(server_task_result_ptr result) {
         std::lock_guard<std::mutex> lock(mutex);
         if (finished) { return; }
         if (result->is_error()) {
+            auto * native = dynamic_cast<server_task_result_error *>(result.get());
+            const bool context = native && native->err_type == ERROR_TYPE_EXCEED_CONTEXT_SIZE;
             native_error = std::move(result);
-            terminal = {event_type::error, nullptr, "inference_error", "Inference failed"};
+            terminal = {event_type::error, nullptr, context ? "context_exceeded" : "inference_error", "Inference failed"};
             finished = true;
             cancel_fn = cancel_work;
         } else if (pending.size() >= capacity) {

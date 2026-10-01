@@ -237,6 +237,20 @@ common_chat_msg task_result_state::update_chat_msg(
 }
 
 //
+// result_context
+//
+json result_context::to_json(int32_t n_tokens, int32_t n_prompt_tokens, int32_t n_prompt_tokens_cache, int32_t n_decoded) const {
+    return json {
+        {"n_ctx",              n_ctx},
+        {"n_tokens",           n_tokens},
+        {"n_prompt_tokens",    n_prompt_tokens},
+        {"n_cache_tokens",     n_prompt_tokens_cache},
+        {"n_decoded",          n_decoded},
+        {"n_reasoning_tokens", n_reasoning_tokens},
+    };
+}
+
+//
 // result_prompt_progress
 //
 json result_prompt_progress::to_json() const {
@@ -356,6 +370,9 @@ json server_task_result_cmpl_final::to_json_non_oaicompat() {
         {"tokens_cached",       n_tokens_cached},
         {"timings",             stats.to_json()},
     };
+    if (context.enabled) {
+        res["context"] = context.to_json(n_prompt_tokens + n_decoded, n_prompt_tokens, n_prompt_tokens_cache, n_decoded);
+    }
     if (!stream && !probs_output.empty()) {
         res["completion_probabilities"] = completion_token_output::probs_vector_to_json(probs_output, post_sampling_probs);
     }
@@ -404,6 +421,9 @@ json server_task_result_cmpl_final::to_json_oaicompat() {
     if (verbose) {
         res["__verbose"] = to_json_non_oaicompat();
     }
+    if (context.enabled) {
+        res["context"] = context.to_json(n_prompt_tokens + n_decoded, n_prompt_tokens, n_prompt_tokens_cache, n_decoded);
+    }
     if (stats.is_set()) {
         res["timings"] = stats.to_json();
     }
@@ -451,6 +471,9 @@ json server_task_result_cmpl_final::to_json_oaicompat_chat() {
     // extra fields for debugging purposes
     if (verbose) {
         res["__verbose"] = to_json_non_oaicompat();
+    }
+    if (context.enabled) {
+        res["context"] = context.to_json(n_prompt_tokens + n_decoded, n_prompt_tokens, n_prompt_tokens_cache, n_decoded);
     }
     if (stats.is_set()) {
         res["timings"] = stats.to_json();
@@ -513,6 +536,9 @@ json server_task_result_cmpl_final::to_json_oaicompat_chat_stream() {
         });
     }
 
+    if (context.enabled) {
+        deltas.back()["context"] = context.to_json(n_prompt_tokens + n_decoded, n_prompt_tokens, n_prompt_tokens_cache, n_decoded);
+    }
     if (stats.is_set()) {
         deltas.back()["timings"] = stats.to_json();
     }
@@ -1061,6 +1087,9 @@ json server_task_result_cmpl_partial::to_json_non_oaicompat() {
     if (stats.is_set()) {
         res["timings"] = stats.to_json();
     }
+    if (context.enabled) {
+        res["context"] = context.to_json(is_progress ? progress.processed : n_prompt_tokens + n_decoded, n_prompt_tokens, n_prompt_tokens_cache, n_decoded);
+    }
     if (is_progress) {
         res["prompt_progress"] = progress.to_json();
     }
@@ -1097,6 +1126,9 @@ json server_task_result_cmpl_partial::to_json_oaicompat() {
     // extra fields for debugging purposes
     if (verbose) {
         res["__verbose"] = to_json_non_oaicompat();
+    }
+    if (context.enabled) {
+        res["context"] = context.to_json(is_progress ? progress.processed : n_prompt_tokens + n_decoded, n_prompt_tokens, n_prompt_tokens_cache, n_decoded);
     }
     if (stats.is_set()) {
         res["timings"] = stats.to_json();
@@ -1152,6 +1184,9 @@ json server_task_result_cmpl_partial::to_json_oaicompat_chat() {
             };
         }
 
+        if (context.enabled) {
+            last_json["context"] = context.to_json(is_progress ? progress.processed : n_prompt_tokens + n_decoded, n_prompt_tokens, n_prompt_tokens_cache, n_decoded);
+        }
         if (stats.is_set()) {
             last_json["timings"] = stats.to_json();
         }
@@ -1503,6 +1538,10 @@ json server_task_result_error::to_json() {
     if (err_type == ERROR_TYPE_EXCEED_CONTEXT_SIZE) {
         res["n_prompt_tokens"] = n_prompt_tokens;
         res["n_ctx"]           = n_ctx;
+        if (!context_phase.empty()) {
+            res["context_phase"] = context_phase;
+            res["n_decoded"]     = n_decoded;
+        }
     }
     return res;
 }

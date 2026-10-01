@@ -174,6 +174,41 @@ possède la requête moteur jusqu’à la fin du drainage. Remplacement, DELETE/
 et déconnexion sans reprise entraînent son annulation ; le replay conserve ses
 propres offsets, rétention et contrôle d’accès.
 
+### Contexte : motifs d’arrêt et occupation
+
+Deux champs de requête facultatifs de la completion native, de completions et
+de chat servent les consommateurs embarqués (Responses et Messages ne les
+exposent pas). Absents, le résultat est inchangé, octet pour octet
+côté serveur.
+
+- **`fail_on_context_full: true`** distingue les trois motifs d’arrêt :
+  - prompt plus grand que le contexte : erreur `context_exceeded`, données
+    natives `type: "exceed_context_size_error"`, `n_prompt_tokens`, `n_ctx`, et
+    `context_phase: "prompt"` ;
+  - contexte rempli pendant la génération alors que le budget de sortie n’est
+    pas atteint : erreur `context_exceeded` après les fragments déjà livrés,
+    avec `context_phase: "generation"` et `n_decoded`. Sans ce champ, ce cas
+    reste un arrêt `finish_reason: "length"` (`truncated` au format natif) ;
+  - budget de sortie atteint (`max_tokens`/`n_predict`) : succès avec
+    `finish_reason: "length"`, qui ne désigne alors plus que ce budget.
+  Le context shift ne s’applique jamais à une telle requête, même si le modèle
+  l’active (`context-shift`).
+- **`return_context: true`** ajoute un objet `context` aux fragments streamés
+  qui portent des deltas (et à ceux de `prompt_progress`) puis au résultat
+  final :
+  `n_ctx` (capacité effective du slot qui sert la requête), `n_tokens`
+  (occupation : tokens du prompt, images et définitions d’outils compris, plus
+  tokens générés ; tokens traités pendant `prompt_progress`), `n_prompt_tokens`,
+  `n_cache_tokens` (préfixe réutilisé), `n_decoded` et `n_reasoning_tokens`.
+  Chaque objet appartient à la requête qui le lit : deux requêtes intercalées
+  ne partagent aucun compteur, contrairement à l’instantané `slots`.
+  `n_reasoning_tokens` suit, sur les tokens générés, les balises de
+  raisonnement du template (balises comprises), y compris un raisonnement
+  ouvert par le prompt de génération ; il vaut 0 sans balises.
+
+La catégorie `context_exceeded` s’applique aussi sans `fail_on_context_full`
+au prompt trop long (auparavant `inference_error`, mêmes données natives).
+
 ## Concurrence, durée de vie et bornes
 
 - `submit()`, `completion()` et `stop()` peuvent être appelés concurremment. La préparation
@@ -219,7 +254,7 @@ La validation de forme de la requête (objet, champs, types) est celle du schém
 de tâche existant ; les messages d’erreur sont ceux du serveur historique.
 
 Catégories d’erreur actuelles : `invalid_config`, `load_failed`, `invalid_request`,
-`capacity_exceeded`, `queue_full`, `inference_error`, `preparation_failed`,
+`capacity_exceeded`, `queue_full`, `inference_error`, `context_exceeded`, `preparation_failed`,
 `model_not_found`, `model_not_loaded`, `wait_timeout`, `wake_failed`,
 `capability_unavailable`, `model_downloading`, `download_failed`. Catégories
 d’annulation : `cancelled`, `stopped`, `unloaded`, `evicted`.

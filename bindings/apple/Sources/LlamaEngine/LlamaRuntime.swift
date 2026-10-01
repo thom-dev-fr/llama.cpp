@@ -59,6 +59,8 @@ public struct LlamaLoadProfile: Hashable, Sendable {
 public enum LlamaEngineError: Error, Sendable, Equatable {
     /// The native engine is not part of this build yet.
     case engineUnavailable(String)
+    /// The prompt, or the prompt and the generated tokens, exceed the context.
+    case contextExceeded(LlamaContextOverflow)
 }
 
 extension LlamaEngineError: LocalizedError {
@@ -66,6 +68,8 @@ extension LlamaEngineError: LocalizedError {
         switch self {
         case .engineUnavailable(let reason):
             return "The llama.cpp engine is unavailable: \(reason)"
+        case .contextExceeded(let overflow):
+            return overflow.message
         }
     }
 }

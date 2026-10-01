@@ -12,6 +12,7 @@
 #include "fit.h"
 #include "llama.h"
 #include "log.h"
+#include "reasoning-budget.h"
 #include "sampling.h"
 #include "speculative.h"
 #include "mtmd.h"
@@ -244,6 +245,7 @@ struct server_slot {
     bool has_next_token = true;
     bool has_new_line   = false;
     bool truncated      = false;
+    bool context_full   = false; // generation stopped by the context, budget left
 
     stop_type stop;
 
@@ -305,6 +307,11 @@ struct server_slot {
 
     common_sampler_ptr smpl;
 
+    // return_context: follows the template's reasoning tags over the generated
+    // tokens, outside the sampler chain (no effect on sampling)
+    llama_sampler_ptr reasoning_tracker;
+    int32_t n_reasoning = 0;
+
     llama_token sampled; // in speculative mode, this is the last accepted token
 
     // for TTS models, this is the embd generated from prev step, decode this to generate next hidden state
@@ -333,6 +340,7 @@ struct server_slot {
         generated_text = "";
         has_new_line   = false;
         truncated      = false;
+        context_full   = false;
         stop           = STOP_TYPE_NONE;
         stopping_word  = "";
         n_sent_text    = 0;
@@ -1824,6 +1832,31 @@ private:
         // the per-request limit takes priority over the global one
         slot.n_predict_max = task.params.n_predict != -1 ? task.params.n_predict : params_base.n_predict;
 
+        slot.reasoning_tracker.reset();
+        slot.n_reasoning = 0;
+        if (task.params.return_context && task.need_sampling() &&
+            !task.params.sampling.reasoning_budget_start.empty() && !task.params.sampling.reasoning_budget_end.empty()) {
+            // the generation prompt may already open the reasoning; decided on its
+            // text, which does not depend on how the tags tokenize in context
+            const auto tag_text = [&](const llama_tokens & tokens) {
+                const std::string text = common_detokenize(vocab, tokens, true);
+                const size_t first = text.find_first_not_of(" \t\n");
+                return first == std::string::npos ? std::string() : text.substr(first);
+            };
+            const auto & prompt = task.params.sampling.generation_prompt;
+            const std::string start_text = tag_text(task.params.sampling.reasoning_budget_start);
+            const size_t opened = start_text.empty() ? std::string::npos : prompt.rfind(start_text);
+            bool open = opened != std::string::npos;
+            for (const auto & end_tag : task.params.sampling.reasoning_budget_end) {
+                const std::string end_text = tag_text(end_tag);
+                const size_t closed = end_text.empty() ? std::string::npos : prompt.rfind(end_text);
+                open = open && (closed == std::string::npos || closed < opened);
+            }
+            slot.reasoning_tracker.reset(common_reasoning_budget_init(vocab, {task.params.sampling.reasoning_budget_start},
+                task.params.sampling.reasoning_budget_end, {}, INT32_MAX,
+                open ? REASONING_BUDGET_COUNTING : REASONING_BUDGET_IDLE));
+        }
+
         slot.task = std::make_unique<const server_task>(std::move(task));
 
         slot.state = slot.task->is_child()
@@ -1841,6 +1874,18 @@ private:
         // remember which tokens were sampled - used for repetition penalties during sampling
         const std::string token_str = result.text_to_send;
         slot.sampled = result.tok;
+
+        if (slot.reasoning_tracker) {
+            // reasoning tokens include the tags that open and close the reasoning
+            const auto inside = [](common_reasoning_budget_state state) {
+                return state != REASONING_BUDGET_IDLE && state != REASONING_BUDGET_DONE;
+            };
+            const bool before = inside(common_reasoning_budget_get_state(slot.reasoning_tracker.get()));
+            llama_sampler_accept(slot.reasoning_tracker.get(), result.tok);
+            if (before || inside(common_reasoning_budget_get_state(slot.reasoning_tracker.get()))) {
+                slot.n_reasoning++;
+            }
+        }
 
         slot.generated_text += token_str;
         if (slot.task->params.return_tokens) {
@@ -1890,8 +1935,9 @@ private:
         }
 
         // if context shifting is disabled, make sure that we don't run out of context
-        if (!params_base.ctx_shift && slot.prompt.n_tokens() + 1 >= slot.n_ctx) {
+        if ((!params_base.ctx_shift || slot.task->params.fail_on_context_full) && slot.prompt.n_tokens() + 1 >= slot.n_ctx) {
             slot.truncated      = true;
+            slot.context_full   = slot.has_budget();
             slot.stop           = STOP_TYPE_LIMIT;
             slot.has_next_token = false;
 
@@ -2030,10 +2076,26 @@ private:
     }
 
     void send_error(const server_slot & slot, const std::string & error, const enum error_type type = ERROR_TYPE_SERVER) {
-        send_error(slot.task->id, error, type, slot.task->n_tokens(), slot.n_ctx);
+        // a request that asked for explicit context errors learns in which phase the context filled
+        const bool phase = type == ERROR_TYPE_EXCEED_CONTEXT_SIZE && slot.task->params.fail_on_context_full;
+        send_error(slot.task->id, error, type, slot.task->n_tokens(), slot.n_ctx, phase ? "prompt" : "");
     }
 
-    void send_error(const int id_task, const std::string & error, const enum error_type type = ERROR_TYPE_SERVER, const int32_t n_prompt_tokens = 0, const int32_t n_ctx = 0) {
+    // Ends a generation: its final response, or the context error that the
+    // request asked for when the context filled before its token budget.
+    void send_stop(server_slot & slot) {
+        if (!slot.context_full || slot.stop != STOP_TYPE_LIMIT || !slot.task->params.fail_on_context_full) {
+            send_final_response(slot);
+            return;
+        }
+        send_error(slot.task->id,
+                   string_format("the context is full after %d generated tokens (prompt: %d tokens, context size: %d tokens)",
+                                 (int) slot.stats.n_gen, slot.task->n_tokens(), slot.n_ctx),
+                   ERROR_TYPE_EXCEED_CONTEXT_SIZE, slot.task->n_tokens(), slot.n_ctx, "generation", slot.stats.n_gen);
+    }
+
+    void send_error(const int id_task, const std::string & error, const enum error_type type = ERROR_TYPE_SERVER, const int32_t n_prompt_tokens = 0, const int32_t n_ctx = 0,
+                    const std::string & context_phase = "", const int32_t n_decoded = 0) {
         SRV_ERR("task id = %d, error: %s\n", id_task, error.c_str());
 
         if (type == ERROR_TYPE_EXCEED_CONTEXT_SIZE) {
@@ -2046,6 +2108,8 @@ private:
         res->err_msg         = error;
         res->n_prompt_tokens = n_prompt_tokens;
         res->n_ctx           = n_ctx;
+        res->context_phase   = context_phase;
+        res->n_decoded       = n_decoded;
 
         queue_results.send(std::move(res));
     }
@@ -2074,6 +2138,9 @@ private:
         res->n_prompt_tokens       = slot.task->n_tokens();
         res->n_prompt_tokens_cache = slot.stats.n_prompt_cached;
         res->post_sampling_probs   = slot.task->params.post_sampling_probs;
+        res->context.enabled       = slot.task->params.return_context;
+        res->context.n_ctx         = slot.n_ctx;
+        res->context.n_reasoning_tokens = slot.n_reasoning;
 
         res->verbose           = slot.task->params.verbose;
         res->res_type          = slot.task->params.res_type;
@@ -2127,6 +2194,9 @@ private:
         res->stopping_word         = slot.stopping_word;
         res->stop                  = slot.stop;
         res->post_sampling_probs   = slot.task->params.post_sampling_probs;
+        res->context.enabled       = slot.task->params.return_context;
+        res->context.n_ctx         = slot.n_ctx;
+        res->context.n_reasoning_tokens = slot.n_reasoning;
 
         res->verbose           = slot.task->params.verbose;
         res->stream            = slot.task->params.stream;
@@ -2891,7 +2961,7 @@ private:
         // TODO: simplify and improve
         iterate(slots, [&](server_slot & slot) {
             if (slot.state == SLOT_STATE_GENERATING && slot.prompt.n_tokens() + 1 >= slot.n_ctx) {
-                if (!params_base.ctx_shift) {
+                if (!params_base.ctx_shift || slot.task->params.fail_on_context_full) {
                     // this check is redundant (for good)
                     // we should never get here, because generation should already stopped in process_token()
                     send_error(slot, "context shift is disabled", ERROR_TYPE_SERVER);
@@ -3867,7 +3937,7 @@ private:
             if (!process_token(result, slot)) {
                 // release slot because of stop condition
                 slot.print_timings();
-                send_final_response(slot);
+                send_stop(slot);
                 slot.release();
 
                 return;
@@ -3992,7 +4062,7 @@ private:
 
                 if (!process_token(result, slot)) {
                     slot.print_timings();
-                    send_final_response(slot);
+                    send_stop(slot);
                     slot.release();
 
                     return;

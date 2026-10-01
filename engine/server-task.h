@@ -53,6 +53,11 @@ struct task_params {
     bool cache_prompt    = true; // remember the prompt to avoid reprocessing all prompt
     bool return_tokens   = false;
     bool return_progress = false;
+    // Embedded consumers: end with a context_exceeded error instead of a
+    // "length" stop when the context fills during generation (never shifts it),
+    // and report the request's context use in its chunks.
+    bool fail_on_context_full = false;
+    bool return_context       = false;
 
     int32_t sse_ping_interval = 30; // seconds between SSE comment pings while the stream stays silent, -1 disables
 
@@ -308,6 +313,15 @@ struct completion_token_output {
 
 };
 
+// Context use of a request, reported when it sets return_context.
+struct result_context {
+    bool    enabled            = false;
+    int32_t n_ctx              = 0;  // effective capacity of the slot serving the request
+    int32_t n_reasoning_tokens = 0;  // generated inside the template's reasoning tags
+
+    json to_json(int32_t n_tokens, int32_t n_prompt_tokens, int32_t n_prompt_tokens_cache, int32_t n_decoded) const;
+};
+
 struct server_task_result_cmpl_final : server_task_result {
     std::string content;
     llama_tokens tokens;
@@ -325,6 +339,7 @@ struct server_task_result_cmpl_final : server_task_result {
     bool has_new_line;
     std::string stopping_word;
     stop_type stop = STOP_TYPE_NONE;
+    result_context context;
 
     bool post_sampling_probs;
     std::vector<completion_token_output> probs_output;
@@ -398,6 +413,7 @@ struct server_task_result_cmpl_partial : server_task_result {
     completion_token_output prob_output;
     server_slot_stats stats;
     result_prompt_progress progress;
+    result_context context;
 
     // response formatting
     bool               verbose  = false;
@@ -472,6 +488,10 @@ struct server_task_result_error : server_task_result {
     // for ERROR_TYPE_EXCEED_CONTEXT_SIZE
     int32_t n_prompt_tokens = 0;
     int32_t n_ctx           = 0;
+    // with fail_on_context_full: "prompt" or "generation", and the tokens
+    // generated before the context filled
+    std::string context_phase;
+    int32_t n_decoded = 0;
 
     virtual bool is_error() override {
         return true;

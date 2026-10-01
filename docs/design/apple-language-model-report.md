@@ -1,13 +1,13 @@
 # Rapport — Apple LanguageModel sur llama.cpp
 
-Rapport prévu par le [plan](apple-language-model-plan.md). Il distingue ce qui est exécuté, compilé seulement, ou non encore traité. Aucune capacité n’est validée à ce stade : seul P0 est achevé.
+Rapport prévu par le [plan](apple-language-model-plan.md). Il distingue ce qui est exécuté, compilé seulement, ou non encore traité. Aucune capacité Foundation Models n’est validée à ce stade : P0 et P1 sont achevés.
 
 ## Suivi P0–P7
 
 | Phase | État | Preuve | Blocage / remarque |
 | --- | --- | --- | --- |
 | P0 Contrat exécutable | **Terminé** | Matrice ci-dessous ; package `bindings/apple` compilé pour macOS 27, iOS 27 appareil et simulateur ; 8 tests Swift réussis sur simulateur iOS 27. | Aucune capacité déclarée : le squelette refuse toute requête explicitement. |
-| P1 Signaux du moteur | À faire | — | Écarts relevés en P0 : arrêt pour contexte épuisé confondu avec `length`, `truncated` absent du chat. |
+| P1 Signaux du moteur | **Terminé** | `test-engine-context` (nouveau) ; CTest 77/80, les 3 échecs préexistants ou d’environnement ; HTTP non-`slow` 393 réussis / 6 ignorés ; sonde Qwen3.5-2B (image, raisonnement) ; 12 tests Swift sur simulateur iOS 27. | `test-engine-operations` et `test-engine-acquisition` échouent aussi sans P1 (voir P1). |
 | P2 Pont natif et XCFramework | À faire | — | — |
 | P3 Runtime partagé, stockage | À faire | — | `LlamaRuntime` n’est qu’une identité et des limites. |
 | P4 Acquisition URLSession | À faire | — | Références Qwen3.5-2B relevées localement, à confirmer côté serveur. |
@@ -74,8 +74,8 @@ Légende du test : *P0* = test exécuté aujourd’hui ; les autres sont des tes
 | Sampling | `greedy`, `randomTopK(k)`, `randomProbabilityThreshold(p)`, `temperature` | `top_k`, `top_p`, `temperature` | Paramètres identiques | `greedy` → `top_k = 1` ; combinaison exacte des samplers par défaut du moteur (min_p, pénalités…) à neutraliser pour une traduction fidèle. | P5 |
 | Seed | `seed: UInt64?` | `seed` 32 bits (`uint32_t`), `0xFFFFFFFF` = aléatoire | Reproductibilité | Valeurs `> 0xFFFFFFFE` sans représentation fidèle → refus avant lancement. | P5 |
 | Limite de sortie | `maximumResponseTokens` | `n_predict` / `max_tokens` | Arrêt « budget atteint » | Distinct du contexte épuisé (P1). | P1/P5 |
-| Contexte plein | — | Erreur avant prompt (`exceeds the available context size`) ; pendant génération : `STOP_TYPE_LIMIT` + `truncated` (`engine-context.cpp:1904`) | `LanguageModelError.contextSizeExceeded(contextSize, tokenCount)` | Le chemin chat rapporte `finish_reason: length` dans les deux cas ; `truncated` n’est exposé qu’au format natif `/completion`. Context shift à désactiver par requête. | P1 : trois motifs d’arrêt. |
-| Usage et occupation | `updateUsage(input:output:)` | `timings`, `prompt_progress`, `n_ctx` de slot | Usage par requête ; occupation séparée | `session.usage` est cumulatif, jamais une occupation. Attribution par requête à prouver (P1). | P1 |
+| Contexte plein | — | `fail_on_context_full` : erreur `context_exceeded` avec `context_phase` `prompt`/`generation` (P1) | `LanguageModelError.contextSizeExceeded(contextSize, tokenCount)` | Avant P1, le chemin chat rapportait `finish_reason: length` pour le contexte comme pour le budget. Jamais de context shift pour ces requêtes. | P1 : `test-engine-context`, `ContextSignalTests`. |
+| Usage et occupation | `updateUsage(input:output:)` | `return_context` : `n_ctx`, `n_tokens`, `n_prompt_tokens`, `n_cache_tokens`, `n_decoded`, `n_reasoning_tokens` par requête (P1) ; `prompt_progress` | `Usage.Input(total, cached)`, `Usage.Output(total, reasoning)` ; occupation séparée | `session.usage` est cumulatif, jamais une occupation. | P1 : requêtes intercalées ; P5 : traduction. |
 | Erreurs | — | Catégories d’`event` | `LanguageModelError` / erreurs typées du runtime | Pas de cas Apple « file pleine » ni « modèle invalide » : erreurs propres à la bibliothèque. `rateLimited`, `guardrailViolation`, `refusal`, `unsupportedLanguageOrLocale` sans source moteur. | P5 |
 | Combinaisons | Schéma + outils, vision + outils, raisonnement + schéma | — | — | Chaque combinaison annoncée exige un test (conception). | P5/P7 |
 | Hors protocole | Audio, embeddings, reranking | Existants dans le moteur | — | Non exposés via `LanguageModel`. | — |
@@ -98,9 +98,61 @@ xcodebuild test -scheme LlamaApple-Package -destination 'platform=iOS Simulator,
 
 Résultats : trois compilations réussies (code 0, sans avertissement) ; `TEST SUCCEEDED`, 8 tests dans 2 suites. Les tests macOS sont compilés mais non exécutables sur macOS 26.7.
 
+## P1 — Signaux publics du moteur
+
+### Constat avant modification
+
+- Prompt trop long : erreur native `exceed_context_size_error` avec `n_prompt_tokens` et `n_ctx`, mais catégorie publique générique `inference_error`.
+- Contexte rempli pendant la génération (`engine-context.cpp`, `process_token`) : `STOP_TYPE_LIMIT` + `truncated`, rendu en chat par `finish_reason: "length"`, comme le budget `max_tokens` ; `truncated` n’existe qu’au format natif.
+- Context shift : réglage du modèle (`params_base.ctx_shift`, désactivé par défaut), pas de la requête.
+- Compteurs existants, tous propres au résultat d’une tâche et donc à sa requête : `n_prompt_tokens` (images et outils du template inclus), `n_prompt_tokens_cache`, `n_decoded`, `prompt_progress` (`total`, `cache`, `processed`). Manquaient : la capacité effective du slot (`n_ctx`) dans les résultats et tout compteur de tokens de raisonnement. L’instantané `slots` est global et ne sert pas à l’attribution.
+
+### Extension (opt-in, documentée dans [l’API du moteur](embedded-inference-engine-api.md))
+
+- `fail_on_context_full: true` : contexte rempli avant le budget de sortie → erreur `context_exceeded`, `context_phase: "generation"`, `n_decoded`, après les fragments déjà livrés ; prompt trop long → `context_phase: "prompt"` ; budget atteint → succès `finish_reason: "length"`. Le context shift ne s’applique jamais à ces requêtes.
+- `return_context: true` : objet `context` (`n_ctx`, `n_tokens`, `n_prompt_tokens`, `n_cache_tokens`, `n_decoded`, `n_reasoning_tokens`) dans les fragments streamés porteurs de deltas, ceux de `prompt_progress` et le résultat final (natif, completions, chat).
+- `n_reasoning_tokens` : suivi des balises de raisonnement du template sur les tokens générés, par le détecteur de `common/reasoning-budget` instancié hors de la chaîne de sampling (aucun effet sur la génération). L’état initial vient du texte du prompt de génération (`<think>\n` ouvert par Qwen3.5) : avec le vocabulaire SPM de test, `<think>` ne se tokenise pas de la même façon isolé et dans le prompt.
+- Catégorie publique `context_exceeded` pour toute erreur de contexte (auparavant `inference_error`). Le serveur lit le JSON natif (`read_native`, champ `code`) et n’utilise pas cette catégorie ; le CLI affiche le message, inchangé.
+- Côté Swift (`bindings/apple`) : `LlamaContextReport`, `LlamaContextOverflow` (décodage des données natives), `LlamaEngineError.contextExceeded`, et conversion en `LanguageModelError.contextSizeExceeded(contextSize:tokenCount:)` avec la phase dans `debugDescription`.
+
+### Preuves
+
+Build dédié `build-apple-p1` (Release, Metal, moteur, outils, serveur, tests ; `LLAMA_ENGINE_TEST_MODEL=tools/server/tests/tmp/stories15M-q4_0.gguf`) :
+
+```bash
+cmake -S . -B build-apple-p1 -DCMAKE_BUILD_TYPE=Release -DLLAMA_BUILD_ENGINE=ON -DLLAMA_BUILD_TESTS=ON -DLLAMA_BUILD_TOOLS=ON -DLLAMA_BUILD_SERVER=ON -DLLAMA_BUILD_EXAMPLES=ON -DLLAMA_ENGINE_TEST_MODEL=$PWD/tools/server/tests/tmp/stories15M-q4_0.gguf
+cmake --build build-apple-p1 -j 10
+(cd build-apple-p1 && ctest -j 6)
+(cd tools/server/tests && LLAMA_SERVER_BIN_PATH=../../../build-apple-p1/bin/llama-server python -m pytest -m 'not slow' -q unit)
+```
+
+- Compilation sans erreur ni avertissement nouveau.
+- `test-engine-context` (API publique, enregistré dans CTest) : **PASS**. Sortie : slot de 128 tokens (contexte d’entraînement de stories15M), prompt de 29 tokens ; « the context is full after 99 generated tokens (prompt: 29 tokens, context size: 128 tokens) » ; raisonnement 12/12. Il couvre :
+  1. budget atteint → `length`, rapport `n_decoded = 8`, `n_tokens = prompt + 8`, streamé et non streamé ;
+  2. contexte plein en génération → `context_exceeded`/`generation` après des fragments, sans `finish_reason`, streamé et non streamé ; sans le champ → `length` comme avant, sans objet `context` ;
+  3. prompt trop long → `context_exceeded`, `context_phase: "prompt"` seulement avec le champ ;
+  4. deux requêtes intercalées (lecteurs alternés, `parallel = 2`) → rapports monotones, `n_prompt_tokens` constants et distincts, `n_decoded` 6 et 20, `n_tokens` exacts pour chacune ;
+  5. modèle avec `context-shift` → shift sans le champ (succès au-delà du contexte), erreur `generation` avec ;
+  6. template Qwen3.5 → 12/12 tokens de raisonnement avec `enable_thinking`, 0 sans.
+- CTest complet : **77/80**. Échecs : `test-jinja-py` (module `jinja2` absent du python système, environnement, déjà signalé par le rapport du moteur) ; `test-engine-operations` (grammaire de sortie structurée préfixée par le prompt de génération, refusée avec stories15M) et `test-engine-acquisition` (assertion sur la disparition de `test/slow:Q8_0` après annulation). Ces deux derniers échouent **à l’identique sur les sources moteur sans P1** (`git stash` de `engine/`, recompilation de la cible, même modèle) : ils ne sont pas causés par P1 et restent à analyser hors de ce travail.
+- Tests HTTP du serveur sur le binaire P1, `-m 'not slow'` : **393 réussis, 6 ignorés**, 199 désélectionnés (même décompte que la qualification du moteur).
+- Sonde Qwen3.5-2B Q4_K_M + `mmproj-BF16` (Metal, contexte 4096) : texte seul 19 tokens de prompt, même question avec `tools/mtmd/test-1.jpeg` 321 tokens (le coût de l’image est dans l’occupation) ; avec raisonnement, 157 tokens de raisonnement sur 160 générés puis la réponse « 5 » ; raisonnement coupé par le budget : 256/256.
+- Swift : 12 tests sur simulateur iOS 27 (dont 4 de signaux de contexte, avec les charges natives capturées sur le moteur) ; compilation macOS 27 et iOS 27 appareil.
+
+### Constats SDK
+
+- `LanguageModelError.ContextSizeExceeded(…, metadata:)` : sur le runtime iOS 27.0 du simulateur, `metadata` revient vide. La phase et le diagnostic moteur sont donc portés par `debugDescription`.
+
+### Limites
+
+- `n_reasoning_tokens` dépend des balises que le template déclare ; un modèle sans balises reconnues compte 0.
+- Les fragments sans delta (balises, marqueurs retenus par l’analyseur) ne portent pas d’objet `context` ; le fragment suivant ou le résultat final rattrape `n_decoded`.
+- Responses et Messages n’exposent pas ces champs (non requis par l’adaptateur, qui utilise chat).
+
 ## Blocages et écarts ouverts
 
 - **macOS 27 à l’exécution** : indisponible sur ce Mac (26.7) ; la livraison restera « compilée, non validée à l’exécution sur macOS 27 » tant qu’aucune machine 27 n’est disponible.
 - **Approximations silencieuses du convertisseur de schéma** : patterns non pris en charge remplacés par une chaîne libre (simple avertissement), bornes flottantes ignorées. P5 doit rendre la conversion stricte pour l’adaptateur (erreur au lieu d’avertissement) ou refuser ces guides ; `"$ref": "#"` doit être réécrit ou pris en charge.
-- **Signal de contexte plein** : à exposer par le moteur (P1) ; sans lui, `contextSizeExceeded` pendant la génération ne peut pas être distingué de `maximumResponseTokens`.
+- **Signal de contexte plein** : résolu en P1 (`fail_on_context_full`).
+- **Tests moteur préexistants** : `test-engine-operations` et `test-engine-acquisition` échouent dans cet environnement avec stories15M, avec ou sans P1.
 - **Encodage observé sur deux runtimes** : identique sur macOS 26.7 (sonde locale) et simulateur iOS 27.0 ; à revérifier sur l’iPhone.

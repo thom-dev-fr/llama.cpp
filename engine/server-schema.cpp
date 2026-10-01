@@ -37,6 +37,12 @@ std::vector<std::unique_ptr<field>> make_llama_cmpl_schema(const common_params &
     add((new field_bool("return_progress", params.return_progress))
         ->set_desc("Include prompt processing progress events in stream mode"));
 
+    add((new field_bool("fail_on_context_full", params.fail_on_context_full))
+        ->set_desc("End with an exceed_context_size_error instead of a length stop when the context fills during generation; the context is never shifted for this request"));
+
+    add((new field_bool("return_context", params.return_context))
+        ->set_desc("Include a `context` object (capacity, occupied, prompt, cached, decoded and reasoning tokens) in the streamed chunks and the final response"));
+
     add((new field_num("sse_ping_interval", params.sse_ping_interval))
         ->set_hard_limits(-1, INT32_MAX)
         ->set_desc("Interval in seconds between SSE comment pings emitted while the stream stays silent, -1 disables pings"));
