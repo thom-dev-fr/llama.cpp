@@ -11,6 +11,9 @@ behind Apple's Foundation Models `LanguageModel` protocol (iOS 27, macOS 27).
 
 Status, capability matrix and validation evidence:
 [docs/design/apple-language-model-report.md](../../docs/design/apple-language-model-report.md).
+A SwiftUI application using the package (download, import, chat with tools,
+images, reasoning and `@Generable`, indicators):
+[examples/llama.foundationmodels](../../examples/llama.foundationmodels/README.md).
 
 ## Build the native framework
 
@@ -192,7 +195,11 @@ for try await partial in session.streamResponse(to: "6*7?", generating: Total.se
   errors) stay `LlamaEngineError`. An error after fragments is an error:
   Foundation Models reverts the turn and the next request starts from the last
   complete one. Cancelling the task (or the response stream's consumer)
-  cancels the native request.
+  cancels the native request. A cancelled `streamResponse` ends **without**
+  an error and Foundation Models keeps the partial response in the
+  transcript (observed with iOS 27.0): check `Task.isCancelled` after the
+  loop and, if the turn must not count, remove its entries from
+  `session.transcript` once `isResponding` is false (as the demo does).
 - **Monitor.** `LlamaGenerationMonitor` reports the phase (waiting,
   processing the prompt, generating), the prompt progress and the context
   occupancy against the effective capacity, live during a request and marked
@@ -282,7 +289,9 @@ on the server, HTTP errors, pause, abandon, relaunch). Two tests are skipped
 by default:
 
 - `backgroundSessionDownloads` runs only in an application host (the system
-  refuses background sessions to the `xctest` tool);
+  refuses background sessions to the `xctest` tool); the demo's tests run the
+  same scenario in its application
+  (`LlamaFMDemoTests/AppModelTests/backgroundSessionDownloadInstalls`);
 - `realCatalogEntryDownloadsAndInstalls` downloads the shipped catalog entry
   from Hugging Face (about 2 GB):
 

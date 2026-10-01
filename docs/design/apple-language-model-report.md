@@ -1,6 +1,6 @@
 # Rapport — Apple LanguageModel sur llama.cpp
 
-Rapport prévu par le [plan](apple-language-model-plan.md). Il distingue ce qui est exécuté, compilé seulement, ou non encore traité. P0 à P3 et P5 sont achevés, P4 l’est hormis le scénario d’arrière-plan sur iPhone (reporté à P6, voir P4). Les capacités Foundation Models sont validées sur le simulateur iOS 27 (CPU) avec Qwen3.5-2B ; iPhone et macOS 27 restent à exécuter (P7).
+Rapport prévu par le [plan](apple-language-model-plan.md). Il distingue ce qui est exécuté, compilé seulement, ou non encore traité. P0 à P3 et P5 sont achevés ; P4 et P6 le sont sur simulateur, le scénario d’arrière-plan sur iPhone restant à exécuter (P7). Les capacités Foundation Models sont validées sur le simulateur iOS 27 (CPU) avec Qwen3.5-2B, au niveau de la bibliothèque (P5) et dans la démo (P6) ; iPhone et macOS 27 restent à exécuter (P7).
 
 ## Suivi P0–P7
 
@@ -10,9 +10,9 @@ Rapport prévu par le [plan](apple-language-model-plan.md). Il distingue ce qui 
 | P1 Signaux du moteur | **Terminé** | `test-engine-context` (nouveau) ; CTest 77/80, les 3 échecs préexistants ou d’environnement ; HTTP non-`slow` 393 réussis / 6 ignorés ; sonde Qwen3.5-2B (image, raisonnement) ; 12 tests Swift sur simulateur iOS 27. | `test-engine-operations` et `test-engine-acquisition` échouent aussi sans P1 (voir P1). |
 | P2 Pont natif et XCFramework | **Terminé** | Pont C + `test-llama-bridge` (hôte, ASan+UBSan, TSan) ; `LlamaBridge.xcframework` iOS / simulateur / macOS ; 20 tests Swift sur simulateur iOS 27 dont 8 sur le vrai moteur ; consommateur externe compilé pour iOS et macOS, testé sur simulateur. | Exécution macOS et iPhone non faite (P7). Premier chargement Metal lent sur simulateur (voir P2). |
 | P3 Runtime partagé, stockage | **Terminé** | `LlamaRuntime` (moteur natif en catalogue, admission, instances, chargements mutualisés, déchargement, observation) et `LlamaModelStore` ; 33 tests Swift sur simulateur iOS 27 dont 13 nouveaux `RuntimeTests` sur le vrai moteur, stables sur 5 itérations ; compilation macOS 27 et iOS 27 appareil. | Aucun changement du moteur ni du pont. Tests sur stories15M (CPU) ; iPhone et macOS 27 non exécutés (P7). |
-| P4 Acquisition URLSession | **Terminé, sauf scénario iPhone** | Manifeste `LlamaModelCatalog` et `Catalog/models.json` (Qwen3.5-2B, références vérifiées côté serveur et localement) ; `LlamaModelDownloads` ; 17 `DownloadTests` sur simulateur iOS 27, dont 15 avec serveur contrôlé (interruption, reprise, sans plages, fichier modifié, HTTP, pause, abandon, relance) ; téléchargement réel de l’entrée Qwen (1,95 Go) avec pause et reprise via le CDN ; 50 tests au total, stables sur 5 itérations. | Le système refuse une session de fond au processus `xctest` : le transfert réel en arrière-plan sur iPhone exige une app hôte et se fera avec la démo (P6). |
+| P4 Acquisition URLSession | **Terminé, sauf scénario iPhone** | Manifeste `LlamaModelCatalog` et `Catalog/models.json` (Qwen3.5-2B, références vérifiées côté serveur et localement) ; `LlamaModelDownloads` ; 17 `DownloadTests` sur simulateur iOS 27, dont 15 avec serveur contrôlé (interruption, reprise, sans plages, fichier modifié, HTTP, pause, abandon, relance) ; téléchargement réel de l’entrée Qwen (1,95 Go) avec pause et reprise via le CDN ; 50 tests au total, stables sur 5 itérations. | Le système refuse une session de fond au processus `xctest` : exécuté en P6 dans l’application de démo (test hébergé et transfert réel sur simulateur, app suspendue) ; reste l’iPhone (P7). |
 | P5 Executor Foundation Models | **Terminé** | Executor complet (transcript, options, schémas stricts, outils, raisonnement, vision, flux, erreurs, annulation, moniteur) ; moteur : `strict_json_schema` et outils + schéma pour Qwen3.5 ; 27 tests scriptés, 9 sur le vrai moteur (stories15M), 12 avec Qwen3.5-2B sur simulateur iOS 27 (CPU) ; catalogue qualifié (outils, raisonnement, vision). | Metal du simulateur inutilisable pour Qwen3.5 (plantages) : qualification CPU ; Metal sur iPhone en P7. |
-| P6 Démo SwiftUI | À faire | — | — |
+| P6 Démo SwiftUI | **Terminé sur simulateur** | `examples/llama.foundationmodels` (projet Xcode partagé iOS/macOS 27) ; 19 tests unitaires hébergés (modèle de présentation scripté, moteur réel avec stories15M, session de fond dans l’app) ; 3 parcours XCUITest avec Qwen3.5-2B ; parcours manuel depuis une installation vide (téléchargement réel en arrière-plan, pause/reprise) et après relance ; compilation macOS 27 et iOS appareil. | iPhone hors ligne : scénario d’arrière-plan sur appareil, Metal et mémoire en P7. macOS 27 non exécutable. |
 | P7 Qualification | À faire | — | Exécution macOS 27 impossible sur ce Mac (26.7). |
 
 ## P0 — Constat de départ
@@ -399,6 +399,56 @@ xcodebuild build-for-testing -scheme LlamaApple-Package -destination 'generic/pl
 - **Signature de raisonnement** : non produite ; une signature reçue dans un transcript est ignorée (le texte du raisonnement est transmis au template, qui décide de le rejouer).
 - iPhone et macOS 27 : non exécutés (P7).
 
+## P6 — Nouvelle démo SwiftUI
+
+### Conception retenue
+
+- **Projet** `examples/llama.foundationmodels/LlamaFMDemo.xcodeproj`, écrit à la main au format Xcode 16+ (`objectVersion 77`, groupes synchronisés avec le système de fichiers : un fichier ajouté dans `LlamaFMDemo/`, `LlamaFMDemoTests/` ou `LlamaFMDemoUITests/` appartient à sa cible). Une cible d’application multiplateforme (iOS 27, macOS 27), des tests unitaires hébergés par l’application et des tests d’interface. Schémas partagés : `LlamaFMDemo` (application et tests unitaires) et `LlamaFMDemoUITests` (parcours avec Qwen, lents, à lancer exprès). Dépendance au package local `bindings/apple` ; le catalogue est `bindings/apple/Catalog/models.json`, copié dans l’application. `examples/llama.swiftui` n’est pas modifié.
+- **Modèle d’application** (`AppModel`, `@MainActor @Observable`) : un `LlamaRuntime` (un modèle résident, une génération, quatre requêtes en attente), un `LlamaModelDownloads` créé au lancement avec la session de fond par défaut (lancements en arrière-plan compris, `.backgroundTask(.urlSession(_:))`), le catalogue, les réglages (JSON dans `UserDefaults`) et les conversations, en mémoire seulement. Chaque action longue (téléchargement, import, chargement, déchargement, suppression, génération) tourne dans une tâche ; son état (`running`) et son erreur (`errors[action]`) s’affichent sur la ligne de l’action.
+- **Conversation** : une `LanguageModelSession` (transcript et outils à Foundation Models) et un `LlamaGenerationMonitor`. Les tours affichés (fragments, raisonnement, appels et sorties d’outils, réponse ou `CityGuide` partiel) sont distincts du transcript autoritatif. Une conversation garde le modèle et le profil de chargement de son début ; choisir un autre modèle, ou « Start a conversation with these settings », en crée une nouvelle et les autres restent consultables (une conversation vide remplacée est retirée). « Retry » soumet une fois la requête interrompue, avec les mêmes options.
+- **Capacités et options** : outils, raisonnement et images ne sont proposés que pour ce que `LlamaLanguageModel.capabilities` déclare (catalogue qualifié ; rien pour un import) ; une image est refusée au compositeur avec la raison (import non qualifié, modèle sans vision, projecteur non chargé). `toolCallingMode` `allowed`/`disallowed` seulement si le modèle a les outils ; niveau de raisonnement `nil` (défaut du template) ou `.custom("none")` seulement si le modèle raisonne ; « City guide » met le schéma dans le prompt sans raisonnement et hors du prompt avec raisonnement (limite de Qwen3.5-2B relevée en P5).
+- **Indicateurs** : `ActivityStatus` (en file avec le nombre d’attentes, chargement du modèle avec sa progression, attente, traitement du prompt avec sa progression, génération) et `ContextGauge` (occupé / capacité effective du moteur ; « Current request », « Last measure », ou « Unavailable » sans mesure, jamais zéro). `session.usage` n’apparaît que par réponse, comme consommation.
+- **Cycle de vie** (`LifecyclePolicy`) : sur iOS, seul le passage réel en arrière-plan (`ScenePhase.background`) annule les générations et les attentes des chargements explicites ; `inactive` (sélecteur, sélecteur d’apps) ne change rien ; rien ne reprend au retour. Sur macOS, jamais. Les téléchargements suivent leur propre cycle de vie.
+- **Images** : photothèque (`PhotosPicker`) ou fichier ; décodage et réduction à 1536 px hors de l’acteur principal ; l’orientation EXIF est lue, pas appliquée, et transmise à `Attachment(_:orientation:)`.
+- **Simulateur** : calcul CPU par défaut (Metal du simulateur inutilisable avec Qwen3.5, voir P5).
+
+### Constats du SDK (simulateur iOS 27.0)
+
+- **Annulation d’un flux** : annuler la tâche qui consomme `streamResponse` termine le flux **sans erreur**, et Foundation Models **garde la réponse partielle dans le transcript** (une erreur, elle, retire le tour). La démo vérifie l’annulation après la boucle (`Task.checkCancellation()`) et retire les entrées du tour de `session.transcript` (modifiable en iOS 27 hors réponse) : le contexte repart bien du dernier tour complet. Documenté dans le README du package.
+- **Retenue du dernier événement** : un fragment n’apparaît dans les instantanés qu’à l’arrivée de l’événement suivant, ou à la fin (test `fragmentsShowBeforeTheEnd`). Sans effet visible avec un vrai modèle (un token de retard) ; le dernier fragment d’un flux annulé peut ne jamais s’afficher.
+- `Snapshot.transcriptEntries` contient les entrées du tour en cours (raisonnement, appels et sorties d’outils, réponses) : la démo les affiche dans l’ordre et remplace la dernière réponse par le texte ou la valeur partielle en cours.
+
+### Preuves
+
+Commandes exécutées :
+
+```bash
+cd examples/llama.foundationmodels
+xcodebuild test -project LlamaFMDemo.xcodeproj -scheme LlamaFMDemo -destination 'platform=iOS Simulator,id=C64BD9F4-EA4D-44EC-8613-F3A3AC915618' -derivedDataPath <dd>
+xcodebuild build-for-testing -project LlamaFMDemo.xcodeproj -scheme LlamaFMDemo -destination 'generic/platform=macOS' -derivedDataPath <dd> CODE_SIGNING_ALLOWED=NO
+xcodebuild build-for-testing -project LlamaFMDemo.xcodeproj -scheme LlamaFMDemo -destination 'generic/platform=iOS' -derivedDataPath <dd> CODE_SIGNING_ALLOWED=NO
+xcodebuild test -project LlamaFMDemo.xcodeproj -scheme LlamaFMDemoUITests -destination 'platform=iOS Simulator,id=C64BD9F4-EA4D-44EC-8613-F3A3AC915618' -derivedDataPath <dd>
+```
+
+| Vérification | Résultat |
+| --- | --- |
+| `LlamaFMDemoTests` — modèle de présentation contre un `LanguageModel` scripté pilotant de vraies `LanguageModelSession` : flux (UTF-8, emoji) ; erreur après fragments (fragments gardés, transcript au dernier tour complet, « Retry » soumis une seule fois, transcript resoumis vérifié) ; annulation (fragments, retour arrière du transcript, réessai) ; message de contexte plein ; sortie structurée en flux ; options selon les capacités ; politique de cycle de vie ; indicateurs ; outils | **13/13** |
+| `LlamaFMDemoTests` — modèle d’application sur le vrai moteur (stories15M, CPU) : installation vide ; réglages conservés entre instances, conversations non restaurées ; arrière-plan iOS qui annule (et `inactive` qui n’annule pas) ; chargement à la demande, réponse en flux, mesure de contexte (capacité effective 128, plafonnée par l’entraînement de stories15M, marquée « dernière mesure ») ; deuxième conversation qui partage l’instance ; déchargement pendant la requête (refusée « being unloaded », historique de l’autre conversation intact) ; changement de modèle → nouvelle conversation, anciennes consultables ; « Retry » qui recharge | **5/5** (3 exécutions de suite pour le scénario de déchargement) |
+| `backgroundSessionDownloadInstalls` — téléchargement en **session de fond** dans l’application hôte, depuis un serveur local contrôlé, installé dans le magasin (scénario de P4 refusé au processus `xctest`) | **réussi** |
+| Compilation macOS 27 et iOS 27 appareil (application et tests) | réussie, sans avertissement dans la démo |
+| Parcours manuel, simulateur iOS 27 : installation vide → bibliothèque → téléchargement réel de Qwen3.5-2B (1,95 Go) en session de fond ; application suspendue (accueil) : les fichiers de `nsurlsessiond` continuent de croître (≈ +5 Mo / 10 s par fichier) ; retour : progression rattrapée ; pause à 834,9 Mo puis reprise sans redémarrage ; vérification, installation, sélection automatique et conversation | **réussi** |
+| Relance de l’application : modèle et réglages conservés, nouvelle conversation vide | **réussi** |
+| Question « How much are three pens and one mug in total » (Qwen, CPU) : indicateurs « Loading the model » (progression), « Processing the prompt » (progression) puis contexte 256 → 635 / 4096 « Last measure » ; deux appels `lookup_product` et leurs sorties affichés ; réponse « 17.00 EUR » ; consommation de la réponse (559 tokens de prompt dont 506 en cache, 76 générés) affichée à part | **réussi** |
+| `LlamaFMDemoUITests` (XCUITest, Qwen3.5-2B installé par le parcours ci-dessus, CPU) : boucle d’outils (`lookup_product({"product": "pen"})`, `lookup_product({"product": "mug"})`, sorties affichées, réponse, « Last measure ») ; « City guide » `@Generable` (Lyon, France, population, trois lieux, résumé) ; « Stop » → fragments gardés, « Stopped », « Retry » → nouvelle requête, passage à l’accueil → « Interrupted: the app moved to the background » et « Retry » proposé | **3/3** (une exécution précédente avait échoué sur une assertion de contenu dépendante de l’échantillonnage, remplacée par la vérification des appels et sorties) |
+
+### Limites
+
+- **iPhone : non exécuté** (appareil hors ligne pendant P6). Restent pour P7 : transfert en arrière-plan avec relance par le système (`handleEventsForBackgroundURLSession`), fermeture forcée → `interrupted`, Metal, mémoire avec l’autorisation `increased-memory-limit` (déclarée pour les builds iOS appareil ; la signature exige l’équipe du développeur).
+- **macOS 27 : compilé seulement** (Mac sous 26.7).
+- **Vision dans la démo** : le chemin image (sélection, réduction, orientation, refus selon les capacités) est testé unitairement et la vision est qualifiée au niveau de la bibliothèque (P5) ; le sélecteur de photos n’est pas piloté par les tests d’interface.
+- **Débit en arrière-plan** : sur le simulateur, nettement plus faible application suspendue qu’au premier plan ; ce n’est pas une mesure d’appareil.
+- **Effets d’outils** : une annulation ou une erreur ne défait pas un outil déjà exécuté (les deux outils de la démo n’ont pas d’effet externe).
+
 ## Blocages et écarts ouverts
 
 - **macOS 27 à l’exécution** : indisponible sur ce Mac (26.7) ; la livraison restera « compilée, non validée à l’exécution sur macOS 27 » tant qu’aucune machine 27 n’est disponible.
@@ -408,5 +458,6 @@ xcodebuild build-for-testing -scheme LlamaApple-Package -destination 'generic/pl
 - **Signal de contexte plein** : résolu en P1 (`fail_on_context_full`).
 - **Tests moteur préexistants** : `test-engine-operations` et `test-engine-acquisition` échouent dans cet environnement avec stories15M, avec ou sans P1.
 - **Encodage observé sur deux runtimes** : identique sur macOS 26.7 (sonde locale) et simulateur iOS 27.0 ; à revérifier sur l’iPhone.
-- **Transfert en arrière-plan sur iPhone (P4)** : non exécutable sans application hôte, le système refusant une session de fond au processus `xctest` ; à exécuter avec la démo (P6) et à consigner en P7.
+- **Transfert en arrière-plan sur iPhone (P4)** : exécuté en P6 sur simulateur dans l’application de démo (session de fond, app suspendue, pause/reprise) ; sur iPhone, avec relance par le système et fermeture forcée, à consigner en P7 (appareil hors ligne pendant P6).
+- **Annulation d’un flux Foundation Models** (P6) : le flux annulé se termine sans erreur et garde la réponse partielle dans le transcript ; la démo rétablit le dernier tour complet, et le README du package le documente pour les applications.
 - **Capacités qualifiées du catalogue** : renseignées en P5 (outils, raisonnement, vision) d’après `QwenTests` sur simulateur ; à confirmer sur iPhone en P7.
