@@ -61,6 +61,11 @@ public enum LlamaEngineError: Error, Sendable, Equatable {
     case engineUnavailable(String)
     /// The prompt, or the prompt and the generated tokens, exceed the context.
     case contextExceeded(LlamaContextOverflow)
+    /// An error reported by the native engine: its category (invalid_request,
+    /// load_failed, queue_full, cancelled, unloaded, ...), message and JSON details.
+    case native(category: String, message: String, details: Data)
+    /// Two tasks read the same request at the same time.
+    case concurrentReaders
 }
 
 extension LlamaEngineError: LocalizedError {
@@ -70,6 +75,10 @@ extension LlamaEngineError: LocalizedError {
             return "The llama.cpp engine is unavailable: \(reason)"
         case .contextExceeded(let overflow):
             return overflow.message
+        case .native(let category, let message, _):
+            return message.isEmpty ? "llama.cpp engine error: \(category)" : message
+        case .concurrentReaders:
+            return "A llama.cpp request has a single reader at a time"
         }
     }
 }

@@ -8,9 +8,8 @@ public import LlamaEngine
 /// The model value is lightweight: it names a catalog model and a load profile.
 /// Its executor uses the runtime given here; the weights are loaded on demand.
 ///
-/// P0 skeleton: no capability is declared and every request is refused with an
-/// explicit error until the engine bridge exists (P2) and the translation is
-/// implemented and qualified (P5).
+/// Until the translation is implemented and qualified (P5), no capability is
+/// declared and every request is refused with an explicit error.
 public struct LlamaLanguageModel: LanguageModel {
     public typealias Executor = LlamaLanguageModelExecutor
 

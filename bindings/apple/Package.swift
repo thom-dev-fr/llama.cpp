@@ -2,9 +2,8 @@
 
 import PackageDescription
 
-// P0 skeleton: the native engine (bridge + XCFramework) is added in P2.
-// Until then the modules compile for iOS 27 and macOS 27 and refuse every
-// request explicitly; no capability is declared.
+// The native engine is the LlamaBridge binary target, built from this
+// repository by scripts/build-apple-language-model.sh (see README.md).
 let package = Package(
     name: "LlamaApple",
     platforms: [
@@ -16,7 +15,11 @@ let package = Package(
         .library(name: "LlamaFoundationModels", targets: ["LlamaFoundationModels"]),
     ],
     targets: [
-        .target(name: "LlamaEngine"),
+        .binaryTarget(name: "LlamaBridge", path: "Frameworks/LlamaBridge.xcframework"),
+        .target(
+            name: "LlamaEngine",
+            dependencies: ["LlamaBridge"]
+        ),
         .target(
             name: "LlamaFoundationModels",
             dependencies: ["LlamaEngine"]
@@ -24,6 +27,10 @@ let package = Package(
         .testTarget(
             name: "LlamaFoundationModelsTests",
             dependencies: ["LlamaFoundationModels", "LlamaEngine"]
+        ),
+        .testTarget(
+            name: "LlamaEngineTests",
+            dependencies: ["LlamaEngine"]
         ),
     ],
     swiftLanguageModes: [.v6]

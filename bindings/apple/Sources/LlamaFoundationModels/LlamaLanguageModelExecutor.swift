@@ -45,7 +45,7 @@ public struct LlamaLanguageModelExecutor: LanguageModelExecutor {
         streamingInto channel: LanguageModelExecutorGenerationChannel
     ) async throws {
         try RequestRequirements(request).check(against: model.declaredCapabilities)
-        throw LlamaEngineError.engineUnavailable("the native bridge is not built yet (P2)")
+        throw LlamaEngineError.engineUnavailable("the executor does not translate requests yet (P5)")
     }
 }
 

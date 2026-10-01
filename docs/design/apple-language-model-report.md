@@ -1,6 +1,6 @@
 # Rapport — Apple LanguageModel sur llama.cpp
 
-Rapport prévu par le [plan](apple-language-model-plan.md). Il distingue ce qui est exécuté, compilé seulement, ou non encore traité. Aucune capacité Foundation Models n’est validée à ce stade : P0 et P1 sont achevés.
+Rapport prévu par le [plan](apple-language-model-plan.md). Il distingue ce qui est exécuté, compilé seulement, ou non encore traité. Aucune capacité Foundation Models n’est validée à ce stade : P0, P1 et P2 sont achevés.
 
 ## Suivi P0–P7
 
@@ -8,7 +8,7 @@ Rapport prévu par le [plan](apple-language-model-plan.md). Il distingue ce qui 
 | --- | --- | --- | --- |
 | P0 Contrat exécutable | **Terminé** | Matrice ci-dessous ; package `bindings/apple` compilé pour macOS 27, iOS 27 appareil et simulateur ; 8 tests Swift réussis sur simulateur iOS 27. | Aucune capacité déclarée : le squelette refuse toute requête explicitement. |
 | P1 Signaux du moteur | **Terminé** | `test-engine-context` (nouveau) ; CTest 77/80, les 3 échecs préexistants ou d’environnement ; HTTP non-`slow` 393 réussis / 6 ignorés ; sonde Qwen3.5-2B (image, raisonnement) ; 12 tests Swift sur simulateur iOS 27. | `test-engine-operations` et `test-engine-acquisition` échouent aussi sans P1 (voir P1). |
-| P2 Pont natif et XCFramework | À faire | — | — |
+| P2 Pont natif et XCFramework | **Terminé** | Pont C + `test-llama-bridge` (hôte, ASan+UBSan, TSan) ; `LlamaBridge.xcframework` iOS / simulateur / macOS ; 20 tests Swift sur simulateur iOS 27 dont 8 sur le vrai moteur ; consommateur externe compilé pour iOS et macOS, testé sur simulateur. | Exécution macOS et iPhone non faite (P7). Premier chargement Metal lent sur simulateur (voir P2). |
 | P3 Runtime partagé, stockage | À faire | — | `LlamaRuntime` n’est qu’une identité et des limites. |
 | P4 Acquisition URLSession | À faire | — | Références Qwen3.5-2B relevées localement, à confirmer côté serveur. |
 | P5 Executor Foundation Models | À faire | — | Écarts du convertisseur de schéma relevés en P0. |
@@ -148,6 +148,49 @@ cmake --build build-apple-p1 -j 10
 - `n_reasoning_tokens` dépend des balises que le template déclare ; un modèle sans balises reconnues compte 0.
 - Les fragments sans delta (balises, marqueurs retenus par l’analyseur) ne portent pas d’objet `context` ; le fragment suivant ou le résultat final rattrape `n_decoded`.
 - Responses et Messages n’exposent pas ces champs (non requis par l’adaptateur, qui utilise chat).
+
+## P2 — Pont natif et distribution Apple
+
+### Pont C (`bindings/apple/bridge`)
+
+- `include/llama_bridge.h` : handles opaques `llama_bridge_engine`, `_request`, `_subscription`, `_event` ; requêtes et résultats aux contrats JSON du moteur ; pièces jointes `{name, bytes, size}` copiées avant retour. Opérations : création d’un catalogue, `submit` (chat, completion, tokenize, apply_template, …), `next` borné ou non, `cancel`, `catalog`, `load`, `unload`, `update_catalog`, `subscribe`, `stop`, destructions.
+- Erreurs : chaque fonction est enveloppée ; une exception C++ devient un événement d’erreur possédé (`invalid_request`, `out_of_memory`, `bridge_error`) ; aucune ne traverse la frontière.
+- Durée de vie (documentée dans l’en-tête) : un lecteur à la fois, `cancel` concurrent autorisé, destruction sans appel concurrent sur le même handle, requêtes et abonnements pouvant survivre au moteur.
+- Framework dynamique `LlamaBridge` : llama, ggml (Metal, shaders embarqués, Accelerate), mtmd et moteur local liés statiquement ; seules les 21 fonctions `llama_bridge_*` sont exportées (`-exported_symbol`, visibilité cachée) ; sans acquisition réseau du moteur (ADR 0003) ni OpenSSL. Le CMake du pont inclut le dépôt comme sous-projet, sans modifier le CMake racine.
+
+### Couche Swift (`LlamaEngine`, accès `package`)
+
+`NativeEngine`, `NativeRequest`, `NativeSubscription`, `NativeEvent`. Les appels bloquants — `next`, `unload`, `update_catalog`, `stop`, la préparation de `submit` et les destructions — s’exécutent sur `NativeWorkers` (file GCD concurrente dédiée), jamais sur le pool coopératif ni le MainActor. L’annulation de la tâche Swift qui attend dans `next` annule la requête native. Un second lecteur simultané est refusé (`LlamaEngineError.concurrentReaders`). Les handles sont détruits sur un worker à la dernière référence. Les erreurs natives deviennent `LlamaEngineError.native(category:message:details:)`.
+
+### Distribution
+
+`scripts/build-apple-language-model.sh` construit cinq builds CMake dédiés (`build-apple-lm/<plateforme>-<arch>`), fusionne les architectures avec `lipo`, produit les dSYM et `bindings/apple/Frameworks/LlamaBridge.xcframework`, puis l’archive `build-apple-lm/LlamaBridge.xcframework.zip` et son checksum SwiftPM. Il ne supprime que ses propres sorties ; `build-xcframework.sh` et ses répertoires ne sont pas touchés.
+
+| Slice | Architectures | `minos` | Binaire |
+| --- | --- | --- | --- |
+| `ios-arm64` | arm64 | iOS 27.0 | 15 Mo |
+| `ios-arm64_x86_64-simulator` | arm64, x86_64 | iOS Simulator 27.0 | 32 Mo |
+| `macos-arm64_x86_64` | arm64, x86_64 | macOS 27.0 | 32 Mo |
+
+Archive : 186 Mo, dont la plus grande partie en dSYM. `Package.swift` référence l’XCFramework local (`binaryTarget(path:)`) ; le README décrit la variante `binaryTarget(url:checksum:)` pour une publication ultérieure.
+
+### Preuves
+
+| Vérification | Résultat |
+| --- | --- |
+| `test-llama-bridge` (consommateur C, stories15M, CPU) : entrées invalides, flux, pièces jointes copiées, annulation pendant une lecture d’un autre thread, annulation d’une requête bloquée derrière l’unique slot, déchargement pendant génération (lecteur terminé avec `unloaded`, rechargement automatique ensuite), destruction du moteur pendant une lecture (`stopped`, handle survivant), arrêt idempotent, soumission après arrêt | **PASS** (Release, CTest 1/1) |
+| Même test sous ASan + UBSan | **PASS**, aucun rapport |
+| Même test sous TSan | **PASS** après correction d’une course **dans le test** (drapeau non atomique), aucun rapport sur le pont ni le moteur |
+| `xcodebuild test` du package sur simulateur iOS 27 (iPhone 17 Pro) | **20/20** : 12 tests existants et 8 `NativeEngineTests` sur le vrai moteur (création invalide typée, chat streamé avec chargement à la demande, flux `events()`, annulation de tâche → `cancelled`, 20 lecteurs bloqués nativement pendant ≥ 250 ms sans bloquer le pool coopératif (tâche détachée servie en < 100 ms), déchargement qui termine tous les lecteurs (`unloaded`), requête survivant à son moteur (`stopped`), second lecteur refusé) |
+| Consommateur externe (package hors dépôt, dépendance par chemin) | Compilé pour iOS appareil et macOS ; exécutable macOS lié à `@rpath/LlamaBridge.framework` (`minos` 27.0) ; test exécuté sur le simulateur iOS 27 avec le framework embarqué dans le bundle de test : **PASS** |
+| Avertissements de compilation | Aucun dans le pont ; 7 avertissements de ggml Metal (API dépréciées dans le SDK 27, slices x86_64), hors périmètre |
+
+### Observations et limites
+
+- **Premier chargement sur simulateur : 29 s** pour le premier test qui charge le modèle (CPU, `gpu_layers = 0`), les suivants < 0,3 s. Attribution probable : compilation à l’exécution de la bibliothèque Metal embarquée lors de l’initialisation du backend. À mesurer sur iPhone en P7 ; une `metallib` précompilée (`GGML_METAL_EMBED_LIBRARY=OFF`) est l’alternative si le coût s’y retrouve.
+- Le package ne se résout pas tant que l’XCFramework n’a pas été construit (documenté).
+- L’identité d’un package local est son nom de dossier (`apple`), à utiliser dans `.product(…, package: "apple")`.
+- Non fait en P2 : exécution sur iPhone (signature à configurer avec la démo, P6/P7) et sur macOS 27 (indisponible).
 
 ## Blocages et écarts ouverts
 

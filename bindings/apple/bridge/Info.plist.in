@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDevelopmentRegion</key>
+    <string>en</string>
+    <key>CFBundleExecutable</key>
+    <string>LlamaBridge</string>
+    <key>CFBundleIdentifier</key>
+    <string>org.ggml.LlamaBridge</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>CFBundleName</key>
+    <string>LlamaBridge</string>
+    <key>CFBundlePackageType</key>
+    <string>FMWK</string>
+    <key>CFBundleShortVersionString</key>
+    <string>${MACOSX_FRAMEWORK_SHORT_VERSION_STRING}</string>
+    <key>CFBundleVersion</key>
+    <string>${MACOSX_FRAMEWORK_BUNDLE_VERSION}</string>
+    <key>CFBundleSupportedPlatforms</key>
+    <array>
+        <string>${LLAMA_BRIDGE_SUPPORTED_PLATFORM}</string>
+    </array>
+    <key>MinimumOSVersion</key>
+    <string>${CMAKE_OSX_DEPLOYMENT_TARGET}</string>
+</dict>
+</plist>
