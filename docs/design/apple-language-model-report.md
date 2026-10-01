@@ -1,6 +1,6 @@
 # Rapport — Apple LanguageModel sur llama.cpp
 
-Rapport prévu par le [plan](apple-language-model-plan.md). Il distingue ce qui est exécuté, compilé seulement, ou non encore traité. P0 à P3 et P5 sont achevés ; P4 et P6 le sont sur simulateur, le scénario d’arrière-plan sur iPhone restant à exécuter (P7). Les capacités Foundation Models sont validées sur le simulateur iOS 27 (CPU) avec Qwen3.5-2B, au niveau de la bibliothèque (P5) et dans la démo (P6) ; iPhone et macOS 27 restent à exécuter (P7).
+Rapport prévu par le [plan](apple-language-model-plan.md). Il distingue ce qui est exécuté, compilé seulement, ou non encore traité. P0 à P7 sont achevés. Les capacités Foundation Models sont validées avec Qwen3.5-2B sur le simulateur iOS 27 (CPU) et sur un appareil, un iPad Pro M1 sous iPadOS 27.2 (Metal), où sont aussi faits le téléchargement en arrière-plan et les mesures. **La livraison est partiellement qualifiée** : macOS 27 est compilé seulement (Mac sous 26.7), et l’iPhone, hors ligne pendant P6 et P7, est remplacé par l’iPad (même famille iOS, puce M1, 8 Go).
 
 ## Suivi P0–P7
 
@@ -10,10 +10,10 @@ Rapport prévu par le [plan](apple-language-model-plan.md). Il distingue ce qui 
 | P1 Signaux du moteur | **Terminé** | `test-engine-context` (nouveau) ; CTest 77/80, les 3 échecs préexistants ou d’environnement ; HTTP non-`slow` 393 réussis / 6 ignorés ; sonde Qwen3.5-2B (image, raisonnement) ; 12 tests Swift sur simulateur iOS 27. | `test-engine-operations` et `test-engine-acquisition` échouent aussi sans P1 (voir P1). |
 | P2 Pont natif et XCFramework | **Terminé** | Pont C + `test-llama-bridge` (hôte, ASan+UBSan, TSan) ; `LlamaBridge.xcframework` iOS / simulateur / macOS ; 20 tests Swift sur simulateur iOS 27 dont 8 sur le vrai moteur ; consommateur externe compilé pour iOS et macOS, testé sur simulateur. | Exécution macOS et iPhone non faite (P7). Premier chargement Metal lent sur simulateur (voir P2). |
 | P3 Runtime partagé, stockage | **Terminé** | `LlamaRuntime` (moteur natif en catalogue, admission, instances, chargements mutualisés, déchargement, observation) et `LlamaModelStore` ; 33 tests Swift sur simulateur iOS 27 dont 13 nouveaux `RuntimeTests` sur le vrai moteur, stables sur 5 itérations ; compilation macOS 27 et iOS 27 appareil. | Aucun changement du moteur ni du pont. Tests sur stories15M (CPU) ; iPhone et macOS 27 non exécutés (P7). |
-| P4 Acquisition URLSession | **Terminé, sauf scénario iPhone** | Manifeste `LlamaModelCatalog` et `Catalog/models.json` (Qwen3.5-2B, références vérifiées côté serveur et localement) ; `LlamaModelDownloads` ; 17 `DownloadTests` sur simulateur iOS 27, dont 15 avec serveur contrôlé (interruption, reprise, sans plages, fichier modifié, HTTP, pause, abandon, relance) ; téléchargement réel de l’entrée Qwen (1,95 Go) avec pause et reprise via le CDN ; 50 tests au total, stables sur 5 itérations. | Le système refuse une session de fond au processus `xctest` : exécuté en P6 dans l’application de démo (test hébergé et transfert réel sur simulateur, app suspendue) ; reste l’iPhone (P7). |
-| P5 Executor Foundation Models | **Terminé** | Executor complet (transcript, options, schémas stricts, outils, raisonnement, vision, flux, erreurs, annulation, moniteur) ; moteur : `strict_json_schema` et outils + schéma pour Qwen3.5 ; 27 tests scriptés, 9 sur le vrai moteur (stories15M), 12 avec Qwen3.5-2B sur simulateur iOS 27 (CPU) ; catalogue qualifié (outils, raisonnement, vision). | Metal du simulateur inutilisable pour Qwen3.5 (plantages) : qualification CPU ; Metal sur iPhone en P7. |
-| P6 Démo SwiftUI | **Terminé sur simulateur** | `examples/llama.foundationmodels` (projet Xcode partagé iOS/macOS 27) ; 19 tests unitaires hébergés (modèle de présentation scripté, moteur réel avec stories15M, session de fond dans l’app) ; 3 parcours XCUITest avec Qwen3.5-2B ; parcours manuel depuis une installation vide (téléchargement réel en arrière-plan, pause/reprise) et après relance ; compilation macOS 27 et iOS appareil. | iPhone hors ligne : scénario d’arrière-plan sur appareil, Metal et mémoire en P7. macOS 27 non exécutable. |
-| P7 Qualification | À faire | — | Exécution macOS 27 impossible sur ce Mac (26.7). |
+| P4 Acquisition URLSession | **Terminé** | Manifeste `LlamaModelCatalog` et `Catalog/models.json` (Qwen3.5-2B, références vérifiées côté serveur et localement) ; `LlamaModelDownloads` ; 17 `DownloadTests` sur simulateur iOS 27, dont 15 avec serveur contrôlé (interruption, reprise, sans plages, fichier modifié, HTTP, pause, abandon, relance) ; téléchargement réel de l’entrée Qwen (1,95 Go) avec pause et reprise via le CDN ; 50 tests au total, stables sur 5 itérations. | Le système refuse une session de fond au processus `xctest` : exécuté en P6 dans l’application de démo (test hébergé et transfert réel sur simulateur, app suspendue), puis en P7 sur l’iPad (app suspendue puis terminée). |
+| P5 Executor Foundation Models | **Terminé** | Executor complet (transcript, options, schémas stricts, outils, raisonnement, vision, flux, erreurs, annulation, moniteur) ; moteur : `strict_json_schema` et outils + schéma pour Qwen3.5 ; 27 tests scriptés, 9 sur le vrai moteur (stories15M), 12 avec Qwen3.5-2B sur simulateur iOS 27 (CPU) ; catalogue qualifié (outils, raisonnement, vision). | Metal du simulateur inutilisable pour Qwen3.5 (plantages) : qualification CPU ; Metal qualifié sur l’iPad en P7. |
+| P6 Démo SwiftUI | **Terminé** | `examples/llama.foundationmodels` (projet Xcode partagé iOS/macOS 27) ; 19 tests unitaires hébergés (modèle de présentation scripté, moteur réel avec stories15M, session de fond dans l’app) ; 3 parcours XCUITest avec Qwen3.5-2B ; parcours manuel depuis une installation vide (téléchargement réel en arrière-plan, pause/reprise) et après relance ; compilation macOS 27 et iOS appareil. | Parcours d’interface rejoués sur l’iPad en P7. macOS 27 compilé seulement. |
+| P7 Qualification | **Terminé, qualification partielle** | Téléchargement réel depuis une installation vide sur iPad (app suspendue puis terminée) ; 14 `DeviceQualificationTests` sur iPad (Metal) : chaque capacité, combinaisons, deux sessions, contexte plein, reprise après interruption, mesures ; 3 parcours XCUITest sur iPad ; suite du package (93 tests) et de la démo (33) sur simulateur ; CTest 77/80, HTTP 393/6 ; outils : argument chaîne énuméré imposé, contrainte non représentable refusée. | macOS 27 non exécuté (Mac 26.7) ; iPhone hors ligne, remplacé par l’iPad ; fermeture forcée par l’utilisateur non automatisable. |
 
 ## P0 — Constat de départ
 
@@ -449,15 +449,124 @@ xcodebuild test -project LlamaFMDemo.xcodeproj -scheme LlamaFMDemoUITests -desti
 - **Débit en arrière-plan** : sur le simulateur, nettement plus faible application suspendue qu’au premier plan ; ce n’est pas une mesure d’appareil.
 - **Effets d’outils** : une annulation ou une erreur ne défait pas un outil déjà exécuté (les deux outils de la démo n’ont pas d’effet externe).
 
+## P7 — Qualification et livraison
+
+### Environnement (1er octobre 2026, révision de départ `51e1eb0e0`)
+
+| Élément | Constat |
+| --- | --- |
+| Xcode / SDK | 27.0 (27A266a), SDK iOS / macOS 27.0 |
+| Mac | M1 Pro, macOS 26.7 : compilation et tests hôte seulement |
+| Simulateur | iPhone 17 Pro, iOS 27.0 (`C64BD9F4-…`), Qwen3.5-2B installé dans la démo en P6 |
+| Appareil | **iPad Pro 11" 3e gén. (iPad13,4, M1, 8 Go), iPadOS 27.2 (24B5089g)**, filaire, mode développeur ; signature automatique avec l’équipe personnelle du développeur (passée à `xcodebuild`, pas écrite dans le projet), autorisation `increased-memory-limit` accordée |
+| iPhone 16 Pro Max | absent de `devicectl list devices` : non exécuté |
+| Modèle | `unsloth/Qwen3.5-2B-GGUF` révision `f6d5376b…`, Q4_K_M + `mmproj-BF16`, téléchargé par l’application depuis le catalogue |
+
+### Correction : arguments chaîne des outils au format XML de Qwen3.5
+
+L’écart ouvert en P5 est résolu dans le moteur (`common/parsers/qwen3-coder.cpp`), documenté dans [l’API du moteur](embedded-inference-engine-api.md#sortie-structurée--vérification-stricte-et-outils) :
+
+- un paramètre chaîne à `enum`/`const` est restreint par la grammaire à ses valeurs (texte brut, sans guillemets) ; auparavant libre. S’applique aussi au serveur (la grammaire n’accepte plus que ce que le schéma autorise) ;
+- une contrainte que le texte brut ne peut pas porter (motif, format, longueur, valeurs chaîne mêlées à d’autres types) est relevée dans `common_chat_params::unenforced_tool_constraints` ; avec `strict_json_schema`, la requête est refusée `parameters of tool <nom>: …`, que l’adaptateur traduit déjà en `LanguageModelError.unsupportedGenerationGuide(schemaName: <nom>)`. Sans mode strict, rien ne change.
+
+Tests : `test-chat` (`test_qwen3_coder_string_constraints` : `red` et `light blue` acceptés, `green` et `redder` refusés par la grammaire en `auto` et `required`, valeur analysée en chaîne, contraintes relevées) — échoue sans la modification ; `EngineAdapterTests.toolArgumentConstraintTheFormatCannotEnforceIsRefused` (vrai moteur, template Qwen3.5 du dépôt : motif refusé avec le nom de l’outil ; même outil `disallowed` accepté).
+
+### Commandes exécutées
+
+```bash
+cmake --build build-apple-p1 -j 6 && (cd build-apple-p1 && ctest -j 4)
+(cd tools/server/tests && LLAMA_SERVER_BIN_PATH=../../../build-apple-p1/bin/llama-server ../../../.venv-server-tests/bin/python -m pytest -m 'not slow' -q unit)
+LLAMA_BRIDGE_TEST_MODEL=$PWD/tools/server/tests/tmp/stories15M-q4_0.gguf scripts/build-apple-language-model.sh --test
+# package, simulateur iOS 27 (Qwen sur CPU)
+cd bindings/apple
+TEST_RUNNER_LLAMA_QWEN_OFFLOAD=none TEST_RUNNER_LLAMA_QWEN_DIR=<snapshot Qwen3.5-2B> \
+  xcodebuild test -scheme LlamaApple-Package -destination 'platform=iOS Simulator,id=C64BD9F4-…' -parallel-testing-enabled NO
+xcodebuild build-for-testing -scheme LlamaApple-Package -destination 'generic/platform=macOS'
+# démo
+cd examples/llama.foundationmodels
+xcodebuild test -scheme LlamaFMDemo -destination 'platform=iOS Simulator,id=C64BD9F4-…'
+xcodebuild build-for-testing -scheme LlamaFMDemo -destination 'generic/platform=macOS' CODE_SIGNING_ALLOWED=NO
+xcodebuild test -scheme LlamaFMDemoUITests -destination 'id=<iPad>' DEVELOPMENT_TEAM=<équipe> -allowProvisioningUpdates \
+  -only-testing:LlamaFMDemoUITests/DeviceDownloadUITests
+TEST_RUNNER_LLAMA_DEVICE_QUALIFICATION=1 xcodebuild test -scheme LlamaFMDemo -destination 'id=<iPad>' \
+  DEVELOPMENT_TEAM=<équipe> -allowProvisioningUpdates -only-testing:LlamaFMDemoTests/DeviceQualificationTests
+TEST_RUNNER_LLAMA_DEVICE_QUALIFICATION=1 TEST_RUNNER_LLAMA_QUALIFICATION_OFFLOAD=none xcodebuild test … \
+  -only-testing:'LlamaFMDemoTests/DeviceQualificationTests/measures()'
+xcodebuild test -scheme LlamaFMDemoUITests -destination 'id=<iPad>' … -only-testing:LlamaFMDemoUITests/QwenScenarioUITests
+```
+
+### Résultats
+
+| Vérification | Destination | Résultat |
+| --- | --- | --- |
+| CTest (tests enregistrés : 80) | Mac, hôte | **77/80** ; mêmes trois échecs qu’en P1/P5 (`test-jinja-py` environnement, `test-engine-operations` préremplissage de grammaire avec stories15M, `test-engine-acquisition`) |
+| Tests HTTP du serveur, `-m 'not slow'` | Mac | **393 réussis, 6 ignorés** (identique à P1/P5) |
+| XCFramework reconstruit (iOS appareil, simulateur, macOS) + `test-llama-bridge` | Mac | réussi ; archive 186 358 878 octets, checksum SPM `3a135fcb971721f75bd01b89ba37d532d7ab71bffb6f50d22dcd8976aaa43e16`. Les variantes ASan/TSan du pont n’ont pas été relancées (pont inchangé depuis P2) |
+| Suite du package (`LlamaEngineTests` 38, `LlamaFoundationModelsTests` 55 dont 12 `QwenTests` sur CPU) | simulateur iOS 27.0 | **91 réussis**, 2 ignorés par conception (93 tests) (session de fond hors application, téléchargement réel opt-in) |
+| Suite de la démo (`LlamaFMDemoTests`) | simulateur iOS 27.0 | **19 réussis**, 14 `DeviceQualificationTests` ignorés (opt-in) |
+| Compilation et linkage macOS 27 (package et démo, tests compris) | Mac 26.7 | réussis ; **exécution non faite** |
+| `DeviceDownloadUITests` : installation vide → téléchargement du catalogue (1,95 Go) → 20 s au premier plan (206 Mo) → 90 s suspendue (987,7 Mo au retour) → application **terminée** 90 s par l’outil de test → relance : « Installed » | iPad | **réussi** (248 s). Le transfert s’est poursuivi et achevé application terminée ; l’installation a eu lieu au plus tard à la relance |
+| `DeviceQualificationTests` (14, Metal, capacités tirées de l’entrée de catalogue téléchargée) | iPad | **14/14** sur les deux dernières exécutions (détail ci-dessous) |
+| `QwenScenarioUITests` : boucle d’outils (`lookup_product` pen et mug), City guide (Lyon, France), Stop → Retry → arrière-plan → « Interrupted » | iPad, Metal | **3/3** (≈ 21–24 s chacun, contre plusieurs minutes sur le CPU du simulateur) |
+
+Capacités sur l’iPad (Metal, glouton) :
+
+| Capacité | Preuve |
+| --- | --- |
+| Texte en flux | 21 instantanés, « Tokyo, Osaka, and Kyoto … » |
+| Raisonnement séparé | 201 tokens de raisonnement, réponse « 42 » sans balises |
+| Sortie structurée en flux (`CityGuide`) | 60 instantanés ; Lyon, France, 3 lieux, résumé |
+| Raisonnement + structuré (schéma hors prompt) | 21,0 (7 × 3 EUR), entrée de raisonnement présente |
+| Outils (deux appels) | `lookup_product` pen et mug, sorties dans le transcript, réponse citant 3,00 et 8,00 EUR |
+| Outils + structuré (`required`) | `lookup_product:backpack`, total 78,0 |
+| Vision + structuré | « MEN WALK ON MOON … », 1 photographie |
+| Vision avec orientation (page tournée, `.right`) | titre lu (« MOON ») |
+| Deux sessions simultanées | Rome, Madrid, une seule instance |
+| Interruption puis requête suivante | « Berlin » sur la même session |
+| Contexte plein avant / pendant la génération ; budget atteint | `contextSizeExceeded` phase `prompt` puis `generation`, budget = réponse |
+
+### Mesures (iPad Pro M1, iPadOS 27.2, Qwen3.5-2B Q4_K_M, contexte 4096, projecteur chargé)
+
+| Mesure | Metal (`offload: .all`) | CPU (`offload: .none`) |
+| --- | --- | --- |
+| Chargement (poids + projecteur) | 9,42 s au premier chargement après installation ; 0,66–0,70 s ensuite (fichiers en cache) | 2,10 s (cache chaud) |
+| Empreinte physique : repos → chargé → pendant la génération (pic) | 56 → 945–952 Mo → 973–979 Mo ; pic du processus 1,22 Go après image et annulations | 55 → 922 → 952 Mo ; pic 1,31 Go |
+| Premier token, prompt de 24 tokens | 0,12 s (0,59 s au premier appel après chargement à froid) | 0,77 s |
+| Génération (256 tokens) | **39,8–40,1 tokens/s** | 19,1 tokens/s |
+| Traitement du prompt (2 460 tokens, sans cache) | **497–517 tokens/s** | 113 tokens/s |
+| Image (323 tokens de prompt) jusqu’au premier token | **1,6–2,0 s** | 172 s |
+| Annulation pendant la génération : retour de `respond` | < 1 ms | < 1 ms |
+| … puis requête suivante de 2 tokens servie | 0,09–0,16 s | 0,25–0,65 s |
+| Déchargement | 0,02–0,05 s | 0,03 s |
+
+Empreinte après déchargement (`unloadReleasesTheMemory`, 4 cycles) : sans projecteur, elle revient à ~100–130 Mo en 1 s ; avec projecteur, ~0,7–0,8 Go restent comptés pendant 45 à 125 s, puis l’empreinte revient à ~130–155 Mo sans action de l’application. Elle ne croît pas d’un cycle à l’autre. La même séquence sur le Mac par le pont (sonde hôte, Metal) rend la mémoire en 1 s : le délai est propre à iOS (récupération différée par le système). `os_proc_available_memory` annonce ~7,2 Go disponibles modèle chargé.
+
+Profils retenus à partir de ces mesures :
+
+- **Calcul** : Metal par défaut sur appareil (2× en génération, 4,5× sur le prompt, ×100 sur l’image) ; CPU par défaut sur le simulateur seulement (Metal du simulateur inutilisable, P5). C’est déjà le réglage de la démo.
+- **Contexte** : 4096 par défaut confirmé ; à ~1 Go d’empreinte, un iPad de 8 Go garde une large marge. Les poids sont projetés en mémoire (fichier) et ne sont pas comptés dans l’empreinte ; le projecteur BF16 en représente l’essentiel : ne pas déduire la résidence de la taille des fichiers (1,95 Go). Un contexte plus grand n’a pas été mesuré.
+- **Concurrence** : une génération active et quatre en attente restent les réglages de la démo (deux sessions servies par une instance vérifiées).
+
+### Observations et limites
+
+- **macOS 27** : compilé et lié (package, démo, tests), **jamais exécuté** (Mac 26.7). La livraison est partiellement qualifiée sur ce point.
+- **iPhone** : non disponible ; la qualification « appareil » est faite sur iPad (iPadOS 27.2, M1). Une puce A-series et sa limite mémoire restent à vérifier.
+- **Fermeture forcée par l’utilisateur** (balayage dans le sélecteur d’apps) : non automatisable ; iOS annule alors les transferts de la session de fond (comportement documenté par Apple, non vérifié ici). Le test couvre une terminaison par l’outil de test, que le système traite comme une fin de processus ordinaire.
+- **Une exécution interrompue** : lors de la première exécution complète des `DeviceQualificationTests`, le processus a reçu `SIGKILL` pendant `contextFullBeforeAndDuringGeneration` (après le rechargement au contexte 256), sans rapport de plantage ni événement Jetsam sur l’appareil. Non reproduit : le test seul, puis deux exécutions complètes (14/14) réussissent. Cause non établie.
+- **Mesure du premier token** : prise au passage du moniteur en phase de génération (le flux Foundation Models retient le dernier événement, voir P6).
+- **Verrouillage** : un appareil verrouillé suspend `xcodebuild test` (« Unlock iPad to Continue ») ; garder l’écran déverrouillé pendant les tests.
+
 ## Blocages et écarts ouverts
 
-- **macOS 27 à l’exécution** : indisponible sur ce Mac (26.7) ; la livraison restera « compilée, non validée à l’exécution sur macOS 27 » tant qu’aucune machine 27 n’est disponible.
-- **Approximations silencieuses du convertisseur de schéma** : résolues pour l’adaptateur en P5 (`strict_json_schema`, refus des bornes flottantes, réécriture de `"$ref": "#"`). Reste l’argument chaîne contraint d’un outil au format XML de Qwen3.5 (voir P5).
-- **Metal du simulateur** (P5) : plantages au chargement du projecteur et à la restauration d’un checkpoint de Qwen3.5 ; qualification sur CPU du simulateur, Metal à qualifier sur iPhone (P7).
+- **macOS 27 à l’exécution** : indisponible sur ce Mac (26.7) ; la livraison est « compilée, non validée à l’exécution sur macOS 27 » tant qu’aucune machine 27 n’est disponible.
+- **iPhone** : hors ligne pendant P6 et P7 ; qualification appareil faite sur iPad Pro M1 (iPadOS 27.2).
+- **Approximations silencieuses du convertisseur de schéma** : résolues pour l’adaptateur en P5 (`strict_json_schema`, refus des bornes flottantes, réécriture de `"$ref": "#"`). L’argument chaîne contraint d’un outil au format XML de Qwen3.5 est résolu en P7 (énumération imposée, autres contraintes refusées en mode strict).
+- **Metal du simulateur** (P5) : plantages au chargement du projecteur et à la restauration d’un checkpoint de Qwen3.5 ; qualification sur CPU du simulateur ; Metal qualifié sur l’iPad (P7), sans plantage.
 - **Préremplissage de grammaire et vocabulaires sans marqueurs spéciaux** (moteur, préexistant) : cause de l’échec de `test-engine-operations` ; contourné dans les tests par un template sans prompt de génération.
 - **Signal de contexte plein** : résolu en P1 (`fail_on_context_full`).
 - **Tests moteur préexistants** : `test-engine-operations` et `test-engine-acquisition` échouent dans cet environnement avec stories15M, avec ou sans P1.
-- **Encodage observé sur deux runtimes** : identique sur macOS 26.7 (sonde locale) et simulateur iOS 27.0 ; à revérifier sur l’iPhone.
-- **Transfert en arrière-plan sur iPhone (P4)** : exécuté en P6 sur simulateur dans l’application de démo (session de fond, app suspendue, pause/reprise) ; sur iPhone, avec relance par le système et fermeture forcée, à consigner en P7 (appareil hors ligne pendant P6).
+- **Encodage observé** : identique sur macOS 26.7 (sonde locale) et simulateur iOS 27.0 ; sur iPadOS 27.2, les scénarios de l’adaptateur (outils, schémas, transcript) réussissent.
+- **Transfert en arrière-plan sur appareil (P4)** : exécuté sur iPad en P7 (suspendue puis terminée, installation à la relance) ; la fermeture forcée par l’utilisateur n’est pas automatisable.
 - **Annulation d’un flux Foundation Models** (P6) : le flux annulé se termine sans erreur et garde la réponse partielle dans le transcript ; la démo rétablit le dernier tour complet, et le README du package le documente pour les applications.
-- **Capacités qualifiées du catalogue** : renseignées en P5 (outils, raisonnement, vision) d’après `QwenTests` sur simulateur ; à confirmer sur iPhone en P7.
+- **Capacités qualifiées du catalogue** : renseignées en P5 (outils, raisonnement, vision) d’après `QwenTests` sur simulateur ; confirmées sur iPad (Metal) en P7.
+- **Mémoire après déchargement sur iOS** : rendue au système 45 à 125 s après le déchargement d’une instance avec projecteur (P7), sans croissance d’un cycle à l’autre.

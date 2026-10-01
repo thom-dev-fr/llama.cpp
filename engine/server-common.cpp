@@ -1416,6 +1416,12 @@ json oaicompat_chat_params_parse(
         && inputs.tool_choice != COMMON_CHAT_TOOL_CHOICE_NONE && !chat_params.supports_tools_with_response_format) {
         throw std::invalid_argument("the chat format of this model does not support tools combined with a response format");
     }
+    if (strict_json_schema && !inputs.tools.empty() && inputs.tool_choice != COMMON_CHAT_TOOL_CHOICE_NONE
+        && !chat_params.unenforced_tool_constraints.empty()) {
+        // "parameters of tool <name>: ...", the prefix of the other refusals of tool parameters
+        throw std::invalid_argument("parameters of tool " + chat_params.unenforced_tool_constraints.front()
+            + ", which the chat format of this model does not enforce");
+    }
 
     llama_params["chat_format"] = static_cast<int>(chat_params.format);
     llama_params["prompt"]      = chat_params.prompt;

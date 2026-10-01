@@ -118,7 +118,10 @@ for await update in runtime.updates() {                   // snapshot, then chan
 - **Unload.** `unload(_:)` closes the model's admissions, ends its waiting
   and running generations with `LlamaEngineError.unloaded`, and returns once
   the engine freed its resources; it runs on worker threads, never on the
-  caller's. A later request loads the model again.
+  caller's. A later request loads the model again. On iOS 27.2 (iPad Pro M1)
+  part of the freed memory (the projector's, ~0.7 GB) stays in the process
+  footprint for one to two minutes before the system takes it back; it does
+  not grow from one load to the next.
 - **Observation.** `snapshot()` and `updates()` report the catalog, each
   instance's state (loading progress, loaded, failed, ...) and the admission
   counts. A subscriber that falls `observationBufferLimit` updates behind gets
@@ -176,6 +179,10 @@ for try await partial in session.streamResponse(to: "6*7?", generating: Total.se
   (`LlamaLanguageModelError.incompleteToolCall`). Tools with a `@Generable`
   answer need a chat format that combines them (Qwen3.5 / Qwen3-Coder);
   otherwise the request fails with `unsupportedCapability(.toolCalling)`.
+  The XML tool format of Qwen3.5 writes a string argument as raw text: a
+  string `enum` (`@Guide(.anyOf(...))`, a `@Generable` enum) is enforced, a
+  pattern or a length on a string argument cannot be and fails with
+  `unsupportedGenerationGuide` naming the tool.
 - **Schemas.** No silent approximation: a range on a floating-point value, a
   regex outside the grammar's subset, an unknown keyword fail with
   `LanguageModelError.unsupportedGenerationGuide` naming the schema and the
@@ -313,6 +320,12 @@ TEST_RUNNER_LLAMA_QWEN_DIR=<directory with Qwen3.5-2B-Q4_K_M.gguf and mmproj-BF1
 ```
 
 `TEST_RUNNER_LLAMA_QWEN_OFFLOAD=none` runs it on the CPU.
+
+The iOS simulator's Metal device fails with Qwen3.5 (see the report): run
+these tests on its CPU there. On a device, the demo's hosted
+`DeviceQualificationTests` run the same capabilities on Metal with the model
+the app downloaded, and measure memory, first token, rates and cancellation
+(see [the demo](../../examples/llama.foundationmodels/README.md#tests)).
 
 The package requires OS 27 at run time: on an older Mac, tests compile but run
 only on an iOS 27 simulator or device.

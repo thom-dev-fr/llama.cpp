@@ -283,6 +283,9 @@ struct common_chat_params {
     // the format constrains an answer to tool calls or the response format when both are requested
     // (otherwise the response format replaces the tools)
     bool                                supports_tools_with_response_format = false;
+    // constraints of tool parameters that the grammar of the format does not enforce, as
+    // "<tool>: <description>" (a raw string argument without quotes cannot carry a pattern)
+    std::vector<std::string>            unenforced_tool_constraints;
 };
 
 // per-message parsing syntax

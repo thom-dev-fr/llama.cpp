@@ -124,3 +124,31 @@ slow on the simulator's CPU (minutes):
 ```bash
 xcodebuild test -scheme LlamaFMDemoUITests -destination 'platform=iOS Simulator,name=iPhone 17 Pro'
 ```
+
+### On a device
+
+Sign with your team (`DEVELOPMENT_TEAM=<team> -allowProvisioningUpdates`)
+and keep the device unlocked (Xcode waits otherwise). Metal is the default
+there.
+
+- `DeviceDownloadUITests` downloads the catalog model from an **empty
+  installation** (delete the app first; skipped otherwise), suspends the app
+  for 90 s, terminates it for 90 s, relaunches it and waits for the
+  installation. It installs the model the other device tests use.
+- `DeviceQualificationTests` (hosted, opt-in) runs each announced capability
+  with the model the app downloaded, on Metal, and logs the measures (lines
+  starting with `P7`): memory footprint, load, first token, generation and
+  prompt rates, image, cancellation, load/unload cycles.
+  `TEST_RUNNER_LLAMA_QUALIFICATION_OFFLOAD=none` measures the CPU.
+- `QwenScenarioUITests` play the interface journeys as on the simulator.
+
+```bash
+xcodebuild test -scheme LlamaFMDemoUITests -destination 'id=<device>' DEVELOPMENT_TEAM=<team> -allowProvisioningUpdates \
+  -only-testing:LlamaFMDemoUITests/DeviceDownloadUITests
+TEST_RUNNER_LLAMA_DEVICE_QUALIFICATION=1 xcodebuild test -scheme LlamaFMDemo -destination 'id=<device>' \
+  DEVELOPMENT_TEAM=<team> -allowProvisioningUpdates -only-testing:LlamaFMDemoTests/DeviceQualificationTests
+```
+
+Measured on an iPad Pro 11" (M1, 8 GB, iPadOS 27.2) with Qwen3.5-2B Q4_K_M,
+context 4096 and the projector: see the
+[report](../../docs/design/apple-language-model-report.md#p7--qualification-et-livraison).

@@ -7356,6 +7356,81 @@ static void test_template_generation_prompt() {
     }
 }
 
+// Qwen3-Coder XML format: a string argument is raw text without quotes. The grammar restricts a string
+// enum to its values; a constraint it cannot carry (a pattern, a length) is reported to the caller.
+static void test_qwen3_coder_string_constraints() {
+    LOG_DBG("%s\n", __func__);
+
+    auto tmpls = read_templates("models/templates/Qwen3.5-4B.jinja");
+
+    common_chat_tool paint_tool{
+        /* .name = */ "paint",
+        /* .description = */ "Paints the wall.",
+        /* .parameters = */ R"({
+            "type": "object",
+            "properties": {
+                "color": { "type": "string", "enum": ["red", "light blue"] },
+                "note": { "type": "string" }
+            },
+            "required": ["color"]
+        })",
+    };
+
+    auto call = [](const std::string & color) {
+        return "<tool_call>\n<function=paint>\n<parameter=color>\n" + color + "\n</parameter>\n</function>\n</tool_call>";
+    };
+
+    for (auto choice : { COMMON_CHAT_TOOL_CHOICE_AUTO, COMMON_CHAT_TOOL_CHOICE_REQUIRED }) {
+        common_chat_templates_inputs inputs;
+        inputs.messages        = { message_user };
+        inputs.tools           = { paint_tool };
+        inputs.tool_choice     = choice;
+        inputs.enable_thinking = false;
+        auto params = common_chat_templates_apply(tmpls.get(), inputs);
+        assert_equals(true, params.unenforced_tool_constraints.empty());
+
+        auto accepts = [&](const std::string & input) {
+            auto grammar = build_grammar(params.grammar);
+            if (!grammar) {
+                throw std::runtime_error("Failed to build grammar: " + params.grammar);
+            }
+            // a lazy grammar applies from its trigger, <tool_call>; otherwise from the generation prompt
+            return match_string_detailed(params.grammar_lazy ? input : params.generation_prompt + input, grammar.get()).success;
+        };
+        assert_equals(true, accepts(call("red")));
+        assert_equals(true, accepts(call("light blue")));
+        assert_equals(false, accepts(call("green")));
+        assert_equals(false, accepts(call("redder")));
+
+        // the parsed value is still the string
+        common_chat_parser_params syntax(params);
+        syntax.parser.load(params.parser);
+        auto msg = common_chat_parse(params.generation_prompt + call("light blue"), false, syntax);
+        assert_equals<size_t>(1, msg.tool_calls.size());
+        assert_equals(std::string(R"({"color":"light blue"})"), json::parse(msg.tool_calls[0].arguments).dump());
+    }
+
+    // constraints the raw text cannot carry are reported, for the strict mode of the engine
+    auto unenforced = [&](const std::string & property) {
+        common_chat_tool tool{ "check", "Checks.",
+            R"({"type": "object", "properties": {"value": )" + property + R"(}, "required": ["value"]})" };
+        common_chat_templates_inputs inputs;
+        inputs.messages = { message_user };
+        inputs.tools    = { tool };
+        auto params = common_chat_templates_apply(tmpls.get(), inputs);
+        return params.unenforced_tool_constraints;
+    };
+    assert_equals(true, unenforced(R"({"type": "string"})").empty());
+    assert_equals(true, unenforced(R"({"type": "integer", "minimum": 1})").empty());
+    assert_equals(true, unenforced(R"({"type": ["string", "integer"]})").empty());
+    assert_equals(std::string("check: parameter value has pattern ^[0-9]+$"),
+                  unenforced(R"({"type": "string", "pattern": "^[0-9]+$"})").at(0));
+    assert_equals(std::string("check: parameter value has a string length"),
+                  unenforced(R"({"type": "string", "maxLength": 3})").at(0));
+    assert_equals(std::string("check: parameter value has string values mixed with other types"),
+                  unenforced(R"({"anyOf": [{"type": "string", "enum": ["a", "b"]}, {"type": "integer"}]})").at(0));
+}
+
 // Test the developer role to system workaround with a simple mock template
 static void test_developer_role_to_system_workaround() {
     LOG_DBG("%s\n", __func__);
@@ -7792,6 +7867,7 @@ int main(int argc, char ** argv) {
         test_tools_oaicompat_json_conversion();
         test_convert_responses_to_chatcmpl();
         test_developer_role_to_system_workaround();
+        test_qwen3_coder_string_constraints();
         test_deepseek_v4_thinking_retention();
         test_deepseek_v4_tool_result_ordering();
         test_template_generation_prompt();

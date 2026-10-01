@@ -1,5 +1,79 @@
 #include "parsers.h"
 
+// The XML format writes a string argument as raw text, without quotes: the grammar can restrict it to a
+// set of values, or leave it free. Returns the values of a string enum or const (true), or describes in
+// `unenforced` a string constraint the raw text cannot carry.
+static const common_chat_schema * resolved(const common_chat_schema * schema) {
+    while (schema != nullptr && schema->kind() == common_chat_schema::KIND_REF) {
+        schema = static_cast<const common_chat_schema_ref *>(schema)->target;
+    }
+    return schema;
+}
+
+static bool raw_string_values(const common_chat_schema & schema, std::vector<std::string> & values, std::string & unenforced) {
+    const auto * node = resolved(&schema);
+    if (node == nullptr) {
+        return false;
+    }
+    auto from_json = [&](const std::vector<common_json> & candidates) {
+        for (const auto & value : candidates) {
+            if (!value.is_string()) {
+                unenforced = "a non-string value among its allowed values";
+                return false;
+            }
+            values.push_back(value.get<std::string>());
+        }
+        return !values.empty();
+    };
+    switch (node->kind()) {
+        case common_chat_schema::KIND_ENUM:
+            return from_json(static_cast<const common_chat_schema_enum *>(node)->values);
+        case common_chat_schema::KIND_CONST:
+            return from_json({ static_cast<const common_chat_schema_const *>(node)->value });
+        case common_chat_schema::KIND_STRING: {
+            const auto * string = static_cast<const common_chat_schema_string *>(node);
+            if (!string->pattern.empty()) {
+                unenforced = "pattern " + string->pattern;
+            } else if (string->format != common_chat_schema::FORMAT_NONE) {
+                unenforced = "a string format";
+            } else if (string->min_length > 0 || string->max_length >= 0) {
+                unenforced = "a string length";
+            }
+            return false;
+        }
+        case common_chat_schema::KIND_ANY:
+            return false;
+        default:
+            unenforced = std::string("a string ") + common_chat_schema::kind_name(node->kind());
+            return false;
+    }
+}
+
+// The string branches of a schema that also accepts other types: the raw text alternative is free.
+static std::string unenforced_string_branch(const common_chat_schema & schema) {
+    const auto * node = resolved(&schema);
+    if (node == nullptr) {
+        return "";
+    }
+    if (node->kind() == common_chat_schema::KIND_ANY_OF) {
+        for (const auto & child : static_cast<const common_chat_schema_any_of *>(node)->children) {
+            if (child->value_types().has(common_chat_schema::TYPE_STRING)) {
+                auto reason = unenforced_string_branch(*child);
+                if (!reason.empty()) {
+                    return reason;
+                }
+            }
+        }
+        return "";
+    }
+    std::vector<std::string> values;
+    std::string              unenforced;
+    if (raw_string_values(*node, values, unenforced)) {
+        return "string values mixed with other types";
+    }
+    return unenforced;
+}
+
 common_chat_params common_chat_params_init_qwen3_coder(const common_chat_template &          tmpl,
                                                               const autoparser::generation_params & inputs) {
     common_chat_params data;
@@ -114,8 +188,25 @@ common_chat_params common_chat_params_init_qwen3_coder(const common_chat_templat
                     if (!types.has(common_chat_schema::TYPE_STRING)) {
                         arg_value = p.tool_arg_json_value(p.schema(p.json(), rule_name + "-schema", doc, *param.schema)) + arg_close;
                     } else if (types.is_only(common_chat_schema::TYPE_STRING)) {
-                        arg_value = arg_string;
+                        std::vector<std::string> values;
+                        std::string              unenforced;
+                        if (raw_string_values(*param.schema, values, unenforced)) {
+                            auto choice = p.choice();
+                            for (const auto & value : values) {
+                                choice |= p.literal(value);
+                            }
+                            arg_value = p.tool_arg_string_value(choice) + arg_close;
+                        } else {
+                            arg_value = arg_string;
+                        }
+                        if (!unenforced.empty()) {
+                            data.unenforced_tool_constraints.push_back(name + ": parameter " + param.name + " has " + unenforced);
+                        }
                     } else {
+                        auto unenforced = unenforced_string_branch(*param.schema);
+                        if (!unenforced.empty()) {
+                            data.unenforced_tool_constraints.push_back(name + ": parameter " + param.name + " has " + unenforced);
+                        }
                         // The string alternative accepts any text, so the grammar only keeps the raw string
                         // rule. The parser still tries the JSON alternatives first to type the value.
                         auto json_value = p.choice();

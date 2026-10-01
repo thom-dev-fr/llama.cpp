@@ -221,8 +221,16 @@ au prompt trop long (auparavant `inference_error`, mêmes données natives).
   (`parameters of tool <nom>:`), avec le nom de la règle concernée. Avec outils
   et `response_format` à la fois, un format de chat qui ne sait pas les
   combiner est refusé (« does not support tools combined with a response
-  format ») au lieu de remplacer les outils par le schéma. Absent, rien ne
-  change.
+  format ») au lieu de remplacer les outils par le schéma. Un format qui écrit
+  les arguments chaîne d’un outil en texte brut (format XML Qwen3-Coder /
+  Qwen3.5, sans guillemets) signale les contraintes qu’il ne peut pas porter
+  (`common_chat_params::unenforced_tool_constraints` : motif, format, longueur,
+  valeurs de chaîne mêlées à d’autres types) ; en mode strict, la requête est
+  refusée (`parameters of tool <nom>: parameter <p> has pattern …, which the
+  chat format of this model does not enforce`). Absent, rien ne change.
+- **Arguments chaîne énumérés** (format Qwen3-Coder/Qwen3.5) : un paramètre
+  chaîne à `enum` ou `const` est restreint par la grammaire à ses valeurs, en
+  texte brut ; auparavant il était généré librement. Avec ou sans mode strict.
 - **Outils et `response_format` ensemble** (format Qwen3-Coder/Qwen3.5,
   `supports_tools_with_response_format`) : avec `tool_choice: "auto"`, la
   réponse est soit des appels d’outils, soit le JSON du schéma, sous une

@@ -43,6 +43,23 @@ private let greedy = GenerationOptions(samplingMode: .greedy, maximumResponseTok
     @Guide(.pattern(/(?=a)a/)) var text: String
 }
 
+/// The Qwen3.5 template of the repository: its XML tool call format writes a
+/// string argument as raw text.
+private let qwenTemplate = URL(fileURLWithPath: #filePath)
+    .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+    .appendingPathComponent("../../models/templates/Qwen3.5-4B.jinja").standardizedFileURL
+
+/// A string argument with a pattern.
+struct CodeTool: Tool {
+    let name = "check_code"
+    let description = "Checks a product code."
+    @Generable struct Arguments {
+        @Guide(.pattern(/[A-Z]{3}/)) var code: String
+    }
+
+    func call(arguments: Arguments) async throws -> String { "ok" }
+}
+
 @Suite(.serialized) struct EngineAdapterTests {
     @Test func textStreamsFromTheEngine() async throws {
         let runtime = try runtime()
@@ -117,6 +134,25 @@ private let greedy = GenerationOptions(samplingMode: .greedy, maximumResponseTok
             #expect(info.capability == .toolCalling)
             #expect(info.debugDescription.contains("tools combined with a response format"))
         }
+        await runtime.shutdown()
+    }
+
+    @Test func toolArgumentConstraintTheFormatCannotEnforceIsRefused() async throws {
+        let runtime = try runtime()
+        let qwen = LlamaLoadProfile(contextSize: 1024, compute: LlamaComputeConfiguration(offload: .none),
+                                    chatTemplate: try String(contentsOf: qwenTemplate, encoding: .utf8))
+        do {
+            _ = try await LanguageModelSession(model: model(runtime, profile: qwen), tools: [CodeTool()])
+                .respond(to: "x", options: greedy)
+            Issue.record("expected a refusal")
+        } catch let LanguageModelError.unsupportedGenerationGuide(info) {
+            #expect(info.schemaName == "check_code")
+            #expect(info.debugDescription.contains("parameter code has pattern"))
+        }
+        // the same tool disallowed: nothing to constrain
+        let response = try await LanguageModelSession(model: model(runtime, profile: qwen), tools: [CodeTool()])
+            .respond(to: "x", options: GenerationOptions(samplingMode: .greedy, maximumResponseTokens: 8, toolCallingMode: .disallowed))
+        #expect(!response.content.isEmpty)
         await runtime.shutdown()
     }
 
