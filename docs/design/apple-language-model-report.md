@@ -183,6 +183,7 @@ Archive : 186 Mo, dont la plus grande partie en dSYM. `Package.swift` référenc
 | Même test sous TSan | **PASS** après correction d’une course **dans le test** (drapeau non atomique), aucun rapport sur le pont ni le moteur |
 | `xcodebuild test` du package sur simulateur iOS 27 (iPhone 17 Pro) | **20/20** : 12 tests existants et 8 `NativeEngineTests` sur le vrai moteur (création invalide typée, chat streamé avec chargement à la demande, flux `events()`, annulation de tâche → `cancelled`, 20 lecteurs bloqués nativement pendant ≥ 250 ms sans bloquer le pool coopératif (tâche détachée servie en < 100 ms), déchargement qui termine tous les lecteurs (`unloaded`), requête survivant à son moteur (`stopped`), second lecteur refusé) |
 | Consommateur externe (package hors dépôt, dépendance par chemin) | Compilé pour iOS appareil et macOS ; exécutable macOS lié à `@rpath/LlamaBridge.framework` (`minos` 27.0) ; test exécuté sur le simulateur iOS 27 avec le framework embarqué dans le bundle de test : **PASS** |
+| Reconstruction depuis un checkout propre (`git clone` de `81db64062`, puis `LLAMA_BRIDGE_TEST_MODEL=… scripts/build-apple-language-model.sh --test`) | **PASS** en 8 min 29 s : XCFramework, archive et checksum produits, `test-llama-bridge` 1/1. Le checksum diffère d’un build à l’autre (binaire non reproductible au bit près) : publier l’archive et le manifeste ensemble |
 | Avertissements de compilation | Aucun dans le pont ; 7 avertissements de ggml Metal (API dépréciées dans le SDK 27, slices x86_64), hors périmètre |
 
 ### Observations et limites
