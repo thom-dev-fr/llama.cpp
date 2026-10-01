@@ -24,6 +24,7 @@ public struct LlamaModelImport: Hashable, Sendable {
 /// <root>/models/<id>/manifest.json, weights (all shards), projector
 /// <root>/staging/   imports in progress (removed at the next start)
 /// <root>/trash/     removals in progress (same)
+/// <root>/downloads/ transfers of `LlamaModelDownloads`, never loadable
 /// ```
 ///
 /// An import copies the files into `staging`, writes the manifest, then moves
@@ -40,6 +41,8 @@ public final class LlamaModelStore: Sendable {
     private var modelsDirectory: URL { root.appendingPathComponent("models", isDirectory: true) }
     private var stagingDirectory: URL { root.appendingPathComponent("staging", isDirectory: true) }
     private var trashDirectory: URL { root.appendingPathComponent("trash", isDirectory: true) }
+    /// Transfers in progress; owned by `LlamaModelDownloads`.
+    package var downloadsDirectory: URL { root.appendingPathComponent("downloads", isDirectory: true) }
 
     /// Free space kept on the volume after an import.
     static let reserve: Int64 = 64 << 20
@@ -53,9 +56,10 @@ public final class LlamaModelStore: Sendable {
         self.root = root
         self.availableCapacity = availableCapacity
         let manager = FileManager.default
-        for directory in [modelsDirectory, stagingDirectory, trashDirectory] {
+        for directory in [modelsDirectory, stagingDirectory, trashDirectory, downloadsDirectory] {
             try manager.createDirectory(at: directory, withIntermediateDirectories: true)
         }
+        try Self.excludeFromBackup(downloadsDirectory)
         // Leftovers of an interrupted import or removal.
         for directory in [stagingDirectory, trashDirectory] {
             for item in try manager.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil) {
@@ -84,6 +88,8 @@ public final class LlamaModelStore: Sendable {
         var projector: String?
         var bytes: Int64
         var importedAt: Date
+        /// The catalog entry of a downloaded model (absent for an import).
+        var catalogEntry: LlamaModelCatalog.Entry?
     }
 
     /// Models of the store; a directory without a readable manifest is ignored.
@@ -107,7 +113,7 @@ public final class LlamaModelStore: Sendable {
         LlamaModelArtifact(id: manifest.id, displayName: manifest.displayName,
                            weights: manifest.weights.map { directory.appendingPathComponent($0) },
                            projector: manifest.projector.map { directory.appendingPathComponent($0) },
-                           isManaged: true)
+                           isManaged: true, catalogEntry: manifest.catalogEntry)
     }
 
     func directory(of id: LlamaModelID) -> URL {
@@ -141,10 +147,7 @@ public final class LlamaModelStore: Sendable {
         for source in sources {
             bytes += try Self.checkGGUF(source)
         }
-        let available = try availableCapacity(root)
-        guard available >= bytes + Self.reserve else {
-            throw LlamaEngineError.insufficientSpace(required: bytes + Self.reserve, available: available)
-        }
+        try checkSpace(for: bytes)
 
         let staging = stagingDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try manager.createDirectory(at: staging, withIntermediateDirectories: false)
@@ -159,27 +162,85 @@ public final class LlamaModelStore: Sendable {
                                     weights: weights.map(\.lastPathComponent),
                                     projector: request.projector?.lastPathComponent,
                                     bytes: bytes, importedAt: Date())
-            let encoder = JSONEncoder()
-            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-            encoder.dateEncodingStrategy = .iso8601
-            try encoder.encode(manifest).write(to: staging.appendingPathComponent("manifest.json"), options: .atomic)
-            var values = URLResourceValues()
-            values.isExcludedFromBackup = true
-            var excluded = staging
-            try excluded.setResourceValues(values)
-            // The rename makes the model appear complete, or fails if another
-            // import of the same identifier finished first.
-            if rename(staging.path, target.path) != 0 {
-                let code = errno
-                if code == EEXIST || code == ENOTEMPTY {
-                    throw LlamaEngineError.modelExists(request.id)
-                }
-                throw POSIXError(POSIXErrorCode(rawValue: code) ?? .EIO)
-            }
-            return artifact(manifest, in: target)
+            return try finalize(staging, manifest: manifest, at: target)
         } catch {
             try? manager.removeItem(at: staging)
             throw error
+        }
+    }
+
+    /// Installs the verified files of a download (blocking): moves them out
+    /// of `directory` into the store, then renames the model into place like
+    /// an import. The caller checked sizes and digests.
+    func install(_ entry: LlamaModelCatalog.Entry, from directory: URL) throws -> LlamaModelArtifact {
+        let manager = FileManager.default
+        let target = self.directory(of: entry.id)
+        guard !manager.fileExists(atPath: target.path) else {
+            throw LlamaEngineError.modelExists(entry.id)
+        }
+        for file in entry.files {
+            _ = try Self.checkGGUF(directory.appendingPathComponent(file.name))
+        }
+        let staging = stagingDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try manager.createDirectory(at: staging, withIntermediateDirectories: false)
+        do {
+            // Same volume: renames, no copy.
+            for file in entry.files {
+                try manager.moveItem(at: directory.appendingPathComponent(file.name),
+                                     to: staging.appendingPathComponent(file.name))
+            }
+            let manifest = Manifest(id: entry.id, displayName: entry.displayName,
+                                    weights: entry.weights.map(\.name), projector: entry.projector?.name,
+                                    bytes: entry.totalSize, importedAt: Date(), catalogEntry: entry)
+            return try finalize(staging, manifest: manifest, at: target)
+        } catch {
+            // Give the files back to the download, so that a retry does not
+            // transfer them again.
+            for file in entry.files {
+                try? manager.moveItem(at: staging.appendingPathComponent(file.name),
+                                      to: directory.appendingPathComponent(file.name))
+            }
+            try? manager.removeItem(at: staging)
+            throw error
+        }
+    }
+
+    /// Writes the manifest, excludes the directory from backups, then renames
+    /// it into `models`: the model appears complete, or the rename fails if
+    /// another model with the same identifier appeared first.
+    private func finalize(_ staging: URL, manifest: Manifest, at target: URL) throws -> LlamaModelArtifact {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        encoder.dateEncodingStrategy = .iso8601
+        try encoder.encode(manifest).write(to: staging.appendingPathComponent("manifest.json"), options: .atomic)
+        try Self.excludeFromBackup(staging)
+        if rename(staging.path, target.path) != 0 {
+            let code = errno
+            if code == EEXIST || code == ENOTEMPTY {
+                throw LlamaEngineError.modelExists(manifest.id)
+            }
+            throw POSIXError(POSIXErrorCode(rawValue: code) ?? .EIO)
+        }
+        return artifact(manifest, in: target)
+    }
+
+    static func excludeFromBackup(_ url: URL) throws {
+        var values = URLResourceValues()
+        values.isExcludedFromBackup = true
+        var excluded = url
+        try excluded.setResourceValues(values)
+    }
+
+    /// Whether the managed copy of a model exists.
+    func contains(_ id: LlamaModelID) -> Bool {
+        FileManager.default.fileExists(atPath: directory(of: id).path)
+    }
+
+    /// Fails unless the volume keeps the reserve after writing `bytes`.
+    func checkSpace(for bytes: Int64) throws {
+        let available = try availableCapacity(root)
+        guard available >= bytes + Self.reserve else {
+            throw LlamaEngineError.insufficientSpace(required: bytes + Self.reserve, available: available)
         }
     }
 

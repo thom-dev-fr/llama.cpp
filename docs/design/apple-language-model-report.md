@@ -1,6 +1,6 @@
 # Rapport — Apple LanguageModel sur llama.cpp
 
-Rapport prévu par le [plan](apple-language-model-plan.md). Il distingue ce qui est exécuté, compilé seulement, ou non encore traité. Aucune capacité Foundation Models n’est validée à ce stade : P0 à P3 sont achevés.
+Rapport prévu par le [plan](apple-language-model-plan.md). Il distingue ce qui est exécuté, compilé seulement, ou non encore traité. Aucune capacité Foundation Models n’est validée à ce stade : P0 à P3 sont achevés, P4 l’est hormis le scénario d’arrière-plan sur iPhone (reporté à P6, voir P4).
 
 ## Suivi P0–P7
 
@@ -10,7 +10,7 @@ Rapport prévu par le [plan](apple-language-model-plan.md). Il distingue ce qui 
 | P1 Signaux du moteur | **Terminé** | `test-engine-context` (nouveau) ; CTest 77/80, les 3 échecs préexistants ou d’environnement ; HTTP non-`slow` 393 réussis / 6 ignorés ; sonde Qwen3.5-2B (image, raisonnement) ; 12 tests Swift sur simulateur iOS 27. | `test-engine-operations` et `test-engine-acquisition` échouent aussi sans P1 (voir P1). |
 | P2 Pont natif et XCFramework | **Terminé** | Pont C + `test-llama-bridge` (hôte, ASan+UBSan, TSan) ; `LlamaBridge.xcframework` iOS / simulateur / macOS ; 20 tests Swift sur simulateur iOS 27 dont 8 sur le vrai moteur ; consommateur externe compilé pour iOS et macOS, testé sur simulateur. | Exécution macOS et iPhone non faite (P7). Premier chargement Metal lent sur simulateur (voir P2). |
 | P3 Runtime partagé, stockage | **Terminé** | `LlamaRuntime` (moteur natif en catalogue, admission, instances, chargements mutualisés, déchargement, observation) et `LlamaModelStore` ; 33 tests Swift sur simulateur iOS 27 dont 13 nouveaux `RuntimeTests` sur le vrai moteur, stables sur 5 itérations ; compilation macOS 27 et iOS 27 appareil. | Aucun changement du moteur ni du pont. Tests sur stories15M (CPU) ; iPhone et macOS 27 non exécutés (P7). |
-| P4 Acquisition URLSession | À faire | — | Références Qwen3.5-2B relevées localement, à confirmer côté serveur. |
+| P4 Acquisition URLSession | **Terminé, sauf scénario iPhone** | Manifeste `LlamaModelCatalog` et `Catalog/models.json` (Qwen3.5-2B, références vérifiées côté serveur et localement) ; `LlamaModelDownloads` ; 17 `DownloadTests` sur simulateur iOS 27, dont 15 avec serveur contrôlé (interruption, reprise, sans plages, fichier modifié, HTTP, pause, abandon, relance) ; téléchargement réel de l’entrée Qwen (1,95 Go) avec pause et reprise via le CDN ; 50 tests au total, stables sur 5 itérations. | Le système refuse une session de fond au processus `xctest` : le transfert réel en arrière-plan sur iPhone exige une app hôte et se fera avec la démo (P6). |
 | P5 Executor Foundation Models | À faire | — | Écarts du convertisseur de schéma relevés en P0. |
 | P6 Démo SwiftUI | À faire | — | — |
 | P7 Qualification | À faire | — | Exécution macOS 27 impossible sur ce Mac (26.7). |
@@ -258,6 +258,73 @@ Le premier chargement de ces exécutions n’a pas reproduit les 29 s observées
 - Les tests de stockage utilisent de faux GGUF (magique seul) pour les segments et le projecteur ; ils ne valident pas le chargement d’un modèle segmenté ni de la vision (P5/P7).
 - Les tests tournent sur simulateur ; iPhone et macOS 27 restent à exécuter (P7).
 
+## P4 — Acquisition URLSession et catalogue qualifié
+
+### Conception retenue
+
+`bindings/apple/Sources/LlamaEngine` et `bindings/apple/Catalog` ; aucun changement du moteur ni du pont.
+
+- **Manifeste versionné** (`LlamaModelCatalog`, format 1) : version de contenu, puis par modèle identifiant, source (dépôt + révision immuable), fichiers de poids (un fichier ou tous les segments dans l’ordre) et projecteur avec URL, taille et SHA-256, licence, template (`embedded` + SHA-256 du Jinja, ou nom de template llama.cpp), capacités **déclarées** et capacités **qualifiées** (sous-ensemble des déclarées), référence de la preuve. `decode`/`validate` refusent : autre version de format, révision non hexadécimale (`main`), URL ne contenant pas la révision, URL non https (http seulement vers la boucle locale, pour les tests), noms de fichiers dangereux ou dupliqués, `manifest.json`, SHA-256 invalide, taille nulle, suite de segments incohérente, vision sans projecteur, capacité qualifiée non déclarée, identifiant dupliqué.
+- **Catalogue livré** (`Catalog/models.json`, version `2026-10-01`) : `qwen3.5-2b-q4_k_m`, `unsloth/Qwen3.5-2B-GGUF` à la révision `f6d5376be1edb4d416d56da11e5397a961aca8ae` (aussi tête de `main` au 1er octobre 2026), `Qwen3.5-2B-Q4_K_M.gguf` (1 280 835 840 octets, `aaf42c8b…9223`) et `mmproj-BF16.gguf` (671 372 992 octets, `f17196c0…d3c2`), licence apache-2.0 (métadonnée GGUF et carte du modèle, modèle non restreint), template intégré `7f0e5290…ed67` (7 816 caractères, contient raisonnement, outils et images). Capacités déclarées : outils, raisonnement, vision ; **qualifiées : aucune** tant que P5/P7 ne les ont pas prouvées avec l’adaptateur. La génération structurée n’est pas déclarée : elle dépend de la grammaire du moteur, pas du modèle, et sera qualifiée en P5.
+- **Vérification des références** (`Catalog/verify-catalog.py`) : requête HEAD à la révision épinglée, comparaison de `x-repo-commit`, `x-linked-size` et `x-linked-etag` (SHA-256 des fichiers LFS de Hugging Face), et hachage des copies locales avec `--local`.
+- **Téléchargements** (`LlamaModelDownloads`) : une instance par identifiant de session, créée au lancement. Session de fond par défaut (`sessionSendsLaunchEvents`, `isDiscretionary` et cellulaire configurables, conteneur partagé optionnel), session de premier plan possible. Un téléchargement par modèle ; ses fichiers sont transférés en parallèle dans `<store>/downloads/<id>`, exclu de la sauvegarde, jamais lu par le catalogue.
+- **Identités persistantes** : `record.json` (entrée, jeton, phase, fichiers reçus/vérifiés) et données de reprise `<fichier>.resume`. Chaque tâche porte `{model, file, token, resumed}` dans `taskDescription`. À la création, l’instance relit les records (un fichier présent compte comme reçu — il n’arrive que par un `rename` complet — et sera revérifié), rattache par `allTasks` les tâches du jeton courant, annule les autres, signale `interrupted(transferLost)` les fichiers sans tâche, et ne relance rien d’elle-même. Le jeton change à chaque pause, reprise, échec ou abandon : les événements des anciennes tâches ne modifient plus l’état, sauf un fichier complet arrivé juste avant une pause, conservé.
+- **États** : `downloading`, `paused`, `interrupted(issue)` (récupérable : erreurs de connectivité, HTTP 5xx/408/429, transfert perdu ou annulé par le système, avec la raison `NSURLErrorBackgroundTaskCancelledReasonKey`), `verifying`, `installing`, `failed(issue)` (HTTP 4xx, taille ou SHA-256 différents, espace, écriture locale, installation). Un échec arrête les autres transferts en conservant leurs données de reprise.
+- **Reprise et redémarrage** : `pause` produit les données de reprise (`cancelByProducingResumeData`) ; `resume` repart de ces données, sinon du début. Sans validateur ni plages, URLSession ne fournit pas de données de reprise : le fichier redémarre. Une tâche lancée depuis des données de reprise qui échoue hors connectivité et sans nouvelles données est relancée une fois depuis le début (données inutilisables). Après `failed`, `resume` redémarre le fichier en échec ; les autres gardent leurs données. `cancel` abandonne et efface ; il est refusé (`downloadInstalling`) pendant l’installation.
+- **Validation et installation** : taille puis SHA-256 de chaque fichier, sur une file utilitaire dédiée (jamais le pool coopératif). Quand tous les fichiers sont vérifiés, `LlamaRuntime.installDownload` réserve l’identifiant, déplace les fichiers (même volume) dans un staging, écrit le manifeste du store avec l’entrée de catalogue, exclut le répertoire de la sauvegarde, puis un seul `rename` vers `models/<id>` ; le modèle apparaît alors dans le runtime avec `catalogEntry`. Un projecteur absent, partiel ou en échec laisse le modèle hors du catalogue : aucune capacité vision ne peut en sortir. En cas d’échec d’installation, les fichiers retournent au téléchargement.
+- **Espace** : vérifié au démarrage (taille totale) et à la reprise (reste à transférer), avec la réserve de 64 Mio du store ; refus avant toute requête.
+- **Observation** : `snapshot()` et `updates()` comme le runtime (le hub d’observation de P3 est devenu générique, `LlamaStateUpdate<Snapshot>` ; `LlamaRuntimeUpdate` reste un alias). Progression publiée au plus toutes les 100 ms par téléchargement.
+- **Cycle de vie de l’application** : `handleBackgroundEvents(forSession:completionHandler:)` pour `application(_:handleEventsForBackgroundURLSession:completionHandler:)`, `backgroundEventsFinished()` pour `.backgroundTask(.urlSession(_:))` de SwiftUI ; un lot d’événements livré avant l’appel est mémorisé. Le système poursuit les transferts d’une session de fond quand l’application est suspendue ou terminée par le système ; il les annule lorsque l’utilisateur force la fermeture, et ils apparaissent `interrupted` au lancement suivant. Aucune poursuite n’est promise après une fermeture forcée.
+
+### Preuves
+
+Commandes exécutées depuis `bindings/apple` (XCFramework de P2 inchangé) :
+
+```bash
+bindings/apple/Catalog/verify-catalog.py --local ~/.cache/huggingface/hub/models--unsloth--Qwen3.5-2B-GGUF/snapshots/f6d5376be1edb4d416d56da11e5397a961aca8ae
+xcodebuild test -scheme LlamaApple-Package -destination 'platform=iOS Simulator,id=C64BD9F4-EA4D-44EC-8613-F3A3AC915618' -derivedDataPath <dd> -test-iterations 5 -run-tests-until-failure
+TEST_RUNNER_LLAMA_DOWNLOAD_REAL_CATALOG=1 xcodebuild test -scheme LlamaApple-Package -destination 'platform=iOS Simulator,id=C64BD9F4-EA4D-44EC-8613-F3A3AC915618' -derivedDataPath <dd> -only-testing:'LlamaEngineTests/DownloadTests/realCatalogEntryDownloadsAndInstalls()'
+xcodebuild build-for-testing -scheme LlamaApple-Package -destination 'generic/platform=macOS' -derivedDataPath <dd>
+xcodebuild build-for-testing -scheme LlamaApple-Package -destination 'generic/platform=iOS' -derivedDataPath <dd>
+```
+
+| Vérification | Résultat |
+| --- | --- |
+| `verify-catalog.py` : révision, taille et SHA-256 annoncés par Hugging Face ; copies locales hachées | **OK** pour les deux fichiers ; le CDN (redirection 302) répond `206` avec `ETag` et `Accept-Ranges: bytes` |
+| `shippedCatalogIsValid`, `invalidCatalogsAreRefused` : catalogue livré décodé et validé ; 12 entrées invalides refusées, segments valides acceptés, doublon et format 2 refusés | réussi |
+| `downloadVerifiesAndInstallsTheWholeSet` : poids + projecteur, contenu identique, `catalogEntry` persistée et relue par un nouveau store, exclusion de sauvegarde, répertoire de transfert supprimé ; second `start` → `modelExists` | réussi |
+| `interruptedTransferResumesWithARange` : coupure à 200 000 octets → `interrupted(network)` avec données de reprise ; `resume` → `Range: bytes=200000-` et `If-Range: "w1"` | réussi |
+| `serverWithoutRangesRestartsCleanly` : ni validateur ni plages → pas de données de reprise ; second GET complet sans `Range` | réussi |
+| `fileChangedOnTheServerFailsTheDigest` : contenu et ETag changés pendant l’interruption → le serveur renvoie le nouveau fichier entier (`If-Range` ne correspond plus) → `failed(digestMismatch)`, rien installé, fichier supprimé ; serveur rétabli, `resume` → nouveau GET complet et installation | réussi |
+| `partialProjectorNeverMakesTheModelLoadable` : projecteur en 404 → `failed(httpStatus 404)`, poids vérifiés mais modèle absent du runtime et du store, `load(usesProjector:)` → `modelNotFound` ; 503 → `interrupted` ; puis seul le projecteur est retransféré | réussi |
+| `resumingKeepsTheOtherTransfersRunning` : projecteur coupé pendant que les poids transfèrent → `interrupted` ; `resume` → la tâche des poids continue de rapporter sa progression sous le nouveau jeton ; un seul GET des poids | réussi ; **échoue sans la correction** (vérifié) |
+| `pauseKeepsResumeDataAndResumeContinues` : pause en cours de transfert ralenti → `paused`, données de reprise, aucun événement tardif ne change l’état ; reprise par plage | réussi |
+| `cancelAbandonsTheDownloadAndItsData` : abandon → disparition, répertoire effacé, second abandon `downloadNotFound`, nouveau départ non perturbé par les anciennes tâches, `downloadExists` sur doublon | réussi |
+| `stateSurvivesARelaunch` : fin de session pendant un transfert → nouvelle instance : `interrupted(transferLost)` sans relance automatique ; pause puis nouvelle instance : `paused`, reprise par plage | réussi |
+| `receivedFilesAreVerifiedAgainAfterARelaunch` : fichier reçu altéré sur disque avant relance → revérifié → `failed(digestMismatch)` ; retry → installé | réussi (a d’abord **échoué** : voir ci-dessous) |
+| `unusableResumeDataRestartsCleanly` : données de reprise corrompues → redémarrage propre sans `Range` | réussi |
+| `insufficientSpaceIsRefusedBeforeAnyTransfer` | réussi, aucune requête émise |
+| `observationReportsTheStates` : `downloading` → … → `installing`, puis disparition | réussi |
+| `backgroundSessionDownloads` (session de fond) | **ignoré** hors app hôte (voir limites) |
+| `realCatalogEntryDownloadsAndInstalls` (opt-in) : entrée Qwen depuis Hugging Face via le CDN, session de premier plan, simulateur | **réussi, 2 exécutions** : pause après ~50 Mo avec données de reprise pour les deux fichiers ; à la reprise, la progression des poids (26 498 586 octets à la pause) ne redescend jamais sous ce point, donc reprise par plage à travers la redirection ; 1 952 208 832 octets vérifiés et installés en 247 s puis 310 s ; `catalogEntry` et projecteur présents |
+| Suite complète, 5 itérations (`-run-tests-until-failure`) | **50 tests** (12 + 38 dont 2 ignorés) réussis à chaque itération |
+| `build-for-testing` macOS 27 et iOS 27 appareil | réussis, sans avertissement Swift dans le package |
+
+Défauts trouvés par ces tests et corrigés :
+
+- après un échec d’intégrité, l’annulation des autres transferts du même modèle conservait le jeton courant : elle était prise pour une annulation système et remplaçait `failed(digestMismatch)` par `interrupted(transferLost)`. L’arrêt après échec change désormais le jeton ;
+- relecture, puis test dédié : `resume` d’un téléchargement `interrupted` changeait le jeton alors qu’un autre fichier transférait encore ; sa progression était ignorée et une erreur ultérieure l’aurait été aussi, laissant le téléchargement en `downloading` sans tâche. Les tâches vivantes sont désormais ré-étiquetées (`taskDescription`) avec le nouveau jeton ;
+- relecture : une tâche créée par `start` avant la fin du rattachement aurait été annulée comme inconnue ; `pause` n’arrêtait pas les transferts restants d’un téléchargement `interrupted` ; un lot d’événements de fond livré avant l’appel de l’application n’était pas consommé une seule fois. Corrigés avant la dernière série.
+
+### Choix et limites
+
+- **Session de fond et tests** : le système refuse une session de fond au processus `xctest` du package (« Background URLSession adopters are required to have matching bundle identifier… and code signing identifier ») ; le transfert y stagne à 64 Kio. Les tests utilisent donc une session de premier plan, de comportement identique pour le délégué ; `backgroundSessionDownloads` s’active dans une app hôte. Dans un même processus, une seconde session ne peut pas réutiliser l’identifiant d’une session vivante : le rattachement par `allTasks` après relance n’est vérifiable qu’en relançant l’application.
+- **Scénario réel en arrière-plan sur iPhone : non exécuté.** Il exige une application signée ; il sera exécuté avec la démo (P6) puis consigné en P7 : transfert poursuivi app suspendue, relance système avec `handleEventsForBackgroundURLSession`, fermeture forcée → `interrupted`.
+- **Reprise** : dépend du serveur (validateur, plages) et des données conservées par le système ; sans elles, le fichier redémarre proprement. Les URL signées du CDN de Hugging Face expirent : la reprise réelle s’est faite quelques secondes après la pause ; une reprise après expiration n’est pas testée (URLSession relance la requête d’origine, qui produit une nouvelle redirection).
+- **Intégrité** : vérifiée après transfert, le fichier étant écrit par le système ; la durée du hachage sur iPhone reste à mesurer (P7). Un hachage interrompu par la suspension de l’app reprend au lancement suivant.
+- **Fichiers en parallèle** : les fichiers d’un modèle sont transférés simultanément ; le système borne les connexions par hôte.
+- **Imports locaux** : aucune capacité ne leur est attribuée ; seul un modèle installé depuis le catalogue porte une `catalogEntry` (et donc des capacités qualifiées, quand il y en aura).
+
 ## Blocages et écarts ouverts
 
 - **macOS 27 à l’exécution** : indisponible sur ce Mac (26.7) ; la livraison restera « compilée, non validée à l’exécution sur macOS 27 » tant qu’aucune machine 27 n’est disponible.
@@ -265,3 +332,5 @@ Le premier chargement de ces exécutions n’a pas reproduit les 29 s observées
 - **Signal de contexte plein** : résolu en P1 (`fail_on_context_full`).
 - **Tests moteur préexistants** : `test-engine-operations` et `test-engine-acquisition` échouent dans cet environnement avec stories15M, avec ou sans P1.
 - **Encodage observé sur deux runtimes** : identique sur macOS 26.7 (sonde locale) et simulateur iOS 27.0 ; à revérifier sur l’iPhone.
+- **Transfert en arrière-plan sur iPhone (P4)** : non exécutable sans application hôte, le système refusant une session de fond au processus `xctest` ; à exécuter avec la démo (P6) et à consigner en P7.
+- **Capacités qualifiées du catalogue** : vides ; P5/P7 doivent les renseigner dans `Catalog/models.json` à partir des preuves d’exécution.

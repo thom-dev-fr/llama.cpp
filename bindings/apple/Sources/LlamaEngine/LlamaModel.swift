@@ -44,13 +44,19 @@ public struct LlamaModelArtifact: Hashable, Sendable {
     /// The copy belongs to a `LlamaModelStore`: removing the model deletes it.
     /// Otherwise the files are the application's and are never deleted.
     public var isManaged: Bool
+    /// The catalog entry a downloaded model was installed from: its source
+    /// revision, license, template and qualified capabilities. Nil for an
+    /// import or a registered file, which get no capability from their name.
+    public var catalogEntry: LlamaModelCatalog.Entry?
 
-    public init(id: LlamaModelID, displayName: String? = nil, weights: [URL], projector: URL? = nil, isManaged: Bool = false) {
+    public init(id: LlamaModelID, displayName: String? = nil, weights: [URL], projector: URL? = nil, isManaged: Bool = false,
+                catalogEntry: LlamaModelCatalog.Entry? = nil) {
         self.id = id
         self.displayName = displayName ?? id.rawValue
         self.weights = weights
         self.projector = projector
         self.isManaged = isManaged
+        self.catalogEntry = catalogEntry
     }
 }
 

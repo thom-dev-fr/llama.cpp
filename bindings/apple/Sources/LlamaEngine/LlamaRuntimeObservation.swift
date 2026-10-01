@@ -61,40 +61,44 @@ public struct LlamaRuntimeSnapshot: Hashable, Sendable {
     }
 }
 
-/// One element of `LlamaRuntime.updates()`. Every element carries the whole
-/// snapshot, so a subscriber only needs the latest one.
-public enum LlamaRuntimeUpdate: Hashable, Sendable {
+/// One element of `LlamaRuntime.updates()` or `LlamaModelDownloads.updates()`.
+/// Every element carries the whole snapshot, so a subscriber only needs the
+/// latest one.
+public enum LlamaStateUpdate<Snapshot: Hashable & Sendable>: Hashable, Sendable {
     /// The first element: the state when the subscription started.
-    case snapshot(LlamaRuntimeSnapshot)
-    case changed(LlamaRuntimeSnapshot)
+    case snapshot(Snapshot)
+    case changed(Snapshot)
     /// The subscriber fell behind: `droppedUpdates` queued updates were
     /// replaced by this snapshot, which includes their changes.
-    case resync(LlamaRuntimeSnapshot, droppedUpdates: Int)
+    case resync(Snapshot, droppedUpdates: Int)
 
-    public var snapshot: LlamaRuntimeSnapshot {
+    public var snapshot: Snapshot {
         switch self {
         case .snapshot(let snapshot), .changed(let snapshot), .resync(let snapshot, _): return snapshot
         }
     }
 }
 
-/// Runtime updates with a bounded buffer: a slow subscriber gets one `resync`
+public typealias LlamaRuntimeUpdate = LlamaStateUpdate<LlamaRuntimeSnapshot>
+public typealias LlamaRuntimeUpdates = LlamaStateUpdates<LlamaRuntimeSnapshot>
+
+/// State updates with a bounded buffer: a slow subscriber gets one `resync`
 /// instead of an unbounded queue, never a silent loss. Ends when the task
-/// iterating it is cancelled or the runtime shuts down.
-public struct LlamaRuntimeUpdates: AsyncSequence, Sendable {
-    public typealias Element = LlamaRuntimeUpdate
+/// iterating it is cancelled or the publisher closes.
+public struct LlamaStateUpdates<Snapshot: Hashable & Sendable>: AsyncSequence, Sendable {
+    public typealias Element = LlamaStateUpdate<Snapshot>
     public typealias Failure = Never
 
-    let buffer: UpdateBuffer
+    let buffer: UpdateBuffer<Snapshot>
 
     public struct AsyncIterator: AsyncIteratorProtocol {
-        let buffer: UpdateBuffer
+        let buffer: UpdateBuffer<Snapshot>
 
-        public mutating func next() async -> LlamaRuntimeUpdate? {
+        public mutating func next() async -> LlamaStateUpdate<Snapshot>? {
             await buffer.next()
         }
 
-        public mutating func next(isolation actor: isolated (any Actor)?) async -> LlamaRuntimeUpdate? {
+        public mutating func next(isolation actor: isolated (any Actor)?) async -> LlamaStateUpdate<Snapshot>? {
             await buffer.next()
         }
     }
@@ -104,21 +108,23 @@ public struct LlamaRuntimeUpdates: AsyncSequence, Sendable {
     }
 }
 
-final class UpdateBuffer: @unchecked Sendable {
+final class UpdateBuffer<Snapshot: Hashable & Sendable>: @unchecked Sendable {
+    typealias Update = LlamaStateUpdate<Snapshot>
+
     private let limit: Int
     private let lock = NSLock()
     // guarded by lock
-    private var queue: [LlamaRuntimeUpdate] = []
-    private var waiter: CheckedContinuation<LlamaRuntimeUpdate?, Never>?
+    private var queue: [Update] = []
+    private var waiter: CheckedContinuation<Update?, Never>?
     private var finished = false
 
-    init(limit: Int, first: LlamaRuntimeSnapshot) {
+    init(limit: Int, first: Snapshot) {
         self.limit = max(1, limit)
         queue = [.snapshot(first)]
     }
 
-    func push(_ snapshot: LlamaRuntimeSnapshot) {
-        let resumed: CheckedContinuation<LlamaRuntimeUpdate?, Never>? = lock.withLock {
+    func push(_ snapshot: Snapshot) {
+        let resumed: CheckedContinuation<Update?, Never>? = lock.withLock {
             guard !finished else { return nil }
             if let waiter {
                 self.waiter = nil
@@ -139,7 +145,7 @@ final class UpdateBuffer: @unchecked Sendable {
     }
 
     func finish() {
-        let resumed: CheckedContinuation<LlamaRuntimeUpdate?, Never>? = lock.withLock {
+        let resumed: CheckedContinuation<Update?, Never>? = lock.withLock {
             finished = true
             queue.removeAll()
             defer { waiter = nil }
@@ -150,10 +156,10 @@ final class UpdateBuffer: @unchecked Sendable {
 
     var isFinished: Bool { lock.withLock { finished } }
 
-    func next() async -> LlamaRuntimeUpdate? {
+    func next() async -> Update? {
         await withTaskCancellationHandler {
-            await withCheckedContinuation { (continuation: CheckedContinuation<LlamaRuntimeUpdate?, Never>) in
-                let ready: LlamaRuntimeUpdate?? = lock.withLock {
+            await withCheckedContinuation { (continuation: CheckedContinuation<Update?, Never>) in
+                let ready: Update?? = lock.withLock {
                     if !queue.isEmpty { return .some(queue.removeFirst()) }
                     if finished { return .some(nil) }
                     waiter = continuation
@@ -172,16 +178,16 @@ final class UpdateBuffer: @unchecked Sendable {
 /// Fan-out of snapshots to the subscribers. Snapshots are built and delivered
 /// under one lock, so every subscriber sees them in the same order; equal
 /// consecutive snapshots are not repeated.
-final class UpdateHub: @unchecked Sendable {
-    private struct Weak { weak var buffer: UpdateBuffer? }
+final class UpdateHub<Snapshot: Hashable & Sendable>: @unchecked Sendable {
+    private struct Weak { weak var buffer: UpdateBuffer<Snapshot>? }
 
     private let lock = NSLock()
     // guarded by lock
     private var buffers: [Weak] = []
-    private var last: LlamaRuntimeSnapshot?
+    private var last: Snapshot?
     private var closed = false
 
-    func subscribe(limit: Int, make: () -> LlamaRuntimeSnapshot) -> LlamaRuntimeUpdates {
+    func subscribe(limit: Int, make: () -> Snapshot) -> LlamaStateUpdates<Snapshot> {
         lock.withLock {
             // `last` stays the snapshot the other subscribers received
             let buffer = UpdateBuffer(limit: limit, first: make())
@@ -190,11 +196,11 @@ final class UpdateHub: @unchecked Sendable {
             } else {
                 buffers.append(Weak(buffer: buffer))
             }
-            return LlamaRuntimeUpdates(buffer: buffer)
+            return LlamaStateUpdates(buffer: buffer)
         }
     }
 
-    func publish(_ make: () -> LlamaRuntimeSnapshot) {
+    func publish(_ make: () -> Snapshot) {
         lock.withLock {
             guard !closed else { return }
             let snapshot = make()

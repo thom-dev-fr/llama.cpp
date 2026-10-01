@@ -1,0 +1,39 @@
+{
+  "formatVersion": 1,
+  "catalogVersion": "2026-10-01",
+  "models": [
+    {
+      "id": "qwen3.5-2b-q4_k_m",
+      "displayName": "Qwen3.5 2B (Q4_K_M)",
+      "source": {
+        "repository": "huggingface.co/unsloth/Qwen3.5-2B-GGUF",
+        "revision": "f6d5376be1edb4d416d56da11e5397a961aca8ae"
+      },
+      "weights": [
+        {
+          "name": "Qwen3.5-2B-Q4_K_M.gguf",
+          "url": "https://huggingface.co/unsloth/Qwen3.5-2B-GGUF/resolve/f6d5376be1edb4d416d56da11e5397a961aca8ae/Qwen3.5-2B-Q4_K_M.gguf",
+          "size": 1280835840,
+          "sha256": "aaf42c8b7c3cab2bf3d69c355048d4a0ee9973d48f16c731c0520ee914699223"
+        }
+      ],
+      "projector": {
+        "name": "mmproj-BF16.gguf",
+        "url": "https://huggingface.co/unsloth/Qwen3.5-2B-GGUF/resolve/f6d5376be1edb4d416d56da11e5397a961aca8ae/mmproj-BF16.gguf",
+        "size": 671372992,
+        "sha256": "f17196c0d8fc756bc65be60075bd4a359917eee8a438505639511727c585d3c2"
+      },
+      "license": {
+        "identifier": "apache-2.0",
+        "url": "https://huggingface.co/Qwen/Qwen3.5-2B/blob/main/LICENSE"
+      },
+      "chatTemplate": {
+        "source": "embedded",
+        "sha256": "7f0e529032c25183bcd66c7f238da2d377f43be754a94e2725a58c4e16d2ed67"
+      },
+      "declaredCapabilities": ["toolCalling", "reasoning", "vision"],
+      "qualifiedCapabilities": [],
+      "qualification": "docs/design/apple-language-model-report.md#p4--acquisition-urlsession-et-catalogue-qualifié"
+    }
+  ]
+}

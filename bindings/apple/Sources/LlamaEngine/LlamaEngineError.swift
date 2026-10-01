@@ -30,6 +30,14 @@ public enum LlamaEngineError: Error, Sendable, Equatable {
     case invalidModelFile(String)
     /// The volume of the model store has less free space than the import needs.
     case insufficientSpace(required: Int64, available: Int64)
+    /// A model catalog is unreadable, of an unsupported format, or invalid.
+    case invalidCatalog(String)
+    /// A download of this model already exists (running, paused or failed).
+    case downloadExists(LlamaModelID)
+    /// No download of this model exists.
+    case downloadNotFound(LlamaModelID)
+    /// The download is being installed and can no longer be abandoned.
+    case downloadInstalling(LlamaModelID)
 }
 
 extension LlamaEngineError: LocalizedError {
@@ -61,6 +69,14 @@ extension LlamaEngineError: LocalizedError {
             return "Invalid model file: \(reason)"
         case .insufficientSpace(let required, let available):
             return "Not enough free space: \(required) bytes needed, \(available) available"
+        case .invalidCatalog(let reason):
+            return "Invalid model catalog: \(reason)"
+        case .downloadExists(let id):
+            return "A download of '\(id)' already exists"
+        case .downloadNotFound(let id):
+            return "No download of '\(id)'"
+        case .downloadInstalling(let id):
+            return "The download of '\(id)' is being installed"
         }
     }
 }

@@ -182,6 +182,21 @@ public final class LlamaRuntime: Sendable {
         return artifact
     }
 
+    /// Installs the verified files of a download (`LlamaModelDownloads`),
+    /// then adds the model to the catalog: it becomes loadable only now,
+    /// with all its files.
+    package func installDownload(_ entry: LlamaModelCatalog.Entry, from directory: URL) async throws -> LlamaModelArtifact {
+        guard let store else {
+            throw LlamaEngineError.invalidConfiguration("the runtime has no model store")
+        }
+        try state.reserveImport(entry.id)
+        defer { state.endImport(entry.id) }
+        let artifact = try await native.workers.run { try store.install(entry, from: directory) }
+        state.add(artifact)
+        state.publish()
+        return artifact
+    }
+
     /// Removes a model from the catalog: closes its admissions, ends its
     /// generations and waiting requests, frees its instances, then deletes its
     /// managed copy (never the files an import was made from, nor registered
@@ -340,7 +355,7 @@ final class RuntimeState: @unchecked Sendable {
     }
 
     let configuration: LlamaRuntime.Configuration
-    let hub = UpdateHub()
+    let hub = UpdateHub<LlamaRuntimeSnapshot>()
     weak var admission: Admission? // set once, before use
 
     private let lock = NSLock()

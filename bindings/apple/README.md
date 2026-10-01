@@ -127,6 +127,68 @@ for await update in runtime.updates() {                   // snapshot, then chan
   ends the model's work, then deletes the managed copy; the imported source
   and files added with `register(_:)` are never deleted.
 
+## Model catalog and downloads
+
+`Catalog/models.json` is a versioned manifest (`LlamaModelCatalog`, format 1)
+of downloadable models. Each entry pins its files to an immutable source
+revision with their size and SHA-256, and records the projector, the license,
+the chat template, the capabilities the model **declares** and those
+**qualified** with this library (only these may be offered to Foundation
+Models; none yet, see the report). `LlamaModelCatalog.decode` refuses another
+format version, a moving revision (`main`), a URL that does not contain the
+revision, a non-https URL (http only to the loopback interface, for tests),
+invalid names, digests or shard sequences, and vision without a projector.
+
+Check the references of a catalog against the servers (and local copies):
+
+```bash
+bindings/apple/Catalog/verify-catalog.py --local ~/.cache/huggingface/hub/models--unsloth--Qwen3.5-2B-GGUF/snapshots/<revision>
+```
+
+`LlamaModelDownloads` transfers a catalog entry with `URLSession`, then
+installs it in the runtime's store:
+
+```swift
+let catalog = try LlamaModelCatalog.decode(Data(contentsOf: catalogURL))
+let downloads = try LlamaModelDownloads(runtime: runtime)   // background session, created at launch
+try downloads.start(catalog[LlamaModelID("qwen3.5-2b-q4_k_m")]!)
+for await update in downloads.updates() { render(update.snapshot) }
+try await downloads.pause(id); try downloads.resume(id); try await downloads.cancel(id)
+```
+
+- **States.** `downloading`, `paused`, `interrupted(issue)` (recoverable:
+  network, server unavailable, the application ended), `verifying`,
+  `installing`, `failed(issue)` (HTTP error, size or digest mismatch, no
+  space, installation). `resume` continues a paused or interrupted download
+  from its resume data when the server allows it (validator and byte ranges);
+  otherwise, or when the resume data is unusable, the file restarts from the
+  beginning. After a failure, `resume` restarts the failed file; the other
+  files keep their data. `cancel` abandons the download and deletes its data;
+  it is refused once the installation started.
+- **Loadable only when complete.** Files are transferred into
+  `<store>/downloads/<id>`, never into the catalog. Once every file has the
+  catalog's size and SHA-256 (checked off the cooperative pool), they move
+  into the store in one rename and the model appears in the runtime with its
+  `catalogEntry`. A missing or partial projector never yields a model with
+  vision.
+- **Persistence.** Each download keeps `record.json` and its resume data.
+  Transfer tasks carry their identity (model, file, token) in
+  `taskDescription`; a new instance with the same session identifier
+  reattaches the tasks the system kept, verifies files received meanwhile,
+  and reports transfers that did not survive as `interrupted`. Nothing
+  restarts on its own.
+- **Application lifecycle (iOS).** Create the object at launch with the same
+  identifier and keep it for the application's life; forward background
+  session events (`handleBackgroundEvents(forSession:completionHandler:)`
+  from the application delegate, or `await downloads.backgroundEventsFinished()`
+  in SwiftUI's `.backgroundTask(.urlSession(_:))`). The system continues the
+  transfers while the application is suspended or terminated by the system;
+  it cancels them when the user force quits the application, and they show
+  as `interrupted` at the next launch. A background session needs an
+  application: the system refuses it to command-line processes such as the
+  `xctest` tool. `Configuration(sessionIdentifier: nil)` uses a foreground
+  session, whose transfers end with the process.
+
 ## Tests
 
 ```bash
@@ -140,6 +202,22 @@ server tests download. Without it:
 
 ```bash
 curl -L -o tools/server/tests/tmp/stories15M-q4_0.gguf https://huggingface.co/ggml-org/tiny-llamas/resolve/main/stories15M-q4_0.gguf
+```
+
+`DownloadTests` run against a local HTTP server controlled by the tests
+(interrupted transfers, servers with and without byte ranges, files changed
+on the server, HTTP errors, pause, abandon, relaunch). Two tests are skipped
+by default:
+
+- `backgroundSessionDownloads` runs only in an application host (the system
+  refuses background sessions to the `xctest` tool);
+- `realCatalogEntryDownloadsAndInstalls` downloads the shipped catalog entry
+  from Hugging Face (about 2 GB):
+
+```bash
+TEST_RUNNER_LLAMA_DOWNLOAD_REAL_CATALOG=1 xcodebuild test -scheme LlamaApple-Package \
+  -destination 'platform=iOS Simulator,name=iPhone 17 Pro' \
+  -only-testing:'LlamaEngineTests/DownloadTests/realCatalogEntryDownloadsAndInstalls()'
 ```
 
 The package requires OS 27 at run time: on an older Mac, tests compile but run
