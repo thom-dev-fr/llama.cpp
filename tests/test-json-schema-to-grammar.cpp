@@ -1547,6 +1547,31 @@ int main() {
         }
     });
 
+    // the strict check refuses what the grammar would approximate, and names the property
+    {
+        fprintf(stderr, "- strict check\n");
+        json_schema_check_strict(common_json::parse(R"""({
+            "type": "object",
+            "properties": {"a": {"type": "string", "pattern": "^[a-z]+$"}, "n": {"type": "integer", "minimum": 1}},
+            "required": ["a"],
+            "additionalProperties": false
+        })"""));
+        auto refused = [](const char * schema, const char * expected) {
+            try {
+                json_schema_check_strict(common_json::parse(schema));
+            } catch (const std::invalid_argument & ex) {
+                assert(std::string(ex.what()).find(expected) != std::string::npos);
+                return;
+            }
+            assert(false && "expected the strict check to fail");
+        };
+        refused(R"""({"type": "object", "properties": {"a": {"type": "string", "pattern": "^(?=a)a$"}}})""",
+                "pattern ^(?=a)a$ of a is not supported");
+        refused(R"""({"type": "string", "pattern": "[a-z]+"})""", "not anchored");
+        refused(R"""({"type": "string", "pattern": "^a(b$"})""", "Invalid pattern");
+        refused(R"""({"$ref": "#"})""", "unsupported $ref #");
+    }
+
     // a document parsed up front gives the same grammar as the JSON, recursion included
     {
         fprintf(stderr, "- parsed document\n");

@@ -128,8 +128,8 @@ private func state(_ fixture: Fixture) -> LlamaModelDownload.State? {
         #expect(qwen.projector?.sha256 == "f17196c0d8fc756bc65be60075bd4a359917eee8a438505639511727c585d3c2")
         #expect(qwen.license.identifier == "apache-2.0")
         #expect(qwen.chatTemplate.isEmbedded)
-        // Nothing is qualified with the adapter yet (P5/P7).
-        #expect(qwen.qualifiedCapabilities.isEmpty)
+        // Qualified with the adapter by QwenTests (P5).
+        #expect(Set(qwen.qualifiedCapabilities) == [.toolCalling, .reasoning, .vision])
         #expect(Set(qwen.declaredCapabilities) == [.toolCalling, .reasoning, .vision])
     }
 

@@ -310,6 +310,28 @@ public final class LlamaRuntime: Sendable {
         return generation
     }
 
+    /// The engine properties of an instance (`chat_template_caps`, ...). The
+    /// instance is loaded if needed, outside admission, like an explicit load:
+    /// it is not a generation.
+    package func properties(model id: LlamaModelID, profile: LlamaLoadProfile) async throws -> Data {
+        let key = try state.instanceKey(id, profile)
+        let entry = try await ensureInstance(key)
+        let body = try JSONSerialization.data(withJSONObject: ["model": entry])
+        let request = try await native.submit("properties", body: body)
+        var result: Data?
+        while true {
+            let event = try await request.next()
+            switch event.kind {
+            case .success:
+                // the object comes as the result, or as a payload before an empty result
+                return event.data == Data("null".utf8) ? (result ?? event.data) : event.data
+            case .payload: result = event.data
+            case .timeout: continue
+            case .error, .cancelled: throw event.error
+            }
+        }
+    }
+
     /// Adds the instance to the native catalog if needed. Entries of other
     /// instances are unchanged, so the engine keeps them loaded.
     private func ensureInstance(_ key: InstanceKey) async throws -> String {

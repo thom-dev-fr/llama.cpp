@@ -127,14 +127,86 @@ for await update in runtime.updates() {                   // snapshot, then chan
   ends the model's work, then deletes the managed copy; the imported source
   and files added with `register(_:)` are never deleted.
 
+## Foundation Models
+
+`LlamaLanguageModel` names a model of the runtime and a load profile; give it
+to a `LanguageModelSession` like any other model. Foundation Models keeps the
+transcript and runs the tools; the executor translates each request for the
+engine. The model loads on demand (`prewarm` only starts it earlier).
+
+```swift
+import FoundationModels
+import LlamaFoundationModels
+
+let monitor = LlamaGenerationMonitor()                     // one per conversation, optional
+let model = LlamaLanguageModel(runtime: runtime, modelID: qwen.id,
+                               profile: LlamaLoadProfile(contextSize: 4096, usesProjector: true),
+                               monitor: monitor)
+let session = LanguageModelSession(model: model, tools: [CalculatorTool()], instructions: "Be brief.")
+for try await partial in session.streamResponse(to: "6*7?", generating: Total.self) { show(partial.content) }
+```
+
+- **Capabilities.** Guided generation is always declared: a grammar built
+  from the schema constrains the output, whatever the model. Tool calling,
+  reasoning and vision come from the **qualified** capabilities of the catalog
+  entry the model was downloaded from; an imported file gets none from its
+  name. An application that verified a model itself passes
+  `capabilities:` explicitly. Vision also needs `usesProjector` and a
+  projector. A request that needs an undeclared capability fails before any
+  computation with `LanguageModelError.unsupportedCapability`.
+- **Transcript.** Translated completely at every request (instructions,
+  prompts, responses, reasoning, tool calls with their identifiers, tool
+  outputs, images in their position); the engine reuses a cached prompt prefix
+  when the rendering starts the same way, never the conversation's identity.
+  Images are converted to PNG with their orientation applied. Attachments in a
+  model output are refused (`unsupportedTranscriptContent`).
+- **Options.** `greedy` → top-k 1; `random(top:seed:)` and
+  `random(probabilityThreshold:seed:)` → exactly that sampler and the
+  temperature (the engine's default chain, with min-p and penalties, is not
+  applied); no sampling mode → the model's defaults. The engine seed is 32
+  bits: a seed above 4294967294 is refused. `maximumResponseTokens` counts
+  every generated token, reasoning and tool calls included.
+- **Tools.** `allowed` → `auto`, `disallowed` → `none`, `required` → at least
+  one tool call in the answer to the last prompt (Foundation Models repeats the
+  mode after the tool outputs; the model may then answer). Arguments stream as
+  fragments; a call cut by the token limit fails
+  (`LlamaLanguageModelError.incompleteToolCall`). Tools with a `@Generable`
+  answer need a chat format that combines them (Qwen3.5 / Qwen3-Coder);
+  otherwise the request fails with `unsupportedCapability(.toolCalling)`.
+- **Schemas.** No silent approximation: a range on a floating-point value, a
+  regex outside the grammar's subset, an unknown keyword fail with
+  `LanguageModelError.unsupportedGenerationGuide` naming the schema and the
+  property. Patterns match the whole string; `\d`, `\w`, `\s` become their
+  ASCII classes (a subset of Swift's), their negations are refused. With
+  `includeSchemaInPrompt` (the default for a `Generable` type) the schema is
+  written in the prompt.
+- **Reasoning.** Separate from the response, with its token count. `nil`
+  keeps the template's default (Qwen3.5 thinks), `.custom("none")` turns it
+  off; `light`, `moderate`, `deep` and other custom levels need a template that
+  takes `reasoning_effort` (Qwen3.5's does not: they are refused). A model that
+  does not declare reasoning never thinks.
+- **Errors.** Context full before or during generation →
+  `LanguageModelError.contextSizeExceeded` (phase in `debugDescription`);
+  reaching `maximumResponseTokens` is a normal end. Runtime errors
+  (`queueFull`, `admissionTimedOut`, `unloaded`, `modelUnavailable`, engine
+  errors) stay `LlamaEngineError`. An error after fragments is an error:
+  Foundation Models reverts the turn and the next request starts from the last
+  complete one. Cancelling the task (or the response stream's consumer)
+  cancels the native request.
+- **Monitor.** `LlamaGenerationMonitor` reports the phase (waiting,
+  processing the prompt, generating), the prompt progress and the context
+  occupancy against the effective capacity, live during a request and marked
+  as the last measure afterwards; no measure is `nil`, never zero.
+  `session.usage` is cumulative consumption, not occupancy.
+
 ## Model catalog and downloads
 
 `Catalog/models.json` is a versioned manifest (`LlamaModelCatalog`, format 1)
 of downloadable models. Each entry pins its files to an immutable source
 revision with their size and SHA-256, and records the projector, the license,
 the chat template, the capabilities the model **declares** and those
-**qualified** with this library (only these may be offered to Foundation
-Models; none yet, see the report). `LlamaModelCatalog.decode` refuses another
+**qualified** with this library (only these are offered to Foundation
+Models, see the report). `LlamaModelCatalog.decode` refuses another
 format version, a moving revision (`main`), a URL that does not contain the
 revision, a non-https URL (http only to the loopback interface, for tests),
 invalid names, digests or shard sequences, and vision without a projector.
@@ -219,6 +291,19 @@ TEST_RUNNER_LLAMA_DOWNLOAD_REAL_CATALOG=1 xcodebuild test -scheme LlamaApple-Pac
   -destination 'platform=iOS Simulator,name=iPhone 17 Pro' \
   -only-testing:'LlamaEngineTests/DownloadTests/realCatalogEntryDownloadsAndInstalls()'
 ```
+
+`LlamaFoundationModelsTests` run the real adapter: `AdapterTests` against a
+scripted engine boundary (every engine request recorded), `EngineAdapterTests`
+on the engine with the same small model. `QwenTests` check each announced
+capability with Qwen3.5-2B and its projector (opt-in, about 2 GB):
+
+```bash
+TEST_RUNNER_LLAMA_QWEN_DIR=<directory with Qwen3.5-2B-Q4_K_M.gguf and mmproj-BF16.gguf> \
+  xcodebuild test -scheme LlamaApple-Package -destination 'platform=iOS Simulator,name=iPhone 17 Pro' \
+  -only-testing:LlamaFoundationModelsTests/QwenTests
+```
+
+`TEST_RUNNER_LLAMA_QWEN_OFFLOAD=none` runs it on the CPU.
 
 The package requires OS 27 at run time: on an older Mac, tests compile but run
 only on an iOS 27 simulator or device.

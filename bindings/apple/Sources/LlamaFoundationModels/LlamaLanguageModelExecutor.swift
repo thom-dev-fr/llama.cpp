@@ -39,13 +39,119 @@ public struct LlamaLanguageModelExecutor: LanguageModelExecutor {
         self.configuration = configuration
     }
 
+    /// Optional: loads the model in the background so that the first answer
+    /// starts sooner. `respond` loads it anyway when needed.
+    public func prewarm(model: LlamaLanguageModel, transcript: Transcript) {
+        let runtime = model.runtime, id = model.modelID, profile = model.profile
+        Task.detached(priority: .utility) {
+            try? await runtime.load(id, profile: profile)
+        }
+    }
+
     public nonisolated(nonsending) func respond(
         to request: LanguageModelExecutorGenerationRequest,
         model: LlamaLanguageModel,
         streamingInto channel: LanguageModelExecutorGenerationChannel
     ) async throws {
-        try RequestRequirements(request).check(against: model.declaredCapabilities)
-        throw LlamaEngineError.engineUnavailable("the executor does not translate requests yet (P5)")
+        try await Responder(model: model, backend: model.backend).respond(to: request, streamingInto: channel)
+    }
+}
+
+/// One `respond`: checks, translation, submission, streaming, errors.
+struct Responder {
+    let model: LlamaLanguageModel
+    let backend: any LlamaChatBackend
+
+    func respond(to request: LanguageModelExecutorGenerationRequest,
+                 streamingInto channel: LanguageModelExecutorGenerationChannel) async throws {
+        let monitor = model.monitor
+        monitor?.begin(request.id)
+        defer { monitor?.end(request.id) }
+
+        // Refusals before any computation.
+        let capabilities = model.capabilitySet
+        let requirements = RequestRequirements(request)
+        try requirements.check(against: capabilities)
+        if requirements.capabilities.contains(.vision) {
+            guard model.profile.usesProjector, backend.artifact(model.modelID)?.projector != nil else {
+                throw LanguageModelError.unsupported(.vision, "the transcript contains an image, but the load profile "
+                    + "of '\(model.modelID)' does not load a multimodal projector")
+            }
+        }
+        let traits = ModelTraits(capabilities: capabilities) { [backend, model] in
+            try await TemplateCapabilities.supportsReasoningEffort(backend: backend, model: model)
+        }
+        let engineRequest = try await RequestTranslation(request: request, traits: traits).build()
+        let schemaName = engineRequest.schemaName
+
+        let events: any LlamaChatEvents
+        do {
+            events = try await backend.chat(model: model.modelID, profile: model.profile, body: engineRequest.body.data,
+                                            attachments: engineRequest.attachments)
+        } catch {
+            throw translateEngineError(error, schemaName: schemaName)
+        }
+        // Leaving early (an error, a cancelled task) ends the native request.
+        defer { events.cancel() }
+
+        var stream = StreamTranslation()
+        do {
+            while let event = try await events.next() {
+                if event.kind == .success {
+                    if event.data != Data("null".utf8), !event.data.isEmpty {
+                        for event in try stream.translate(payload: event.data) {
+                            await channel.send(event)
+                        }
+                    }
+                    break
+                }
+                guard event.kind == .payload else { continue }
+                for event in try stream.translate(payload: event.data) {
+                    await channel.send(event)
+                }
+                monitor?.update { state in
+                    state.context = stream.report ?? state.context
+                    state.isContextLive = stream.report != nil
+                    if stream.hasGenerated {
+                        state.phase = .generating
+                        state.promptProgress = 1
+                    } else if let progress = stream.promptProgress {
+                        state.phase = .processingPrompt
+                        state.promptProgress = progress
+                    }
+                }
+            }
+            for event in try stream.finish() {
+                await channel.send(event)
+            }
+            monitor?.update { state in
+                state.context = stream.report ?? state.context
+            }
+        } catch {
+            if Task.isCancelled {
+                throw CancellationError()
+            }
+            throw translateEngineError(error, schemaName: schemaName)
+        }
+    }
+}
+
+/// Engine properties of the chat template, asked when a request needs them
+/// (the instance is loaded by then, so the call is cheap).
+enum TemplateCapabilities {
+    static func supportsReasoningEffort(backend: any LlamaChatBackend, model: LlamaLanguageModel) async throws -> Bool {
+        let data: Data
+        do {
+            data = try await backend.properties(model: model.modelID, profile: model.profile)
+        } catch {
+            throw translateEngineError(error, schemaName: nil)
+        }
+        let properties = try? JSONValue(parsing: data)
+        guard case let .bool(value)? = properties?["chat_template_caps"]?["supports_reasoning_effort"] else {
+            throw LlamaLanguageModelError.invalidEngineOutput(
+                "the engine properties have no chat_template_caps: \(String(decoding: data.prefix(200), as: UTF8.self))")
+        }
+        return value
     }
 }
 
@@ -108,11 +214,10 @@ struct RequestRequirements: Equatable {
 
     /// Throws `LanguageModelError.unsupportedCapability` for the first needed
     /// capability that the model does not declare.
-    func check(against declared: [LanguageModelCapabilities.Capability]) throws {
+    func check(against declared: Set<LanguageModelCapabilities.Capability>) throws {
         for (capability, reason) in zip(capabilities, reasons) where !declared.contains(capability) {
-            throw LanguageModelError.unsupportedCapability(.init(
-                capability: capability,
-                debugDescription: "\(reason), but this llama.cpp model does not declare that capability"))
+            throw LanguageModelError.unsupported(capability,
+                "\(reason), but this llama.cpp model does not declare that capability")
         }
     }
 }

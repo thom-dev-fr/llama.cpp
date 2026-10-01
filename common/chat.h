@@ -280,6 +280,9 @@ struct common_chat_params {
     std::vector<std::string>            additional_stops;
     std::string                         parser;
     common_chat_msg_delimiters          message_delimiters;
+    // the format constrains an answer to tool calls or the response format when both are requested
+    // (otherwise the response format replaces the tools)
+    bool                                supports_tools_with_response_format = false;
 };
 
 // per-message parsing syntax

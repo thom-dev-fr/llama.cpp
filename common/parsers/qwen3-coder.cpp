@@ -40,7 +40,10 @@ common_chat_params common_chat_params_init_qwen3_coder(const common_chat_templat
     auto has_tools           = inputs.tools.is_array() && !inputs.tools.empty();
     auto has_response_format = inputs.json_schema.is_object() && !inputs.json_schema.empty();
     auto extract_reasoning   = inputs.reasoning_format != COMMON_REASONING_FORMAT_NONE;
-    auto include_grammar     = has_response_format || (has_tools && inputs.tool_choice != COMMON_CHAT_TOOL_CHOICE_NONE);
+    auto uses_tools          = has_tools && inputs.tool_choice != COMMON_CHAT_TOOL_CHOICE_NONE;
+    auto include_grammar     = has_response_format || uses_tools;
+
+    data.supports_tools_with_response_format = true;
 
     if (inputs.has_continuation()) {
         const auto & msg = inputs.continue_msg;
@@ -82,12 +85,12 @@ common_chat_params common_chat_params_init_qwen3_coder(const common_chat_templat
         }
 
         // Response format parser
-        if (has_response_format) {
+        if (has_response_format && !uses_tools) {
             return generation_prompt + (reasoning << p.content(p.schema(p.json(), "response-format", inputs.json_schema)));
         }
 
         // Tool call parser
-        if (has_tools && inputs.tool_choice != COMMON_CHAT_TOOL_CHOICE_NONE) {
+        if (uses_tools) {
             auto arg_close  = p.tool_arg_close(p.literal("\n</parameter>\n"));
             auto arg_string = p.rule("xml-arg-string",
                 p.ac(p.tool_arg_string_value(p.until("\n</parameter>\n")) + arg_close, "\n</parameter>\n"));
@@ -164,6 +167,18 @@ common_chat_params common_chat_params_init_qwen3_coder(const common_chat_templat
                 tool_call;
 
             auto calls      = inputs.parallel_tool_calls ? tool_call_first + p.zero_or_more(tool_call) : tool_call_first;
+
+            // With a response format, the answer is either tool calls or the structured response. A required tool
+            // call answers with tool calls only: the response format applies to the answer that follows them.
+            if (has_response_format) {
+                auto tool_calls = p.rule("tool-call-root", calls);
+                if (inputs.tool_choice == COMMON_CHAT_TOOL_CHOICE_REQUIRED) {
+                    return generation_prompt + (reasoning << tool_calls);
+                }
+                auto response = p.content(p.schema(p.json(), "response-format", inputs.json_schema));
+                return generation_prompt + (reasoning << p.choice({ tool_calls, response }));
+            }
+
             auto tool_calls = p.trigger_rule("tool-call-root", p.repeat(calls, min_calls, 1));
 
             return generation_prompt +
@@ -177,7 +192,8 @@ common_chat_params common_chat_params_init_qwen3_coder(const common_chat_templat
     data.parser = parser.save();
 
     if (include_grammar) {
-        data.grammar_lazy = has_tools && inputs.tool_choice == COMMON_CHAT_TOOL_CHOICE_AUTO;
+        // a response format constrains the whole answer, so the grammar applies from the start
+        data.grammar_lazy = uses_tools && inputs.tool_choice == COMMON_CHAT_TOOL_CHOICE_AUTO && !has_response_format;
 
         data.grammar = build_grammar([&](const common_grammar_builder & builder) {
             parser.build_grammar(builder, data.grammar_lazy);

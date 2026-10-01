@@ -7,6 +7,7 @@
 #include "mtmd.h"
 #include "mtmd-helper.h"
 #include "chat.h"
+#include "json-schema-to-grammar.h"
 #include "base64.hpp"
 
 #include "server-common.h"
@@ -1277,6 +1278,31 @@ json oaicompat_chat_params_parse(
         json_schema["type"] = "object";
     }
 
+    // Engine consumers (strict_json_schema): a schema that the grammar would only approximate is an error,
+    // for the response format and for tool parameters.
+    const bool strict_json_schema = json_value(body, "strict_json_schema", false);
+    body.erase("strict_json_schema");
+    if (strict_json_schema) {
+        auto check = [](const json & schema, const std::string & what) {
+            try {
+                json_schema_check_strict(schema);
+            } catch (const std::exception & e) {
+                throw std::invalid_argument(what + ": " + e.what());
+            }
+        };
+        if (!json_schema.is_null()) {
+            check(json_schema, "response_format");
+        }
+        if (has_tools) {
+            for (const auto & tool : tools) {
+                const json function = json_value(tool, "function", json::object());
+                if (function.contains("parameters")) {
+                    check(function.at("parameters"), "parameters of tool " + json_value(function, "name", std::string()));
+                }
+            }
+        }
+    }
+
     // get input files
     if (!body.contains("messages")) {
         throw std::invalid_argument("'messages' is required");
@@ -1385,6 +1411,11 @@ json oaicompat_chat_params_parse(
 
     // Apply chat template to the list of messages
     auto chat_params = common_chat_templates_apply(opt.tmpls.get(), inputs);
+
+    if (strict_json_schema && !inputs.json_schema.empty() && !inputs.tools.empty()
+        && inputs.tool_choice != COMMON_CHAT_TOOL_CHOICE_NONE && !chat_params.supports_tools_with_response_format) {
+        throw std::invalid_argument("the chat format of this model does not support tools combined with a response format");
+    }
 
     llama_params["chat_format"] = static_cast<int>(chat_params.format);
     llama_params["prompt"]      = chat_params.prompt;

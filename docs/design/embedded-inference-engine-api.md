@@ -209,6 +209,35 @@ côté serveur.
 La catégorie `context_exceeded` s’applique aussi sans `fail_on_context_full`
 au prompt trop long (auparavant `inference_error`, mêmes données natives).
 
+### Sortie structurée : vérification stricte et outils
+
+- **`strict_json_schema: true`** (chat uniquement, facultatif) : un schéma que
+  la grammaire ne ferait qu’approcher est une erreur `invalid_request` au lieu
+  d’un avertissement. Le contrôle passe par le même convertisseur que la
+  grammaire (`json_schema_check_strict`) : aujourd’hui, un `pattern` hors du
+  sous-ensemble de regex pris en charge (non ancré, lookaround, `\d`…), qui
+  deviendrait sinon une chaîne libre. Il s’applique au `response_format`
+  (message préfixé `response_format:`) et aux paramètres de chaque outil
+  (`parameters of tool <nom>:`), avec le nom de la règle concernée. Avec outils
+  et `response_format` à la fois, un format de chat qui ne sait pas les
+  combiner est refusé (« does not support tools combined with a response
+  format ») au lieu de remplacer les outils par le schéma. Absent, rien ne
+  change.
+- **Outils et `response_format` ensemble** (format Qwen3-Coder/Qwen3.5,
+  `supports_tools_with_response_format`) : avec `tool_choice: "auto"`, la
+  réponse est soit des appels d’outils, soit le JSON du schéma, sous une
+  grammaire non paresseuse ; avec `"required"`, des appels d’outils seulement,
+  le schéma s’appliquant à la réponse qui suit leurs résultats. Auparavant,
+  `auto` échouait (« failed to parse grammar ») et `required` ignorait les
+  outils. Les autres formats gardent leur comportement : le schéma remplace les
+  outils.
+- Limite connue : le préremplissage de la grammaire par le prompt de
+  génération (`common_sampler_init`) écarte un premier token précédé d’un
+  espace ; quand les marqueurs du template ne sont pas des tokens spéciaux du
+  vocabulaire (fixture stories15M avec chatml), ce token porte aussi un
+  caractère du marqueur et l’initialisation échoue (« Failed to initialize
+  samplers »). C’est l’échec préexistant de `test-engine-operations`.
+
 ## Concurrence, durée de vie et bornes
 
 - `submit()`, `completion()` et `stop()` peuvent être appelés concurremment. La préparation

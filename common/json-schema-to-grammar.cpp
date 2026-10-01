@@ -343,6 +343,7 @@ class common_chat_schema_converter {
 private:
     friend std::string build_grammar(const std::function<void(const common_grammar_builder &)> & cb, const common_grammar_options & options);
     bool _dotall;
+    bool _strict = false; // constructs the grammar would approximate are errors
     std::map<std::string, std::string> _rules;
     std::unordered_set<std::string> _refs_being_resolved;
     std::vector<std::string> _errors;
@@ -394,6 +395,10 @@ private:
         } catch (const unsupported_pattern & err) {
             // revert rules
             _rules = std::move(rules_snapshot);
+            if (_strict) {
+                _errors.push_back("pattern " + pattern + " of " + name + " is not supported (" + err.what() + ")");
+                return "";
+            }
             _warnings.push_back("pattern " + pattern + " is not supported (" + err.what() + "), accepting any string");
             return _add_rule(name, _add_primitive("string", PRIMITIVE_RULES.at("string")));
         } catch (const invalid_pattern & err) {
@@ -813,7 +818,7 @@ private:
     }
 
 public:
-    explicit common_chat_schema_converter(bool dotall) : _dotall(dotall) {
+    explicit common_chat_schema_converter(bool dotall, bool strict = false) : _dotall(dotall), _strict(strict) {
         _rules["space"] = SPACE_RULE;
     }
 
@@ -1010,6 +1015,18 @@ std::string json_schema_to_grammar(const common_chat_schema_document & schema) {
     converter.visit(*schema.root, "");
     converter.check_errors();
     return converter.format_grammar();
+}
+
+void json_schema_check_strict(const common_json & schema) {
+    common_chat_schema_document doc;
+    try {
+        doc = common_chat_schema_from_json(schema);
+    } catch (const std::runtime_error & e) {
+        throw std::invalid_argument(std::string("JSON schema conversion failed:\n") + e.what());
+    }
+    common_chat_schema_converter converter(false, /* strict */ true);
+    converter.visit(*doc.root, "");
+    converter.check_errors();
 }
 
 std::string build_grammar(const std::function<void(const common_grammar_builder &)> & cb, const common_grammar_options & options) {

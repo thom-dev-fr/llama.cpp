@@ -1,6 +1,6 @@
 # Rapport — Apple LanguageModel sur llama.cpp
 
-Rapport prévu par le [plan](apple-language-model-plan.md). Il distingue ce qui est exécuté, compilé seulement, ou non encore traité. Aucune capacité Foundation Models n’est validée à ce stade : P0 à P3 sont achevés, P4 l’est hormis le scénario d’arrière-plan sur iPhone (reporté à P6, voir P4).
+Rapport prévu par le [plan](apple-language-model-plan.md). Il distingue ce qui est exécuté, compilé seulement, ou non encore traité. P0 à P3 et P5 sont achevés, P4 l’est hormis le scénario d’arrière-plan sur iPhone (reporté à P6, voir P4). Les capacités Foundation Models sont validées sur le simulateur iOS 27 (CPU) avec Qwen3.5-2B ; iPhone et macOS 27 restent à exécuter (P7).
 
 ## Suivi P0–P7
 
@@ -11,7 +11,7 @@ Rapport prévu par le [plan](apple-language-model-plan.md). Il distingue ce qui 
 | P2 Pont natif et XCFramework | **Terminé** | Pont C + `test-llama-bridge` (hôte, ASan+UBSan, TSan) ; `LlamaBridge.xcframework` iOS / simulateur / macOS ; 20 tests Swift sur simulateur iOS 27 dont 8 sur le vrai moteur ; consommateur externe compilé pour iOS et macOS, testé sur simulateur. | Exécution macOS et iPhone non faite (P7). Premier chargement Metal lent sur simulateur (voir P2). |
 | P3 Runtime partagé, stockage | **Terminé** | `LlamaRuntime` (moteur natif en catalogue, admission, instances, chargements mutualisés, déchargement, observation) et `LlamaModelStore` ; 33 tests Swift sur simulateur iOS 27 dont 13 nouveaux `RuntimeTests` sur le vrai moteur, stables sur 5 itérations ; compilation macOS 27 et iOS 27 appareil. | Aucun changement du moteur ni du pont. Tests sur stories15M (CPU) ; iPhone et macOS 27 non exécutés (P7). |
 | P4 Acquisition URLSession | **Terminé, sauf scénario iPhone** | Manifeste `LlamaModelCatalog` et `Catalog/models.json` (Qwen3.5-2B, références vérifiées côté serveur et localement) ; `LlamaModelDownloads` ; 17 `DownloadTests` sur simulateur iOS 27, dont 15 avec serveur contrôlé (interruption, reprise, sans plages, fichier modifié, HTTP, pause, abandon, relance) ; téléchargement réel de l’entrée Qwen (1,95 Go) avec pause et reprise via le CDN ; 50 tests au total, stables sur 5 itérations. | Le système refuse une session de fond au processus `xctest` : le transfert réel en arrière-plan sur iPhone exige une app hôte et se fera avec la démo (P6). |
-| P5 Executor Foundation Models | À faire | — | Écarts du convertisseur de schéma relevés en P0. |
+| P5 Executor Foundation Models | **Terminé** | Executor complet (transcript, options, schémas stricts, outils, raisonnement, vision, flux, erreurs, annulation, moniteur) ; moteur : `strict_json_schema` et outils + schéma pour Qwen3.5 ; 27 tests scriptés, 9 sur le vrai moteur (stories15M), 12 avec Qwen3.5-2B sur simulateur iOS 27 (CPU) ; catalogue qualifié (outils, raisonnement, vision). | Metal du simulateur inutilisable pour Qwen3.5 (plantages) : qualification CPU ; Metal sur iPhone en P7. |
 | P6 Démo SwiftUI | À faire | — | — |
 | P7 Qualification | À faire | — | Exécution macOS 27 impossible sur ce Mac (26.7). |
 
@@ -325,12 +325,88 @@ Défauts trouvés par ces tests et corrigés :
 - **Fichiers en parallèle** : les fichiers d’un modèle sont transférés simultanément ; le système borne les connexions par hôte.
 - **Imports locaux** : aucune capacité ne leur est attribuée ; seul un modèle installé depuis le catalogue porte une `catalogEntry` (et donc des capacités qualifiées, quand il y en aura).
 
+## P5 — LanguageModel, executor et conformité Foundation Models
+
+### Constats du SDK (simulateur iOS 27, sonde par un modèle scripté)
+
+- En mode `toolCallingMode: .required`, Foundation Models **répète** `required` dans la requête qui suit l’exécution des outils. Traduire `required` par « un appel à chaque requête » ferait boucler la session : l’executor l’interprète comme « au moins un appel d’outil dans la réponse au dernier prompt » (`required` tant qu’aucune entrée `toolCalls` ne suit le dernier prompt, `auto` ensuite).
+- L’identifiant d’un `ToolOutput` est celui de l’appel ; les arguments du transcript sont réécrits par le framework (`{"expression": "6*7"}`).
+- Avec des outils et sans instructions, la session ajoute une entrée `instructions` vide qui porte les définitions : elle ne produit pas de message système.
+- `includeSchemaInPrompt` vaut `true` par défaut avec un type `Generable`, et le prompt porte alors `responseFormat` ; avec `false`, ni l’un ni l’autre.
+- `updateUsage` remplace, pour la requête, les comptes déduits des `tokenCount` des fragments ; `session.usage` cumule les requêtes.
+- Une erreur levée après des fragments arrive telle quelle à l’appelant et le tour est retiré du transcript (politique par défaut) ; la requête suivante repart du dernier tour complet.
+- `GenerationOptions(maximumResponseTokens: 0)` est neutralisé par le framework (journal « must be positive ») : l’executor ne le reçoit jamais.
+- Annuler la tâche qui attend `respond`, ou celle qui consomme `streamResponse`, annule la tâche de l’executor.
+
+### Extensions du moteur
+
+Documentées dans [l’API du moteur](embedded-inference-engine-api.md#sortie-structurée--vérification-stricte-et-outils) :
+
+- `strict_json_schema` (opt-in, chat) : `json_schema_check_strict` réutilise le convertisseur de la grammaire en mode strict ; un motif hors du sous-ensemble pris en charge devient une erreur `invalid_request` qui nomme la règle (au lieu d’un avertissement et d’une chaîne libre), pour le `response_format` comme pour les paramètres d’outils. Avec outils et format à la fois, un format de chat qui ne sait pas les combiner est refusé.
+- Format Qwen3-Coder / Qwen3.5 : outils et `response_format` combinés (`auto` → appels d’outils **ou** JSON du schéma, grammaire non paresseuse ; `required` → appels d’outils seulement). Auparavant `auto` échouait (« failed to parse grammar », grammaire paresseuse sans déclencheur) et `required` ignorait silencieusement les outils. Les autres formats ne changent pas.
+
+### Adaptateur (`bindings/apple/Sources/LlamaFoundationModels`)
+
+- **Modèle et executor** : `LlamaLanguageModel` reste une valeur légère (runtime, modèle, profil, moniteur facultatif) ; l’executor utilise la frontière moteur `LlamaChatBackend` (le runtime partagé ; un moteur scripté dans les tests). `respond` charge le modèle si besoin ; `prewarm` lance seulement un chargement en tâche de fond.
+- **Capacités** : génération guidée toujours déclarée (grammaire du moteur, quel que soit le modèle) ; outils, raisonnement et vision depuis les capacités **qualifiées** de l’entrée de catalogue d’un modèle téléchargé, ou depuis `capabilities:` fourni explicitement par l’application ; rien pour un import. La vision exige en plus `usesProjector` et un projecteur. Les refus ont lieu avant tout calcul (`unsupportedCapability`).
+- **Transcript** complet à chaque requête, sérialisé de façon déterministe (clés ordonnées) pour que le préfixe rendu reste réutilisable par le cache du moteur : instructions → `system`, prompts → `user`, raisonnement rattaché au tour assistant qui suit (`reasoning_content`), réponses et appels d’outils regroupés dans un message `assistant` (IDs conservés), sorties d’outils → `tool` avec `tool_call_id`. Images converties en PNG, orientation appliquée, à leur position parmi les textes, transmises en pièces jointes possédées (`attachment:image-N`) ; conversion hors du pool coopératif. Une pièce jointe dans une sortie du modèle est refusée (`unsupportedTranscriptContent`).
+- **Options** : `greedy` → `samplers: ["top_k"]`, `top_k: 1` ; `random(top:)` → `["top_k", "temperature"]` ; `random(probabilityThreshold:)` → `["top_p", "temperature"]` (la chaîne par défaut du moteur — pénalités, DRY, min-p… — n’est jamais ajoutée à un mode choisi) ; sans mode, les réglages du modèle. Seed : 32 bits côté moteur, `0xFFFFFFFF` signifiant aléatoire → refus au-delà de 4 294 967 294 (`LlamaLanguageModelError.unsupportedOption`), de même que top-k ≤ 0, seuil hors de ]0, 1] et température négative. `maximumResponseTokens` → `max_tokens` (tous les tokens générés, raisonnement et appels compris).
+- **Schémas** (`SchemaTranslation`) : liste blanche des mots-clés produits par l’encodeur du SDK (relevés sur un schéma couvrant tous les guides), refus des bornes de nombres flottants (ignorées par la grammaire), motifs ancrés (le guide porte sur toute la chaîne), `\d \w \s` réécrits en classes ASCII (sous-ensemble des classes Unicode de Swift : restriction, jamais élargissement), `\D \W \S \b \p` refusés, `"$ref": "#"` réécrit en définition, propriétés dans l’ordre de déclaration (`x-order`). Le reste est vérifié par le moteur (`strict_json_schema`). Diagnostic : `unsupportedGenerationGuide(schemaName:)` avec le chemin de la propriété ou la règle du moteur. Avec `includeSchemaInPrompt`, le schéma traduit est écrit à la fin du prompt.
+- **Outils** : `allowed` → `auto`, `disallowed` → `none` (outils toujours décrits, pour un rendu stable), `required` → voir les constats. `required` sans outil activé est refusé.
+- **Raisonnement** : `nil` → défaut du template (Qwen3.5 raisonne) ; `.custom("none")` → `enable_thinking: false` ; `light`/`moderate`/`deep`/`custom(x)` → `reasoning_effort` (`low`/`medium`/`high`/`x`) seulement si `chat_template_caps.supports_reasoning_effort` (lu par l’opération `properties` du moteur), sinon refus `unsupportedCapability(.reasoning)`. Un modèle qui ne déclare pas le raisonnement reçoit `enable_thinking: false`.
+- **Flux** (`StreamTranslation`) : deltas `reasoning_content` → `reasoning.appendText`, `content` → `response.appendText` (un seul segment), `tool_calls` → `toolCalls.toolCall(id:name:appendArguments)` dans l’ordre des index ; le nombre de tokens d’un fragment vient de `context.n_decoded`. À la fin, chaque appel doit être un objet JSON complet, sinon `LlamaLanguageModelError.incompleteToolCall` (avec « limite de tokens » si `finish_reason: length`) ; puis `updateUsage(input: n_prompt_tokens/n_cache_tokens, output: n_decoded/n_reasoning_tokens)`.
+- **Requête moteur** : `stream`, `fail_on_context_full`, `return_context`, `return_progress`, `strict_json_schema` toujours présents.
+- **Erreurs** : contexte plein → `LanguageModelError.contextSizeExceeded` (phase dans `debugDescription`) ; refus de schéma du moteur → `unsupportedGenerationGuide` ; format sans combinaison outils + schéma → `unsupportedCapability(.toolCalling)` ; image refusée par le moteur → `unsupportedCapability(.vision)` ; annulation → `CancellationError` ; file pleine, attente expirée, modèle déchargé, retiré ou absent, erreurs natives → `LlamaEngineError` inchangée (pas de cas Apple correspondant). Une erreur après des fragments reste une erreur.
+- **Annulation** : la requête native est annulée par l’annulation de la tâche (lecture tirée de P3) et, en sortie anticipée, par `cancel()` ; l’admission est rendue une fois.
+- **Moniteur** (`LlamaGenerationMonitor`, un par conversation, pour P6) : phase (`waiting`, `processingPrompt`, `generating`, `idle`), progression du prompt (`prompt_progress`), dernier rapport de contexte (`n_tokens` / `n_ctx` effectif) marqué vivant pendant la requête puis « dernière mesure » ; absence de mesure = `nil`, jamais zéro. Mises à jour par état (`bufferingNewest(1)`), jamais de deltas.
+
+### Preuves
+
+Commandes exécutées :
+
+```bash
+cmake --build build-apple-p1 -j 8 && (cd build-apple-p1 && ctest -j 4)
+(cd tools/server/tests && LLAMA_SERVER_BIN_PATH=../../../build-apple-p1/bin/llama-server ../../../.venv-server-tests/bin/python -m pytest -m 'not slow' -q unit)
+scripts/build-apple-language-model.sh
+cd bindings/apple
+TEST_RUNNER_LLAMA_QWEN_OFFLOAD=none TEST_RUNNER_LLAMA_QWEN_DIR=<snapshot Qwen3.5-2B> \
+  xcodebuild test -scheme LlamaApple-Package -destination 'platform=iOS Simulator,id=C64BD9F4-EA4D-44EC-8613-F3A3AC915618' -derivedDataPath <dd>
+xcodebuild build-for-testing -scheme LlamaApple-Package -destination 'generic/platform=macOS' -derivedDataPath <dd>
+xcodebuild build-for-testing -scheme LlamaApple-Package -destination 'generic/platform=iOS' -derivedDataPath <dd>
+```
+
+| Vérification | Résultat |
+| --- | --- |
+| `test-chat` : Qwen3.5 outils + schéma (`auto` → JSON accepté, `auto` → appel accepté, `required` → appel accepté), parseur **et** grammaire | réussi ; le cas `required` échoue sans la modification |
+| `test-json-schema-to-grammar` : contrôle strict (motif accepté ; lookahead nommé par sa propriété, motif non ancré, motif invalide, `$ref: "#"` refusés) | réussi |
+| CTest complet | **77/80**, les trois mêmes échecs qu’en P1 (`test-jinja-py` environnement ; `test-engine-operations` : préremplissage de grammaire avec stories15M, voir limites ; `test-engine-acquisition`) |
+| Tests HTTP du serveur, `-m 'not slow'` | **393 réussis, 6 ignorés** (identique à P1) |
+| Sonde `llama-server` Qwen3.5-2B : outils + schéma | `auto` et `required` → deux appels `calculate` ; tour suivant → nouvel appel ou JSON ; motif `\d+` non ancré refusé (`response_format: … pattern \d+ of answer is not supported`) |
+| `AdapterTests` (27, adaptateur réel, moteur scripté, sessions Foundation Models réelles) : flux UTF-8 (accents, emoji) en un segment et usage ; sérialisation déterministe ; transcript complet (rôles, raisonnement, IDs d’appels, sorties, image tournée 4×2 → 2×4 à sa position) ; refus d’une image dans une sortie ; deux sessions sans contamination ; sampling exact ; refus des options non représentables avant soumission ; politiques d’outils dont `required` puis `auto` ; niveaux de raisonnement ; schémas (ordre, ancrage, `\d`, récursion, refus localisés, rendu dans le prompt) ; boucle à deux outils aux arguments fragmentés ; outils + `@Generable` ; appel coupé par la limite ; erreur après fragments puis requête suivante propre ; prompt trop long ; erreurs du runtime typées ; annulation par `respond` et par le consommateur du flux ; capacités issues de la qualification ; vision sans projecteur ; moniteur | **27/27** |
+| `EngineAdapterTests` (9, vrai moteur, stories15M CPU) : flux et cache de préfixe (`cachedTokenCount > 0` au 2e tour) ; sortie `@Generable` contrainte par la grammaire (enum, entier borné, tableau de 2) ; motif refusé par le moteur avec le nom du schéma ; outils + schéma sans format adapté → `unsupportedCapability(.toolCalling)` ; lecture de `chat_template_caps` ; prompt trop long ; contexte plein en génération (≠ budget) ; deux sessions, une instance ; déchargement pendant une réponse puis rechargement | **9/9** |
+| `QwenTests` (12, Qwen3.5-2B Q4_K_M + `mmproj-BF16`, catalogue, CPU du simulateur) : texte (« Paris ») ; raisonnement séparé (101 tokens, réponse « 42 », sans balises) ; niveau `deep` refusé ; sortie structurée streamée (35 instantanés, Paris/France/3 monuments) ; raisonnement + structuré (42) ; boucle à deux outils (`calculate:42`, `lookup:3 EUR`, réponse les citant) ; outils + `@Generable` avec `required` (492) ; vision (« MOON ») ; vision avec orientation `.right` d’une image tournée ; deux sessions simultanées (Rome, Madrid, une instance) ; annulation en 17 à 25 ms ; contexte plein avant (phase `prompt`) et pendant la génération (phase `generation`), budget atteint = réponse | **12/12** (voir l’exécution complète ci-dessous) |
+| Suite complète du package (exécution finale, `LlamaEngineTests` et `LlamaFoundationModelsTests` en parallèle sur des clones du simulateur) | 92 tests, 2 ignorés par conception (session de fond, téléchargement réel) ; **89 réussis** ; `QwenTests.vision()` interrompu pendant l’encodage de l’image (« unexpected exit, crash, or test timeout », sans rapport de plantage : deux processus chargeant le modèle sur le CPU émulé), puis **réussi seul** en 201 s |
+| Compilation macOS 27 et iOS 27 appareil | réussie, sans avertissement dans le package |
+
+### Limites et observations
+
+- **Metal du simulateur** : avec `offload: .all`, le chargement du projecteur plante (`ggml_metal_buffer_set_tensor` dans `clip_model_loader::load_tensors`) et, sans projecteur, la restauration d’un checkpoint de prompt du modèle hybride Qwen3.5 avorte (`checkpoint size mismatch: expected 20201932, got 0`, `common_prompt_checkpoint::load_tgt`). La même séquence ne plante pas sur Metal natif (serveur sur le Mac). Les tests Qwen tournent donc sur le CPU du simulateur ; Metal reste à qualifier sur iPhone (P7). Le premier chargement CPU prend ~27 s et une image ~3 min sur ce CPU émulé : ces durées ne sont pas des mesures d’appareil.
+- **Raisonnement + schéma dans le prompt (Qwen3.5-2B)** : en glouton comme en échantillonnage par défaut, le modèle raisonne souvent sur le schéma jusqu’à la limite de tokens (1 essai sur 3 en défaut, 3 sur 3 en glouton) ; la session finit alors sans réponse. Sans le schéma dans le prompt, la grammaire suffit (test réussi). À reprendre pour la démo : schéma hors prompt ou raisonnement coupé pour les réponses structurées.
+- **Niveaux de raisonnement** : sans `reasoning_effort` dans le template (cas de Qwen3.5), seuls `nil` et `.custom("none")` sont traduisibles.
+- **Arguments d’outils** : dans le format XML de Qwen3.5, un paramètre de type chaîne est généré librement (le format n’a pas de guillemets) ; un `enum` ou un motif sur un tel paramètre n’est donc pas imposé par la grammaire. Foundation Models décode ensuite les arguments vers le type `Arguments` de l’outil ; le comportement de ce décodage face à une valeur hors contrainte n’a pas été vérifié. Les paramètres non chaîne sont contraints. Écart à traiter (grammaire de chaîne contrainte dans le format XML) ou à refuser explicitement avant de déclarer un outil à paramètre chaîne contraint.
+- **Préremplissage de la grammaire (moteur)** : `common_sampler_init` écarte un premier token du prompt de génération qui commence par un espace ; avec un vocabulaire où les marqueurs du template ne sont pas spéciaux (stories15M + chatml), ce token contient aussi `<` et l’initialisation échoue. Les tests de sortie contrainte sur stories15M utilisent donc un template sans prompt de génération. C’est la cause de l’échec préexistant de `test-engine-operations` ; non corrigé ici (comportement partagé avec le serveur).
+- **Formats de chat** : seule la famille Qwen3-Coder / Qwen3.5 combine outils et sortie structurée ; ailleurs l’adaptateur refuse explicitement.
+- **Signature de raisonnement** : non produite ; une signature reçue dans un transcript est ignorée (le texte du raisonnement est transmis au template, qui décide de le rejouer).
+- iPhone et macOS 27 : non exécutés (P7).
+
 ## Blocages et écarts ouverts
 
 - **macOS 27 à l’exécution** : indisponible sur ce Mac (26.7) ; la livraison restera « compilée, non validée à l’exécution sur macOS 27 » tant qu’aucune machine 27 n’est disponible.
-- **Approximations silencieuses du convertisseur de schéma** : patterns non pris en charge remplacés par une chaîne libre (simple avertissement), bornes flottantes ignorées. P5 doit rendre la conversion stricte pour l’adaptateur (erreur au lieu d’avertissement) ou refuser ces guides ; `"$ref": "#"` doit être réécrit ou pris en charge.
+- **Approximations silencieuses du convertisseur de schéma** : résolues pour l’adaptateur en P5 (`strict_json_schema`, refus des bornes flottantes, réécriture de `"$ref": "#"`). Reste l’argument chaîne contraint d’un outil au format XML de Qwen3.5 (voir P5).
+- **Metal du simulateur** (P5) : plantages au chargement du projecteur et à la restauration d’un checkpoint de Qwen3.5 ; qualification sur CPU du simulateur, Metal à qualifier sur iPhone (P7).
+- **Préremplissage de grammaire et vocabulaires sans marqueurs spéciaux** (moteur, préexistant) : cause de l’échec de `test-engine-operations` ; contourné dans les tests par un template sans prompt de génération.
 - **Signal de contexte plein** : résolu en P1 (`fail_on_context_full`).
 - **Tests moteur préexistants** : `test-engine-operations` et `test-engine-acquisition` échouent dans cet environnement avec stories15M, avec ou sans P1.
 - **Encodage observé sur deux runtimes** : identique sur macOS 26.7 (sonde locale) et simulateur iOS 27.0 ; à revérifier sur l’iPhone.
 - **Transfert en arrière-plan sur iPhone (P4)** : non exécutable sans application hôte, le système refusant une session de fond au processus `xctest` ; à exécuter avec la démo (P6) et à consigner en P7.
-- **Capacités qualifiées du catalogue** : vides ; P5/P7 doivent les renseigner dans `Catalog/models.json` à partir des preuves d’exécution.
+- **Capacités qualifiées du catalogue** : renseignées en P5 (outils, raisonnement, vision) d’après `QwenTests` sur simulateur ; à confirmer sur iPhone en P7.
