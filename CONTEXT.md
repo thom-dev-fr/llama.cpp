@@ -33,3 +33,11 @@ _Avoid_ : Exécution d’outil
 **Exécution d’outil** :
 Action réalisée par l’hôte en réponse à un appel d’outil. Elle ne relève pas du moteur d’inférence.
 _Avoid_ : Appel d’outil
+
+**Occupation du contexte** :
+Quantité de tokens occupant la fenêtre de contexte utilisée pour une inférence, rapportée à sa capacité. Elle se distingue de la consommation cumulée de tokens au cours d’une conversation.
+_Avoid_ : Avancement du contexte, consommation cumulée
+
+**Progression du traitement du prompt** :
+Part du prompt déjà traitée pour préparer la génération d’une réponse. Elle se distingue de l’occupation du contexte et de la progression de la génération.
+_Avoid_ : Avancement du contexte
