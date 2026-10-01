@@ -126,6 +126,14 @@ package final class NativeEngine: @unchecked Sendable {
     }
 
     /// Creates an engine from a catalog configuration (see llama_bridge.h).
+    /// Nothing is loaded: a catalog engine starts its threads and returns.
+    package static func createCatalog(configuration: Data, workers: NativeWorkers) throws -> NativeEngine {
+        let json = String(decoding: configuration, as: UTF8.self)
+        let handle = try checked { llama_bridge_engine_create(json, $0) }
+        return NativeEngine(handle: handle, workers: workers)
+    }
+
+    /// Same, on a worker.
     package static func create(configuration: Data, workers: NativeWorkers) async throws -> NativeEngine {
         let json = String(decoding: configuration, as: UTF8.self)
         let address = try await workers.run { () throws -> UInt in
@@ -221,11 +229,14 @@ package final class NativeRequest: @unchecked Sendable {
         workers.detach { llama_bridge_request_destroy(owned.pointer) }
     }
 
-    /// Next event; nil timeout waits without limit. Throws CancellationError
-    /// only if the task was cancelled before the call; a cancellation during
-    /// the wait returns the native terminal `cancelled` event.
+    /// Next event; nil timeout waits without limit. A cancelled task cancels
+    /// the native request, whether it is cancelled during the wait or before
+    /// the call: the reader then drains the payloads already produced and gets
+    /// the terminal `cancelled` event. Throws only for a concurrent reader.
     package func next(timeout: Duration? = nil) async throws -> NativeEvent {
-        try Task.checkCancellation()
+        if Task.isCancelled {
+            llama_bridge_request_cancel(handle)
+        }
         try reading.withLock {
             guard !isReading else { throw LlamaEngineError.concurrentReaders }
             isReading = true
@@ -245,31 +256,42 @@ package final class NativeRequest: @unchecked Sendable {
     }
 
     /// Payloads until the terminal event, which is returned (success) or thrown.
-    package func events() -> AsyncThrowingStream<NativeEvent, any Error> {
-        AsyncThrowingStream { continuation in
-            let task = Task {
-                do {
-                    while true {
-                        let event = try await next()
-                        switch event.kind {
-                        case .payload:
-                            continuation.yield(event)
-                        case .timeout:
-                            continue
-                        case .success:
-                            continuation.yield(event)
-                            continuation.finish()
-                            return
-                        case .cancelled, .error:
-                            continuation.finish(throwing: event.error)
-                            return
-                        }
+    /// Pull-based: nothing is buffered in Swift, the engine's bounded event
+    /// queue applies (a reader that falls behind ends the request with queue_full).
+    package func events() -> Events {
+        Events(request: self)
+    }
+
+    package struct Events: AsyncSequence, Sendable {
+        package typealias Element = NativeEvent
+        let request: NativeRequest
+
+        package struct AsyncIterator: AsyncIteratorProtocol {
+            let request: NativeRequest
+            var done = false
+
+            package mutating func next() async throws -> NativeEvent? {
+                while !done {
+                    let event = try await request.next()
+                    switch event.kind {
+                    case .payload:
+                        return event
+                    case .timeout:
+                        continue
+                    case .success:
+                        done = true
+                        return event
+                    case .cancelled, .error:
+                        done = true
+                        throw event.error
                     }
-                } catch {
-                    continuation.finish(throwing: error)
                 }
+                return nil
             }
-            continuation.onTermination = { _ in task.cancel() }
+        }
+
+        package func makeAsyncIterator() -> AsyncIterator {
+            AsyncIterator(request: request)
         }
     }
 }

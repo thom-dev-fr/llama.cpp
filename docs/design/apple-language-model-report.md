@@ -1,6 +1,6 @@
 # Rapport — Apple LanguageModel sur llama.cpp
 
-Rapport prévu par le [plan](apple-language-model-plan.md). Il distingue ce qui est exécuté, compilé seulement, ou non encore traité. Aucune capacité Foundation Models n’est validée à ce stade : P0, P1 et P2 sont achevés.
+Rapport prévu par le [plan](apple-language-model-plan.md). Il distingue ce qui est exécuté, compilé seulement, ou non encore traité. Aucune capacité Foundation Models n’est validée à ce stade : P0 à P3 sont achevés.
 
 ## Suivi P0–P7
 
@@ -9,7 +9,7 @@ Rapport prévu par le [plan](apple-language-model-plan.md). Il distingue ce qui 
 | P0 Contrat exécutable | **Terminé** | Matrice ci-dessous ; package `bindings/apple` compilé pour macOS 27, iOS 27 appareil et simulateur ; 8 tests Swift réussis sur simulateur iOS 27. | Aucune capacité déclarée : le squelette refuse toute requête explicitement. |
 | P1 Signaux du moteur | **Terminé** | `test-engine-context` (nouveau) ; CTest 77/80, les 3 échecs préexistants ou d’environnement ; HTTP non-`slow` 393 réussis / 6 ignorés ; sonde Qwen3.5-2B (image, raisonnement) ; 12 tests Swift sur simulateur iOS 27. | `test-engine-operations` et `test-engine-acquisition` échouent aussi sans P1 (voir P1). |
 | P2 Pont natif et XCFramework | **Terminé** | Pont C + `test-llama-bridge` (hôte, ASan+UBSan, TSan) ; `LlamaBridge.xcframework` iOS / simulateur / macOS ; 20 tests Swift sur simulateur iOS 27 dont 8 sur le vrai moteur ; consommateur externe compilé pour iOS et macOS, testé sur simulateur. | Exécution macOS et iPhone non faite (P7). Premier chargement Metal lent sur simulateur (voir P2). |
-| P3 Runtime partagé, stockage | À faire | — | `LlamaRuntime` n’est qu’une identité et des limites. |
+| P3 Runtime partagé, stockage | **Terminé** | `LlamaRuntime` (moteur natif en catalogue, admission, instances, chargements mutualisés, déchargement, observation) et `LlamaModelStore` ; 33 tests Swift sur simulateur iOS 27 dont 13 nouveaux `RuntimeTests` sur le vrai moteur, stables sur 5 itérations ; compilation macOS 27 et iOS 27 appareil. | Aucun changement du moteur ni du pont. Tests sur stories15M (CPU) ; iPhone et macOS 27 non exécutés (P7). |
 | P4 Acquisition URLSession | À faire | — | Références Qwen3.5-2B relevées localement, à confirmer côté serveur. |
 | P5 Executor Foundation Models | À faire | — | Écarts du convertisseur de schéma relevés en P0. |
 | P6 Démo SwiftUI | À faire | — | — |
@@ -192,6 +192,71 @@ Archive : 186 Mo, dont la plus grande partie en dSYM. `Package.swift` référenc
 - Le package ne se résout pas tant que l’XCFramework n’a pas été construit (documenté).
 - L’identité d’un package local est son nom de dossier (`apple`), à utiliser dans `.product(…, package: "apple")`.
 - Non fait en P2 : exécution sur iPhone (signature à configurer avec la démo, P6/P7) et sur macOS 27 (indisponible).
+
+## P3 — Runtime Swift partagé et stockage des modèles
+
+### Conception retenue
+
+`bindings/apple/Sources/LlamaEngine` ; aucun changement du moteur C++ ni du pont C.
+
+- **Instance explicite** : `LlamaRuntime(configuration:store:)` crée un `NativeEngine` en mode catalogue (vide, rien n’est chargé) ; aucun singleton. Le runtime est une classe `Sendable` ; la `Configuration` de l’executor le compare toujours par identité.
+- **Artefact, profil, instance** : `LlamaModelArtifact` (identifiant, poids — tous les segments —, projecteur, copie gérée ou fichier de l’application) ; `LlamaLoadProfile` (contexte par génération, `LlamaComputeConfiguration` : déport GPU, threads, batchs, flash attention ; projecteur ; template ; options moteur supplémentaires). Une instance = artefact × profil, entrée du catalogue natif nommée `<id>@<empreinte du profil>` (SHA-256 tronqué d’une description canonique). Même artefact et même profil → même entrée → poids partagés ; tout écart de profil → entrée distincte. Les entrées sont ajoutées à la première utilisation par `update_catalog`, avec des réglages déterministes : les instances inchangées ne sont pas rechargées.
+- **Une seule autorité d’admission** : la file Swift (`Admission`). Au plus `maximumActiveGenerations` générations actives (permis), au plus `maximumWaitingRequests` en attente, FIFO ; au-delà, `LlamaEngineError.queueFull` immédiat ; attente bornée par `admissionTimeout` (`admissionTimedOut`) et annulable. Chaque entrée native reçoit `parallel = maximumActiveGenerations` et `context_size = contexte × slots` (sans cache KV unifié, chaque slot a le contexte du profil) : une génération admise n’attend jamais un slot dans le moteur. Le `max_waiting` natif (générations admises + 64 chargements explicites) n’est qu’une borne de sûreté ; le `wait_timeout` natif (`loadTimeout`) ne couvre plus que le chargement et l’éviction. Constat qui motive ce choix : côté moteur, `max_waiting` ne compte que les requêtes en attente de chargement ; une fois le modèle résident, les tâches attendent un slot dans une file non bornée par cette limite.
+- **Permis libéré une seule fois** : `AdmissionPermit` (drapeau sous verrou) est rendu à l’issue terminale lue, à l’annulation, à la fermeture par le runtime ou à la destruction du handle. Un ticket annulé ou expiré est retiré de la file sous verrou et ne peut plus être servi ; une génération fermée pendant sa soumission annule aussitôt sa requête native (`attach`).
+- **Génération** (`LlamaGeneration`, accès `package` pour l’executor P5) : lecture tirée, sans tampon Swift ; la file native bornée (`max_events`) termine en `queue_full` un lecteur trop lent, jamais de perte silencieuse. `NativeRequest.events()` est devenu lui aussi tiré (il utilisait auparavant un `AsyncThrowingStream` au tampon non borné). Erreurs typées : `contextExceeded`, `unloaded`, `modelUnavailable`.
+- **Chargement explicite mutualisé** (`load`) : un `SharedLoad` par instance ; l’annulation d’un appelant n’arrête que son attente ; si le dernier appelant part avant la fin, la requête native de chargement est annulée, ce qui retire une attente non commencée sans interrompre un chargement démarré (sémantique native conservée). Les générations chargent à la demande (`autoload`), en partageant le chargement natif.
+- **Déchargement explicite** (`unload`) : ferme les admissions du modèle (`availability = unloading`), échoue ses attentes Swift, ferme ses générations, attend la fin des soumissions natives en cours, puis appelle `unload` natif pour chaque instance, sur les workers, et rouvre les admissions. Les appels concurrents partagent la même tâche. Le résultat est visible dans le snapshot au retour.
+- **Observation** : `snapshot()` (modèles, disponibilité, instances avec état natif — `loading(progress:)`, `loaded`, `failed`… —, requêtes actives/en chargement, attentes d’admission par modèle, compteurs d’admission) et `updates(bufferLimit:)` : `.snapshot` d’abord, puis `.changed` ; au-delà de la limite, la file d’un abonné est remplacée par un unique `.resync(snapshot, droppedUpdates:)`. Les événements d’abonnement natifs (dont `resync` natif) alimentent une pompe qui relit le catalogue natif.
+- **Stockage** (`LlamaModelStore`, racine par défaut `Application Support/LlamaModels`) : un répertoire par modèle avec `manifest.json` (persistant entre lancements). Import : vérification du magique GGUF, de tous les segments annoncés par le nom (`-00001-of-0000N.gguf`, le premier segment est exigé) et de l’espace libre (`volumeAvailableCapacityForImportantUsage`, avec 64 Mio de réserve) ; copie (clone APFS) dans `staging/`, manifeste, exclusion de la sauvegarde, puis un seul `rename` vers `models/<id>` ; nettoyage du staging en cas d’échec ou au démarrage suivant. Accès « security-scoped » pour les fichiers choisis par l’utilisateur. Suppression : `rename` vers `trash/` puis effacement. Le fichier source n’est jamais modifié ; un modèle ajouté par `register(_:)` n’est jamais effacé.
+- **Absence de course** : import réservé par identifiant (`modelExists`) ; `removeModel` attend un déchargement en cours, ferme les admissions (`removing`), ferme les générations, attend les soumissions, retire les entrées par `update_catalog` (sous un mutex asynchrone qui sérialise toutes les mises à jour du catalogue natif), puis efface la copie gérée ; la création d’instance revérifie la disponibilité sous ce mutex.
+
+### Preuves
+
+Commandes exécutées depuis `bindings/apple` (XCFramework de P2, inchangé) :
+
+```bash
+xcodebuild test -scheme LlamaApple-Package -destination 'platform=iOS Simulator,id=C64BD9F4-EA4D-44EC-8613-F3A3AC915618' -derivedDataPath <dd>
+xcodebuild test -scheme LlamaApple-Package -destination 'platform=iOS Simulator,id=C64BD9F4-EA4D-44EC-8613-F3A3AC915618' -derivedDataPath <dd> -test-iterations 10 -run-tests-until-failure
+xcodebuild build-for-testing -scheme LlamaApple-Package -destination 'generic/platform=macOS' -derivedDataPath <dd>
+xcodebuild build-for-testing -scheme LlamaApple-Package -destination 'generic/platform=iOS' -derivedDataPath <dd>
+```
+
+| Vérification (simulateur iOS 27, iPhone 17 Pro, stories15M CPU) | Résultat |
+| --- | --- |
+| Suite complète : 12 tests `LlamaFoundationModelsTests` + 21 `LlamaEngineTests` (8 P2, 13 P3) | **33/33** réussis |
+| `configurationIsValidated`, `instanceIdentityFollowsArtifactAndProfile` : limites et identifiants refusés, identité d’instance | réussi |
+| `twoSessionsShareOneInstance` : deux conversations intercalées, même profil → **un seul** passage natif à `loading` ; un autre profil → une seconde instance, la première reste chargée | réussi |
+| `eachGenerationGetsTheProfileContext` : deux slots, `n_ctx` rapporté = contexte du profil | réussi |
+| `fullQueueFailsExplicitly` : file pleine → `queueFull(1)` immédiat, snapshot `isQueueFull`, l’attente est servie après libération | réussi |
+| `cancellingAWaitingRequestFreesItsPlaceOnce` : annulation en attente → place libérée une fois ; double fermeture d’une génération → un seul admis | réussi |
+| `admissionWaitIsBounded` : `admissionTimedOut` après 200 ms | réussi |
+| `unloadEndsRunningAndWaitingWorkAndKeepsHistories` : déchargement pendant une génération infinie et une attente → `unloaded` pour les deux ; instance `unloaded` au retour ; historique de l’appelant renvoyé → rechargement et succès | réussi |
+| `concurrentLoadsShareOneNativeLoad` : trois `load` concurrents dont un annulé → un seul chargement natif | réussi |
+| `slowSubscriberIsResynchronized` : abonné à limite 2 non lu → `resync` avec `droppedUpdates > 0`, puis fin de l’abonnement à l’arrêt | réussi |
+| `importCopiesAtomicallyAndRemovalKeepsTheSource` : copie identique, exclusion de sauvegarde, staging vide, manifeste relu par un nouveau store, suppression pendant une génération (`modelUnavailable(removed)`), catalogue natif vide, source et projecteur intacts | réussi |
+| `importChecksFilesAndSpace` : GGUF segmenté (3 segments copiés), segment manquant, segment non initial, fichier non GGUF, espace insuffisant (rien copié, source intacte), modèle enregistré jamais effacé | réussi |
+| `catalogChangesKeepOtherModelsLoaded` : import, chargement et suppression d’un autre modèle pendant une génération → aucun rechargement du premier, génération terminée | réussi |
+| Répétitions (`-run-tests-until-failure`) | Premier essai (5 itérations de `LlamaEngineTests`) : **échec** intermittent du test P2 `taskCancellationCancelsTheNativeRequest` (voir ci-dessous). Après correction : **10/10 répétitions** des 33 tests réussies, puis 3/3 après le dernier nettoyage. |
+| `build-for-testing` macOS 27 et iOS 27 appareil | réussis, sans avertissement Swift |
+
+Défauts trouvés par ces tests et corrigés avant le commit :
+
+- décodage des dates du manifeste : le catalogue géré n’aurait pas survécu à un redémarrage ;
+- comptage des chargements dans le test lui-même : le moteur republie `loading` quand une requête rejoint un chargement en cours ;
+- **course de P2** dans `NativeRequest.next` : une tâche annulée entre deux lectures recevait `CancellationError` sans que la requête native soit annulée (le test P2 échouait par intermittence). Désormais, une lecture depuis une tâche annulée annule la requête native puis rend ses fragments restants et l’issue terminale `cancelled`, que l’annulation survienne pendant l’attente ou avant l’appel.
+
+Le premier chargement de ces exécutions n’a pas reproduit les 29 s observées en P2 (test complet en 1 s, chargement compris) ; la cause du coût observé alors n’est pas établie. La mesure sur iPhone reste due en P7.
+
+### Choix et limites
+
+- **Résidence** comptée par instance native : deux profils du même modèle occupent deux places de `maximumResidentModels`.
+- **Générations pour plusieurs modèles** : une génération admise pour un modèle non résident peut attendre côté moteur l’éviction d’un modèle actif (borne `loadTimeout`). C’est une attente de ressource, pas une seconde file d’admission ; elle conserve son permis.
+- **Pendant un déchargement ou une suppression**, une nouvelle demande échoue explicitement (`modelUnavailable`) au lieu d’attendre ; une demande suivante recharge le modèle.
+- **Réglages** : le catalogue géré est persistant (manifestes) ; les réglages de l’application (profil choisi, limites) relèvent de la démo (P6), la bibliothèque n’écrit rien d’autre.
+- **Segments** : seuls les GGUF segmentés annoncés par leur nom sont reconnus ; les métadonnées `split.count` ne sont pas relues en Swift (llama.cpp les vérifie au chargement).
+- **Copie** : `copyItem` clone sur APFS ; sur un autre volume, la copie d’un gros fichier n’est annulable qu’entre deux fichiers.
+- Les tests de stockage utilisent de faux GGUF (magique seul) pour les segments et le projecteur ; ils ne valident pas le chargement d’un modèle segmenté ni de la vision (P5/P7).
+- Les tests tournent sur simulateur ; iPhone et macOS 27 restent à exécuter (P7).
 
 ## Blocages et écarts ouverts
 

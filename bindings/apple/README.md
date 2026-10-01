@@ -74,6 +74,59 @@ target in `Package.swift` with its URL and the checksum printed by the script:
 The checksum changes with every build; publish the archive and the manifest
 together.
 
+## Runtime and model store
+
+The application creates one `LlamaRuntime` and shares it between its
+sessions; there is no singleton. It owns the native engine, the catalog and
+the admission queue. Conversations stay with the callers.
+
+```swift
+import LlamaEngine
+
+let store = try LlamaModelStore.applicationSupport()     // Application Support/LlamaModels
+let runtime = try LlamaRuntime(
+    configuration: .init(limits: .init(maximumResidentModels: 1,
+                                       maximumActiveGenerations: 1,
+                                       maximumWaitingRequests: 4)),
+    store: store)
+
+let qwen = try await runtime.importModel(LlamaModelImport(
+    id: LlamaModelID("qwen3.5-2b"), weights: pickedGGUF, projector: pickedProjector))
+let profile = LlamaLoadProfile(contextSize: 4096, usesProjector: true)
+try await runtime.load(qwen.id, profile: profile)         // optional: generations load on demand
+
+for await update in runtime.updates() {                   // snapshot, then changes (or a resync)
+    render(update.snapshot)
+}
+```
+
+- **Artifact, profile, instance.** A `LlamaModelArtifact` names files
+  (weights, all shards of a split model, optional projector). A
+  `LlamaLoadProfile` says how to load them (context per generation, compute,
+  projector, template, extra engine options). Requests with the same artifact
+  and profile share one loaded instance; another profile gets its own.
+- **Admission.** At most `maximumActiveGenerations` generations run; at most
+  `maximumWaitingRequests` wait, first come first served; beyond that a
+  request fails at once with `LlamaEngineError.queueFull`. A wait can be
+  cancelled (its place is freed once) and is bounded by `admissionTimeout`.
+  This queue is the only admission authority: each instance has one engine
+  slot per allowed generation, so the engine never queues an admitted
+  generation for a slot.
+- **Unload.** `unload(_:)` closes the model's admissions, ends its waiting
+  and running generations with `LlamaEngineError.unloaded`, and returns once
+  the engine freed its resources; it runs on worker threads, never on the
+  caller's. A later request loads the model again.
+- **Observation.** `snapshot()` and `updates()` report the catalog, each
+  instance's state (loading progress, loaded, failed, ...) and the admission
+  counts. A subscriber that falls `observationBufferLimit` updates behind gets
+  one `resync` with the number of dropped updates.
+- **Store.** `importModel` copies the files into the store (a clone on APFS),
+  writes a manifest, then renames the directory into place: a model is
+  complete or absent. It checks GGUF files, every announced shard and the
+  free space first. Model directories are excluded from backups. `removeModel`
+  ends the model's work, then deletes the managed copy; the imported source
+  and files added with `register(_:)` are never deleted.
+
 ## Tests
 
 ```bash
@@ -81,7 +134,7 @@ cd bindings/apple
 xcodebuild test -scheme LlamaApple-Package -destination 'platform=iOS Simulator,name=iPhone 17 Pro'
 ```
 
-`LlamaEngineTests` load the small model
+`LlamaEngineTests` (native layer and runtime) load the small model
 `tools/server/tests/tmp/stories15M-q4_0.gguf` (CPU), the draft model that the
 server tests download. Without it:
 

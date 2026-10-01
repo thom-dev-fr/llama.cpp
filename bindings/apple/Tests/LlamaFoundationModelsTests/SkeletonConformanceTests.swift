@@ -28,10 +28,10 @@ private func prompt(_ text: String) -> Transcript.Entry {
 }
 
 @Suite struct SkeletonConformanceTests {
-    let runtime = LlamaRuntime()
+    let runtime = try! LlamaRuntime()
 
     @Test func configurationIdentityFollowsTheRuntimeInstance() throws {
-        let other = LlamaRuntime()
+        let other = try LlamaRuntime()
         let a = LlamaLanguageModel(runtime: runtime, modelID: LlamaModelID("m")).executorConfiguration
         let b = LlamaLanguageModel(runtime: runtime, modelID: LlamaModelID("m")).executorConfiguration
         let c = LlamaLanguageModel(runtime: other, modelID: LlamaModelID("m")).executorConfiguration
