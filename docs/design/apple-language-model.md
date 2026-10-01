@@ -1,6 +1,6 @@
 # Adaptateur Apple LanguageModel
 
-Conception soumise à confirmation finale. Ce document distingue les décisions confirmées des propositions finales ; l’implémentation n’a pas commencé.
+Conception soumise à confirmation finale. Ce document distingue les décisions confirmées des propositions finales. L’avancement de l’implémentation et ses preuves sont suivis dans [le rapport](apple-language-model-report.md).
 
 Le [plan d’implémentation transmissible à l’agent](apple-language-model-plan.md) décrit les étapes, les fichiers proposés, les dépendances et les critères de sortie. Il a été préparé à la demande de l’utilisateur ; les derniers réglages proposés ci-dessous y restent identifiés comme hypothèses réversibles.
 
