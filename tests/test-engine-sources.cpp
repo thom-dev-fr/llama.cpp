@@ -93,7 +93,8 @@ int main(int argc, char ** argv) {
 
     const auto presets = [&](const std::string & alpha_ctx, const std::string & custom_extra) {
         write(ini,
-            "[*]\nctx-size = 256\n\n"
+            // context shift: beta's stream below ends only when beta is unloaded, never by a full context
+            "[*]\nctx-size = 256\ncontext-shift = true\n\n"
             "[alpha]\nalias = al, first\ntemp = 0.5\nctx-size = " + alpha_ctx + "\n\n"
             "[custom]\nmodel = " + model.string() + "\nload-on-startup = true\nstop-timeout = 7\nport = 9999\n"
             "no-warmup = true\n" + custom_extra + "\n"
