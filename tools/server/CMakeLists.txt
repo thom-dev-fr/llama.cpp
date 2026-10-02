@@ -17,6 +17,8 @@ add_library(${TARGET} STATIC
     server-decision.h
     server-context.cpp
     server-context.h
+    server-routes.cpp
+    server-routes.h
     server-stream.cpp
     server-stream.h
     server-tools.cpp
