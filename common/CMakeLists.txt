@@ -48,17 +48,15 @@ if (BUILD_SHARED_LIBS)
 endif()
 
 #
-# llama-common
+# llama-common-local: inference utilities without network, argv or subprocess support
 #
 
-set(TARGET llama-common)
+set(TARGET llama-common-local)
 
 include(parsers/sources.cmake)
 
 add_library(${TARGET}
     ${LLAMA_CHAT_PARSERS_SOURCES}
-    arg.cpp
-    arg.h
     base64.hpp
     chat-auto-parser-generator.cpp
     chat-auto-parser-helpers.cpp
@@ -70,17 +68,10 @@ add_library(${TARGET}
     chat.h
     common.cpp
     common.h
-    console.cpp
-    console.h
     debug.cpp
     debug.h
-    download.cpp
-    download.h
     fit.cpp
     fit.h
-    hf-cache.cpp
-    hf-cache.h
-    http.h
     imatrix-loader.cpp
     imatrix-loader.h
     json-schema-to-grammar.cpp
@@ -99,16 +90,12 @@ add_library(${TARGET}
     ngram-mod.h
     peg-parser.cpp
     peg-parser.h
-    preset.cpp
-    preset.h
     reasoning-budget.cpp
     reasoning-budget.h
     sampling.cpp
     sampling.h
     speculative.cpp
     speculative.h
-    subproc.cpp
-    subproc.h
     trie.cpp
     trie.h
     unicode.cpp
@@ -134,12 +121,8 @@ set_target_properties(${TARGET} PROPERTIES
 )
 
 target_include_directories(${TARGET} PUBLIC .)
-target_link_libraries     (${TARGET} PUBLIC vendor::nlohmann vendor::sheredom)
+target_link_libraries     (${TARGET} PUBLIC vendor::nlohmann)
 target_compile_features   (${TARGET} PUBLIC cxx_std_17)
-
-if (LLAMA_SUBPROCESS)
-    target_compile_definitions(${TARGET} PUBLIC LLAMA_SUBPROCESS)
-endif()
 
 if (BUILD_SHARED_LIBS)
     set_target_properties(${TARGET} PROPERTIES POSITION_INDEPENDENT_CODE ON)
@@ -149,7 +132,6 @@ if (BUILD_SHARED_LIBS)
 endif()
 
 target_link_libraries(${TARGET} PUBLIC  llama-common-base)
-target_link_libraries(${TARGET} PRIVATE cpp-httplib)
 
 if (LLAMA_LLGUIDANCE)
     include(ExternalProject)
@@ -184,3 +166,52 @@ if (LLAMA_LLGUIDANCE)
 endif()
 
 target_link_libraries(${TARGET} PUBLIC llama Threads::Threads)
+
+if (NOT LLAMA_BUILD_COMMON)
+    return()
+endif()
+
+#
+# llama-common
+#
+
+set(TARGET llama-common)
+
+add_library(${TARGET}
+    arg.cpp
+    arg.h
+    console.cpp
+    console.h
+    download.cpp
+    download.h
+    hf-cache.cpp
+    hf-cache.h
+    http.h
+    preset.cpp
+    preset.h
+    subproc.cpp
+    subproc.h
+    )
+
+set_target_properties(${TARGET} PROPERTIES
+    VERSION ${LLAMA_VERSION_BASE}
+    SOVERSION ${LLAMA_VERSION_MAJOR}
+    MACHO_CURRENT_VERSION 0 # keep macOS linker from seeing oversized version number
+)
+
+target_include_directories(${TARGET} PUBLIC .)
+target_link_libraries     (${TARGET} PUBLIC llama-common-local vendor::sheredom)
+target_compile_features   (${TARGET} PUBLIC cxx_std_17)
+
+if (LLAMA_SUBPROCESS)
+    target_compile_definitions(${TARGET} PUBLIC LLAMA_SUBPROCESS)
+endif()
+
+if (BUILD_SHARED_LIBS)
+    set_target_properties(${TARGET} PROPERTIES POSITION_INDEPENDENT_CODE ON)
+
+    # TODO: make fine-grained exports in the future
+    set_target_properties(${TARGET} PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS ON)
+endif()
+
+target_link_libraries(${TARGET} PRIVATE cpp-httplib)

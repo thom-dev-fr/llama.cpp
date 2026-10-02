@@ -4,7 +4,9 @@
 #include <cstdlib>
 
 #include "json.h"
+#ifdef LLAMA_SUBPROCESS
 #include "subproc.h"
+#endif
 
 #include "jinja/runtime.h"
 #include "jinja/parser.h"
@@ -52,7 +54,12 @@ int main(int argc, char *argv[]) {
     for (int i = 1; i < argc; i++) {
         std::string arg = argv[i];
         if (arg == "-py") {
+#ifdef LLAMA_SUBPROCESS
             g_python_mode = true;
+#else
+            std::cerr << "-py requires LLAMA_SUBPROCESS\n";
+            return 1;
+#endif
         } else {
             t.set_filter(arg);
         }
@@ -2350,6 +2357,7 @@ static void test_template_cpp(testing & t, const std::string & name, const std::
     });
 }
 
+#ifdef LLAMA_SUBPROCESS
 // keep this in-sync with https://github.com/huggingface/transformers/blob/main/src/transformers/utils/chat_template_utils.py
 // note: we use SandboxedEnvironment instead of ImmutableSandboxedEnvironment to allow usage of in-place array methods like append() and pop()
 static std::string py_script = R"(
@@ -2448,12 +2456,16 @@ static void test_template_py(testing & t, const std::string & name, const std::s
     });
 }
 
+#endif // LLAMA_SUBPROCESS
+
 static void test_template(testing & t, const std::string & name, const std::string & tmpl, const json & vars, const std::string & expect) {
+#ifdef LLAMA_SUBPROCESS
     if (g_python_mode) {
         test_template_py(t, name, tmpl, vars, expect);
-    } else {
-        test_template_cpp(t, name, tmpl, vars, expect);
+        return;
     }
+#endif
+    test_template_cpp(t, name, tmpl, vars, expect);
 }
 
 //

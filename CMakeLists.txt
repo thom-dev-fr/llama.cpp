@@ -127,6 +127,7 @@ option(LLAMA_SANITIZE_UNDEFINED "llama: enable undefined sanitizer" OFF)
 
 # utils
 option(LLAMA_BUILD_COMMON "llama: build common utils library" ${LLAMA_STANDALONE})
+option(LLAMA_BUILD_COMMON_LOCAL "llama: build only the local common utils library (no network, argv or subprocess)" OFF)
 
 # extra artifacts
 option(LLAMA_BUILD_TESTS     "llama: build tests"                                                                ${LLAMA_STANDALONE})
@@ -236,11 +237,11 @@ add_subdirectory(src)
 
 add_subdirectory(vendor)
 
-if (LLAMA_BUILD_COMMON)
+if (LLAMA_BUILD_COMMON OR LLAMA_BUILD_COMMON_LOCAL)
     add_subdirectory(common)
 endif()
 
-if (LLAMA_BUILD_COMMON AND LLAMA_BUILD_TESTS AND NOT CMAKE_JS_VERSION)
+if ((LLAMA_BUILD_COMMON OR LLAMA_BUILD_COMMON_LOCAL) AND LLAMA_BUILD_TESTS AND NOT CMAKE_JS_VERSION)
     include(CTest)
     add_subdirectory(tests)
 endif()
@@ -288,6 +289,10 @@ set_target_properties(llama
         PUBLIC_HEADER "${LLAMA_PUBLIC_HEADERS}")
 
 install(TARGETS llama LIBRARY PUBLIC_HEADER)
+
+if (TARGET llama-common-local)
+    install(TARGETS llama-common-local LIBRARY)
+endif()
 
 if (LLAMA_BUILD_COMMON)
     install(TARGETS llama-common LIBRARY)

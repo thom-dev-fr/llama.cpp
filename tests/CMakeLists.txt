@@ -1,5 +1,11 @@
 llama_add_compile_flags()
 
+if (LLAMA_BUILD_COMMON)
+    set(LLAMA_TEST_COMMON llama-common)
+else()
+    set(LLAMA_TEST_COMMON llama-common-local)
+endif()
+
 function(llama_build source)
     set(TEST_SOURCES ${source} ${ARGN})
 
@@ -10,7 +16,7 @@ function(llama_build source)
     endif()
 
     add_executable(${TEST_TARGET} ${TEST_SOURCES})
-    target_link_libraries(${TEST_TARGET} PRIVATE llama llama-common) # TODO: [TAG_TESTS_LLAMA_LINK]
+    target_link_libraries(${TEST_TARGET} PRIVATE llama ${LLAMA_TEST_COMMON}) # TODO: [TAG_TESTS_LLAMA_LINK]
     if (LLAMA_TESTS_INSTALL)
         install(TARGETS ${TEST_TARGET} RUNTIME)
     endif()
@@ -105,7 +111,7 @@ function(llama_build_and_test source)
     if (LLAMA_TESTS_INSTALL)
         install(TARGETS ${TEST_TARGET} RUNTIME)
     endif()
-    target_link_libraries(${TEST_TARGET} PRIVATE llama-common)
+    target_link_libraries(${TEST_TARGET} PRIVATE ${LLAMA_TEST_COMMON})
 
     add_test(
         NAME ${TEST_TARGET}
@@ -115,6 +121,36 @@ function(llama_build_and_test source)
 
     set_property(TEST ${TEST_TARGET} PROPERTY LABELS ${LLAMA_TEST_LABEL})
 endfunction()
+
+if (NOT LLAMA_BUILD_COMMON)
+    # only the tests that do not need argv parsing, downloads, console or subprocess
+    if (NOT WIN32 OR NOT BUILD_SHARED_LIBS)
+        llama_build_and_test(test-sampling.cpp)
+        llama_build_and_test(test-reasoning-budget.cpp)
+        llama_build_and_test(test-grammar-parser.cpp)
+        llama_build_and_test(test-grammar-integration.cpp)
+        llama_build_and_test(test-llama-grammar.cpp)
+        llama_build_and_test(test-json-schema-to-grammar.cpp)
+    endif()
+    llama_build_and_test(test-chat-peg-parser.cpp peg-parser/simple-tokenize.cpp)
+    llama_build_and_test(test-jinja.cpp)
+    llama_build_and_test(test-json-schema.cpp)
+    llama_build_and_test(test-chat-auto-parser.cpp WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
+    llama_build_and_test(test-chat-template.cpp)
+    llama_build_and_test(test-log.cpp)
+    llama_build_and_test(
+        test-peg-parser.cpp
+        peg-parser/simple-tokenize.cpp
+        peg-parser/test-basic.cpp
+        peg-parser/test-gbnf-generation.cpp
+        peg-parser/test-json-parser.cpp
+        peg-parser/test-json-serialization.cpp
+        peg-parser/test-python-dict-parser.cpp
+        peg-parser/test-unicode.cpp
+        peg-parser/tests.h
+    )
+    return()
+endif()
 
 # build test-tokenizer-0 target once and add many tests
 llama_build(test-tokenizer-0.cpp)
