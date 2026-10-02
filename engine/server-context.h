@@ -13,6 +13,7 @@
 
 struct server_context_impl; // private implementation
 struct server_decision_context;
+struct server_decision_question;
 
 constexpr int HTTP_POLLING_SECONDS = 1;
 
@@ -119,10 +120,35 @@ struct server_context {
     server_queue    & get_queue_tasks();
     server_response & get_queue_results();
     const llama_vocab * get_vocab() const;
-    llama_model * get_model() const;
-    mtmd_context * get_mctx() const;
-    const mtmd_helper_init_opt & get_init_opt() const;
     const server_decision_context & get_decision() const;
     server_metrics get_metrics() const;
     void reset_metrics_bucket();
+
+    // operation preparation, shared by all consumers
+    // params are the caller params (not the ones modified by load_model), task ids come from rd
+    // invalid input throws, the caller formats the error
+    std::vector<server_task> prepare_completion(
+            server_response_reader & rd,
+            const common_params & params,
+            server_task_type type,
+            const json & data,
+            const std::vector<raw_buffer> & files,
+            task_response_type res_type);
+    json format_infill_prompt(const common_params & params, const json & data);
+    std::vector<server_tokens> tokenize_embeddings(const json & prompt);
+    std::vector<server_task> prepare_embeddings(
+            server_response_reader & rd,
+            std::vector<server_tokens> && tokenized_prompts,
+            task_response_type res_type,
+            int embd_normalize);
+    std::vector<server_task> prepare_rerank(server_response_reader & rd, const json & query, const std::vector<std::string> & documents);
+    std::vector<server_task> prepare_decision(
+            server_response_reader & rd,
+            const common_params & params,
+            const std::vector<server_decision_question> & questions,
+            const json & state,
+            const std::vector<raw_buffer> & files);
+    size_t count_tokens(const json & prompt, const std::vector<raw_buffer> & files);
+    json tokenize(const json & body);
+    json detokenize(const json & body);
 };

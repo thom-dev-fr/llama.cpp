@@ -54,10 +54,7 @@ std::unique_ptr<server_res_generator> server_routes::handle_completions_impl(
             const json & data,
             const std::vector<raw_buffer> & files,
             task_response_type res_type) {
-    GGML_ASSERT(type == SERVER_TASK_TYPE_COMPLETION || type == SERVER_TASK_TYPE_INFILL);
-
     auto res = create_response();
-    auto completion_id = gen_chatcmplid();
     auto & rd = res->rd;
     auto & params = this->params;
 
@@ -66,71 +63,9 @@ std::unique_ptr<server_res_generator> server_routes::handle_completions_impl(
     int32_t sse_ping_interval = params.sse_ping_interval;
 
     try {
-        std::vector<server_task> tasks;
-
-        const auto & prompt = data.at("prompt");
-        // TODO: this log can become very long, put it behind a flag or think about a more compact format
-        //SRV_DBG("Prompt: %s\n", prompt.is_string() ? prompt.get<std::string>().c_str() : prompt.dump(2).c_str());
-
-        if (!params.path_prompts_log_dir.empty()) {
-            const auto file_path = std::filesystem::path(params.path_prompts_log_dir) / string_format("%012" PRId64 ".txt", ggml_time_ms());
-            std::ofstream f(file_path);
-            if (f) {
-                f << (prompt.is_string() ? prompt.get<std::string>().c_str() : prompt.dump(2).c_str());
-            } else {
-                SRV_ERR("failed to create %s\n", file_path.string().c_str());
-            }
-        }
-
-        // process prompt
-        std::vector<server_tokens> inputs;
-
-        if (res_type != TASK_RESPONSE_TYPE_NONE && ctx_server.get_mctx() != nullptr) {
-            // This is the case used by OAI compatible chat path with MTMD. TODO It can be moved to the path below.
-            inputs.push_back(process_mtmd_prompt(ctx_server.get_mctx(), prompt.get<std::string>(), files, ctx_server.get_init_opt()));
-        } else {
-            // Everything else, including multimodal completions.
-            inputs = tokenize_input_prompts(ctx_server.get_vocab(), ctx_server.get_mctx(), prompt, true, true, ctx_server.get_init_opt());
-        }
-
-        // tasks.reserve(inputs.size()); // TODO: this is inaccurate due to child tasks
-
-        // message delimiters for checkpointing
-        json delims = json_value(data, "message_delimiters", json::array());
-        auto delimiters = common_chat_msg_delimiters_parse(delims);
-        delimiters.tokenize(ctx_server.get_vocab());
-
-        for (size_t i = 0; i < inputs.size(); i++) {
-            server_task task = server_task(type);
-
-            task.id = rd.get_new_id();
-
-            task.tokens = std::move(inputs[i]);
-            task.params = server_schema::eval_llama_cmpl_schema(
-                    ctx_server.get_vocab(),
-                    params,
-                    meta->logit_bias_eog,
-                    data);
-
-            task.params.message_spans = task.tokens.find_message_spans(delimiters);
-
-            task.id_slot = json_value(data, "id_slot", -1);
-            sse_ping_interval = task.params.sse_ping_interval;
-
-            // OAI-compat
-            task.params.res_type          = res_type;
-            task.params.oaicompat_cmpl_id = completion_id;
-            task.params.oaicompat_model   = meta->model_name;
-
-            // prepare child tasks
-            if (task.params.n_cmpl > 1) {
-                int n_children = task.params.n_cmpl - 1;
-                for (int j = 0; j < n_children; j++) {
-                    task.add_child(task.id, rd.get_new_id());
-                }
-            }
-
-            tasks.push_back(std::move(task));
+        std::vector<server_task> tasks = ctx_server.prepare_completion(rd, params, type, data, files, res_type);
+        if (!tasks.empty()) {
+            sse_ping_interval = tasks.back().params.sse_ping_interval;
         }
 
         rd.post_tasks(std::move(tasks));
@@ -678,20 +613,7 @@ void server_routes::init_routes() {
         }
         data["input_extra"] = input_extra; // default to empty array if it's not exist
 
-        std::string prompt = json_value(data, "prompt", std::string());
-        std::vector<server_tokens> tokenized_prompts = tokenize_input_prompts(ctx_server.get_vocab(), ctx_server.get_mctx(), prompt, false, true, ctx_server.get_init_opt());
-        SRV_DBG("creating infill tasks, n_prompts = %d\n", (int) tokenized_prompts.size());
-        data["prompt"] = format_prompt_infill(
-            ctx_server.get_vocab(),
-            data.at("input_prefix"),
-            data.at("input_suffix"),
-            data.at("input_extra"),
-            params.n_batch,
-            params.n_predict,
-            meta->slot_n_ctx,
-            params.spm_infill,
-            tokenized_prompts[0].get_tokens() // TODO: this could maybe be multimodal.
-        );
+        data["prompt"] = ctx_server.format_infill_prompt(params, data);
 
         std::vector<raw_buffer> files; // dummy
         return handle_completions_impl(
@@ -883,55 +805,14 @@ void server_routes::init_routes() {
     this->post_tokenize = [this](const server_http_req & req) {
         auto res = create_response();
         const json body = json::parse(req.body);
-        json tokens_response = json::array();
-        if (body.count("content") != 0) {
-            const bool add_special = json_value(body, "add_special", false);
-            const bool parse_special = json_value(body, "parse_special", true);
-            const bool with_pieces = json_value(body, "with_pieces", false);
-
-            llama_tokens tokens = tokenize_mixed(ctx_server.get_vocab(), body.at("content"), add_special, parse_special);
-
-            if (with_pieces) {
-                for (const auto& token : tokens) {
-                    std::string piece = common_token_to_piece(ctx_server.get_vocab(), token);
-                    json piece_json;
-
-                    // Check if the piece is valid UTF-8
-                    if (is_valid_utf8(piece)) {
-                        piece_json = piece;
-                    } else {
-                        // If not valid UTF-8, store as array of byte values
-                        piece_json = json::array();
-                        for (unsigned char c : piece) {
-                            piece_json.push_back(static_cast<int>(c));
-                        }
-                    }
-
-                    tokens_response.push_back({
-                        {"id", token},
-                        {"piece", piece_json}
-                    });
-                }
-            } else {
-                tokens_response = tokens;
-            }
-        }
-
-        res->ok(json{{"tokens", std::move(tokens_response)}});
+        res->ok(ctx_server.tokenize(body));
         return res;
     };
 
     this->post_detokenize = [this](const server_http_req & req) {
         auto res = create_response();
         const json body = json::parse(req.body);
-
-        std::string content;
-        if (body.count("tokens") != 0) {
-            const llama_tokens tokens = body.at("tokens").get<llama_tokens>();
-            content = tokens_to_str(ctx_server.get_vocab(), tokens);
-        }
-
-        res->ok(json{{"content", std::move(content)}});
+        res->ok(ctx_server.detokenize(body));
         return res;
     };
 
@@ -981,18 +862,7 @@ void server_routes::init_routes() {
         // create and queue the task
         json responses = json::array();
         auto & rd = res->rd;
-        {
-            std::vector<server_task> tasks;
-            tasks.reserve(documents.size());
-            for (size_t i = 0; i < documents.size(); i++) {
-                auto tmp = format_prompt_rerank(ctx_server.get_model(), ctx_server.get_vocab(), ctx_server.get_mctx(), query, documents[i], ctx_server.get_init_opt());
-                server_task task = server_task(SERVER_TASK_TYPE_RERANK);
-                task.id     = rd.get_new_id();
-                task.tokens = std::move(tmp);
-                tasks.push_back(std::move(task));
-            }
-            rd.post_tasks(std::move(tasks));
-        }
+        rd.post_tasks(ctx_server.prepare_rerank(rd, query, documents));
 
         // wait for the results
         auto all_results = rd.wait_for_all(req.should_stop);
@@ -1041,30 +911,8 @@ void server_routes::init_routes() {
             return res;
         }
 
-        // one task per variant of each question, or one task for all the questions
         auto & rd = res->rd;
-        {
-            std::vector<server_task> tasks;
-            if (decision.is_joint()) {
-                server_task task = server_task(SERVER_TASK_TYPE_DECISION);
-                task.id = rd.get_new_id();
-                decision.fill_task_joint(state, questions, files, ctx_server.get_mctx(), ctx_server.get_init_opt(), task);
-                tasks.push_back(std::move(task));
-            } else {
-                for (const auto & question : questions) {
-                    for (size_t variant = 0; variant < decision.n_variants(question); variant++) {
-                        server_task task = server_task(SERVER_TASK_TYPE_DECISION);
-                        task.id = rd.get_new_id();
-                        decision.fill_task(state, questions, question, variant, files, ctx_server.get_mctx(), ctx_server.get_init_opt(), task);
-                        tasks.push_back(std::move(task));
-                    }
-                }
-            }
-            if (decision.can_share_prompt()) {
-                tasks = server_decision_group_tasks(std::move(tasks), params.n_parallel);
-            }
-            rd.post_tasks(std::move(tasks));
-        }
+        rd.post_tasks(ctx_server.prepare_decision(rd, params, questions, state, files));
 
         auto all_results = rd.wait_for_all(req.should_stop);
 
@@ -1309,22 +1157,7 @@ std::unique_ptr<server_res_generator> server_routes::handle_embeddings_impl(cons
         }
     }
 
-    // same shapes as tokenize_input_prompts(), plus OAI content: { "content": [ { "type": "text"|"image_url"|"input_audio"|"input_video", ... } ] }
-    auto tokenize_entry = [&](const json & p) {
-        if (p.is_object() && p.contains("content")) {
-            return tokenize_oai_content_array(ctx_server.get_vocab(), ctx_server.get_mctx(), meta->chat_params, p.at("content"), true, true, ctx_server.get_init_opt());
-        }
-        return tokenize_input_subprompt(ctx_server.get_vocab(), ctx_server.get_mctx(), p, true, true, ctx_server.get_init_opt());
-    };
-
-    std::vector<server_tokens> tokenized_prompts;
-    if (prompt.is_array() && !json_is_array_and_contains_numbers(prompt)) {
-        for (const auto & p : prompt) {
-            tokenized_prompts.push_back(tokenize_entry(p));
-        }
-    } else {
-        tokenized_prompts.push_back(tokenize_entry(prompt));
-    }
+    std::vector<server_tokens> tokenized_prompts = ctx_server.tokenize_embeddings(prompt);
     if (tokenized_prompts.empty()) {
         res->error(format_error_response("\"input\" must not be empty", ERROR_TYPE_INVALID_REQUEST));
         return res;
@@ -1349,22 +1182,7 @@ std::unique_ptr<server_res_generator> server_routes::handle_embeddings_impl(cons
     // create and queue the task
     json responses = json::array();
     auto & rd = res->rd;
-    {
-        std::vector<server_task> tasks;
-        for (size_t i = 0; i < tokenized_prompts.size(); i++) {
-            server_task task = server_task(SERVER_TASK_TYPE_EMBEDDING);
-
-            task.id     = rd.get_new_id();
-            task.tokens = std::move(tokenized_prompts[i]);
-
-            // OAI-compat
-            task.params.res_type = res_type;
-            task.params.embd_normalize = embd_normalize;
-
-            tasks.push_back(std::move(task));
-        }
-        rd.post_tasks(std::move(tasks));
-    }
+    rd.post_tasks(ctx_server.prepare_embeddings(rd, std::move(tokenized_prompts), res_type, embd_normalize));
 
     // wait for the results
     auto all_results = rd.wait_for_all(req.should_stop);
@@ -1422,16 +1240,7 @@ std::unique_ptr<server_res_generator> server_routes::handle_count_tokens(const s
     json prompt = body_parsed.at("prompt");
     // SRV_DBG("prompt = %s\n", prompt.dump().c_str());
 
-    // TODO @ngxson : refactor this code block, move this to server-common and reuse it in other places
-    size_t n_tokens;
-    if (ctx_server.get_mctx() != nullptr) {
-        if (!prompt.is_string()) {
-            throw std::runtime_error("for mtmd, input prompt must be a string.");
-        }
-        n_tokens = process_mtmd_prompt(ctx_server.get_mctx(), prompt.get<std::string>(), files, ctx_server.get_init_opt(), true).size();
-    } else {
-        n_tokens = tokenize_mixed(ctx_server.get_vocab(), prompt, true, true).size();
-    }
+    size_t n_tokens = ctx_server.count_tokens(prompt, files);
 
     json response = {{"input_tokens", static_cast<int64_t>(n_tokens)}};
     if (is_oai) {
