@@ -175,6 +175,9 @@ if (TARGET llama-engine)
         add_test(NAME test-engine-vision COMMAND test-engine-fixtures vision "${LLAMA_ENGINE_TEST_VISION_MODEL}"
             "${LLAMA_ENGINE_TEST_MMPROJ}" "${PROJECT_SOURCE_DIR}/tools/mtmd/tests/test-1-positive.png")
         set_tests_properties(test-engine-vision PROPERTIES TIMEOUT 120)
+        add_test(NAME test-engine-vision-embeddings COMMAND test-engine-fixtures vision-embeddings "${LLAMA_ENGINE_TEST_VISION_MODEL}"
+            "${LLAMA_ENGINE_TEST_MMPROJ}" "${PROJECT_SOURCE_DIR}/tools/mtmd/tests/test-1-positive.png")
+        set_tests_properties(test-engine-vision-embeddings PROPERTIES TIMEOUT 120)
     endif()
     # representative chat model on the configured backend (tools, structured output,
     # reasoning, media, multi-model); arguments are documented in the source

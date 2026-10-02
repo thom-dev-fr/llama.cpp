@@ -1202,13 +1202,13 @@ static void oaicompat_content_load_media(
     }
 }
 
-server_tokens tokenize_oai_content_array(const llama_vocab * vocab, mtmd_context * mctx, const server_chat_params & opt, json content, bool add_special, bool parse_special, const mtmd_helper_init_opt & init_opt) {
+server_tokens tokenize_oai_content_array(const llama_vocab * vocab, mtmd_context * mctx, const server_chat_params & opt, json content, bool add_special, bool parse_special, const mtmd_helper_init_opt & init_opt, const std::map<std::string, raw_buffer> & attachments) {
     if (!content.is_array()) {
         throw std::invalid_argument("\"content\" must be an array");
     }
 
     std::vector<raw_buffer> files;
-    oaicompat_content_load_media(content, opt, files);
+    oaicompat_content_load_media(content, opt, files, attachments);
 
     std::string prompt;
     for (const auto & p : content) {

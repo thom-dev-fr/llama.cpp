@@ -346,7 +346,8 @@ server_tokens tokenize_oai_content_array(
     json content,
     bool add_special,
     bool parse_special,
-    const mtmd_helper_init_opt & init_opt);
+    const mtmd_helper_init_opt & init_opt,
+    const std::map<std::string, raw_buffer> & attachments = {});
 
 // TODO: move it to server-task.cpp
 json format_embeddings_response_oaicompat(

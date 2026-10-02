@@ -114,7 +114,8 @@ comme un chargement), comme un `llama-server -hf`.
 
 Les pièces jointes sont des valeurs possédées (`name`, `bytes`), sans type HTTP.
 La completion native conserve son schéma `multimodal_data`. Pour chat, Responses,
-Messages, application de template et comptage, les URLs de médias peuvent être
+Messages, application de template, comptage et embeddings (entrées
+`{"content": [...]}`), les URLs de médias peuvent être
 `attachment:nom` : le moteur résout ce nom dans les buffers possédés, sans
 encodage base64. Les capacités image/audio/vidéo et le décodage des formats sont
 validés par les mêmes helpers que les médias JSON historiques. Les noms doivent

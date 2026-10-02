@@ -174,7 +174,8 @@ prepared_operation prepare_operation(server_context & context, operation op, jso
     }
     if (!attachments.empty() && op != operation::transcription && op != operation::chat &&
         op != operation::responses && op != operation::messages && op != operation::chat_tokens &&
-        op != operation::response_tokens && op != operation::message_tokens && op != operation::apply_template) {
+        op != operation::response_tokens && op != operation::message_tokens && op != operation::apply_template &&
+        op != operation::embeddings && op != operation::embeddings_openai) {
         throw std::invalid_argument("Named attachments are not supported by this operation");
     }
     switch (op) {
@@ -304,7 +305,7 @@ prepared_operation prepare_operation(server_context & context, operation op, jso
             // same shapes as tokenize_input_prompts(), plus OAI content: { "content": [ { "type": "text"|"image_url"|"input_audio"|"input_video", ... } ] }
             auto tokenize_entry = [&](const json & p) {
                 if (p.is_object() && p.contains("content")) {
-                    return tokenize_oai_content_array(context.vocabulary(), context.multimodal(), meta.chat_params, p.at("content"), true, true, context.media_options());
+                    return tokenize_oai_content_array(context.vocabulary(), context.multimodal(), meta.chat_params, p.at("content"), true, true, context.media_options(), named_files);
                 }
                 return tokenize_input_subprompt(context.vocabulary(), context.multimodal(), p, true, true, context.media_options());
             };
