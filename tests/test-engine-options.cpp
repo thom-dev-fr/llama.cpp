@@ -218,8 +218,17 @@ static void local_resolution(const char * model) {
     fs::remove_all(root);
 }
 
+// file names are UTF-8 on every platform, as the paths in config
+static void utf8_ids() {
+    config settings;
+    settings.model_path = "/models/mod\xc3\xa8le-\xc3\xbc.gguf";
+    assert(model_id(settings) == "mod\xc3\xa8le-\xc3\xbc.gguf");
+    assert(model_id(config::from_options({{"model", "/models/\xe6\xa8\xa1\xe5\x9e\x8b.gguf"}})) == "\xe6\xa8\xa1\xe5\x9e\x8b.gguf");
+}
+
 int main(int argc, char ** argv) {
     audit_registry();
+    utf8_ids();
     rejections();
     typed_defaults();
 #ifdef LLAMA_TEST_ARGV_PARITY

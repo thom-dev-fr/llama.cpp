@@ -308,11 +308,11 @@ option_scope find_option_scope(const std::string & name) {
 
 std::string model_id(const config & settings) {
     if (!settings.model_path.empty()) {
-        return std::filesystem::path(settings.model_path).filename().string();
+        return fs_path_to_utf8(std::filesystem::u8path(settings.model_path).filename());
     }
     const common_params params = detail::build_params(settings);
     if (!params.model.path.empty()) {
-        return std::filesystem::path(params.model.path).filename().string();
+        return fs_path_to_utf8(std::filesystem::u8path(params.model.path).filename());
     }
     if (!params.model.get_name().empty()) {
         return params.model.get_name(); // repository
