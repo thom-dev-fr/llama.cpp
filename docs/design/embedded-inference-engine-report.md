@@ -2,6 +2,8 @@
 
 Qualification du 30 septembre 2026 sur `b536fde9a` + correctifs P9 (voir « Correctifs apportés par la qualification »). Journal détaillé, commandes P0–P8 et historique : [progress](embedded-inference-engine-progress.md). Interface : [guide API](embedded-inference-engine-api.md). Contrat : [design](embedded-inference-engine.md).
 
+Les décomptes ci-dessous datent de cette qualification ; ceux de la branche rebasée sur master le 2 octobre 2026 sont dans « Rebase sur master ».
+
 Légende : **PASS** exécuté et vérifié ; **FAIL** exécuté et en échec ; **BLOCKED** prérequis indisponible ; **OUVERT** non implémenté ou arbitrage requis. Un test sauté n’est jamais compté PASS.
 
 ## Verdict
@@ -10,6 +12,23 @@ Les neuf critères de fin du design sont satisfaits et vérifiés sur macOS arm6
 
 1. **Vidéo et WebP sans sous-processus** (profil local) : aucun décodeur embarqué n’existe ; `MTMD_VIDEO=OFF` retire aussi le repli WebP. **Arbitrage requis** (décodeur embarqué ou contrat d’entrée de frames prétraitées). Aucune parité n’est revendiquée.
 2. **Qualifications non exécutables sur cet hôte** : Linux/Windows, LeakSanitizer (non supporté par ASan sur macOS arm64), chemin vidéo desktop (ffmpeg absent), exécution iOS sur appareil. Les tests HTTP `slow` ont été exécutés ensuite (section « Tests lents contre upstream »).
+
+## Rebase sur master (2 octobre 2026)
+
+Branche rebasée sur `master` `f1cee9941` (116 commits upstream). Les changements upstream portant sur du code déplacé par la branche ont été reportés à leur nouvel emplacement : API batch (`common_batch`, `llama_process`), limite `image_max_tokens` des projecteurs non causaux et embeddings sans cache de prompt (`engine-context.cpp`), entrées typées des embeddings (#29556, `engine-operations.cpp`), chemins `fs::path`/UTF-8 et `fs_write_atomic` (`hf-cache-local.cpp`, `download-local.cpp`, `arg-parse.cpp`, `preset.cpp` ; `common_params_config_files()` renvoie des `std::filesystem::path`). Contrôle : chaque ligne ajoutée par master depuis la base commune est présente dans l’arbre, hors adaptations volontaires.
+
+| Contrôle (Release, Metal, partagé) | Avant rebase | Après rebase |
+| --- | --- | --- |
+| Build complet | 0 warning | 0 warning |
+| CTest | 77/80 | **76/79** ; mêmes trois échecs connus (`test-jinja-py` environnement, `test-engine-operations`, `test-engine-acquisition`). Upstream a fusionné les trois variantes de `test-recurrent-state-rollback` (#29426) ; `test-engine-vision` et `test-engine-vision-embeddings` comptés avec tinygemma3 |
+| HTTP `not slow` | 382 PASS, 6 SKIP, 11 erreurs de téléchargement des fixtures (SSL, environnement) | **407 PASS, 6 SKIP** |
+
+Changements de comportement et ajouts :
+
+- **JSON invalide → 400** : upstream (#29060) renvoie 400 pour `common_json_error`. Le moteur classe désormais ces erreurs en `invalid_request` au lieu de `preparation_failed` (500) ; `test_sleep` attend 400 pour un corps malformé, toujours après le réveil et les erreurs de capacité.
+- **Embeddings multimodaux sans base64** : `embeddings` et `embeddings_openai` acceptent les pièces jointes nommées ; `attachment:nom` est résolu dans les entrées `{"content": [...]}` (`test-engine-vision-embeddings` : même vecteur qu’avec l’image en base64).
+- **`model_id` en UTF-8** : le nom de fichier est converti par `fs_path_to_utf8`, comme les chemins upstream (`test-engine-options`).
+- **`test-engine-sources` déterministe** : il échouait toujours lancé seul (génération de `beta` terminée par le contexte plein avant l’assertion, aussi sur la branche avant rebase) et ne passait que sous charge. Le preset `*` active `context-shift` : le flux de `beta` ne se termine plus que par son déchargement. 8/8 seul, et dans la suite complète.
 
 ## Critères de fin du drop
 

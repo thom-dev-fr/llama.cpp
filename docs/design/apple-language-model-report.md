@@ -2,6 +2,8 @@
 
 Rapport prévu par le [plan](apple-language-model-plan.md). Il distingue ce qui est exécuté, compilé seulement, ou non encore traité. P0 à P7 sont achevés. Les capacités Foundation Models sont validées avec Qwen3.5-2B sur le simulateur iOS 27 (CPU) et sur un appareil, un iPad Pro M1 sous iPadOS 27.2 (Metal), où sont aussi faits le téléchargement en arrière-plan et les mesures. **La livraison est partiellement qualifiée** : macOS 27 est compilé seulement (Mac sous 26.7), et l’iPhone, hors ligne pendant P6 et P7, est remplacé par l’iPad (même famille iOS, puce M1, 8 Go).
 
+Les décomptes CTest et HTTP ci-dessous précèdent le rebase sur master du 2 octobre 2026 ; les décomptes actuels sont dans la section « Rebase sur master » du [rapport du moteur](embedded-inference-engine-report.md). Les tests Swift et iOS n’ont pas été réexécutés après ce rebase.
+
 ## Suivi P0–P7
 
 | Phase | État | Preuve | Blocage / remarque |
