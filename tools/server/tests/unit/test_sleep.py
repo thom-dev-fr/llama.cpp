@@ -167,9 +167,10 @@ def test_server_sleep_token_counting_wake():
     assert is_sleeping(server) == False
 
 
+# malformed JSON is an invalid request (400) since upstream #29060
 @pytest.mark.parametrize("path,status", [
-    ("/completion", 500),
-    ("/v1/chat/completions", 500),
+    ("/completion", 400),
+    ("/v1/chat/completions", 400),
     ("/embeddings", 501),
 ])
 def test_malformed_request_preserves_wake_and_capability_priority(path, status):

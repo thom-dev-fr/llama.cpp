@@ -323,6 +323,8 @@ void submit_native(const std::shared_ptr<runtime> & run, const std::shared_ptr<r
         state->finish({event_type::error, nullptr, "capacity_exceeded", error.what()});
     } catch (const std::invalid_argument & error) {
         state->finish({event_type::error, nullptr, "invalid_request", error.what()});
+    } catch (const common_json_error & error) {
+        state->finish({event_type::error, nullptr, "invalid_request", error.what()});
     } catch (const std::exception & error) {
         state->finish({event_type::error, nullptr, "preparation_failed", error.what()});
     }
