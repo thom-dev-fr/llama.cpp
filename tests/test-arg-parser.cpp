@@ -303,6 +303,45 @@ static void test(void) {
     assert(params.lora_adapters[2].path == "file3\"3\".gguf");
     assert(params.lora_adapters[3].path == "file4\".gguf");
 
+    {
+        const std::vector<std::string> dry_defaults = {"\n", ":", "\"", "*"};
+
+        common_params dry_a;
+        argv = {"binary_name", "--dry-sequence-breaker", "a", "--dry-sequence-breaker", "b"};
+        assert(true == common_params_parse(argv.size(), list_str_to_char(argv).data(), dry_a, LLAMA_EXAMPLE_SERVER));
+        assert(dry_a.sampling.dry_sequence_breakers == std::vector<std::string>({"a", "b"}));
+
+        // the first breaker of each params replaces the defaults
+        common_params dry_b;
+        assert(dry_b.sampling.dry_sequence_breakers == dry_defaults);
+        argv = {"binary_name", "--dry-sequence-breaker", "c"};
+        assert(true == common_params_parse(argv.size(), list_str_to_char(argv).data(), dry_b, LLAMA_EXAMPLE_SERVER));
+        assert(dry_b.sampling.dry_sequence_breakers == std::vector<std::string>({"c"}));
+
+        common_params dry_copy = dry_a;
+        argv = {"binary_name", "--dry-sequence-breaker", "d"};
+        assert(true == common_params_parse(argv.size(), list_str_to_char(argv).data(), dry_copy, LLAMA_EXAMPLE_SERVER));
+        assert(dry_copy.sampling.dry_sequence_breakers == std::vector<std::string>({"a", "b", "d"}));
+        assert(dry_a.sampling.dry_sequence_breakers == std::vector<std::string>({"a", "b"}));
+
+        common_params dry_none;
+        argv = {"binary_name", "--dry-sequence-breaker", "none"};
+        assert(true == common_params_parse(argv.size(), list_str_to_char(argv).data(), dry_none, LLAMA_EXAMPLE_SERVER));
+        assert(dry_none.sampling.dry_sequence_breakers.empty());
+        argv = {"binary_name", "--dry-sequence-breaker", "none", "--dry-sequence-breaker", "e"};
+        assert(true == common_params_parse(argv.size(), list_str_to_char(argv).data(), dry_none, LLAMA_EXAMPLE_SERVER));
+        assert(dry_none.sampling.dry_sequence_breakers == std::vector<std::string>({"e"}));
+
+        // a failed parse restores the params, so the next breaker still replaces the defaults
+        common_params dry_failed;
+        argv = {"binary_name", "--dry-sequence-breaker", "f", "-ngl", "hello"};
+        assert(false == common_params_parse(argv.size(), list_str_to_char(argv).data(), dry_failed, LLAMA_EXAMPLE_SERVER));
+        assert(dry_failed.sampling.dry_sequence_breakers == dry_defaults);
+        argv = {"binary_name", "--dry-sequence-breaker", "g"};
+        assert(true == common_params_parse(argv.size(), list_str_to_char(argv).data(), dry_failed, LLAMA_EXAMPLE_SERVER));
+        assert(dry_failed.sampling.dry_sequence_breakers == std::vector<std::string>({"g"}));
+    }
+
 // skip this part on windows, because setenv is not supported
 #ifdef _WIN32
     printf("test-arg-parser: skip on windows build\n");

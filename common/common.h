@@ -259,6 +259,7 @@ struct common_params_sampling {
     uint64_t user_sampling_config = 0; // bitfield to track user-specified samplers
 
     std::vector<std::string> dry_sequence_breakers = {"\n", ":", "\"", "*"};     // default sequence breakers for DRY
+    bool dry_sequence_breakers_set = false; // the first --dry-sequence-breaker replaces the defaults
 
     std::vector<enum common_sampler_type> samplers = {
         COMMON_SAMPLER_TYPE_PENALTIES,
