@@ -128,6 +128,7 @@ option(LLAMA_SANITIZE_UNDEFINED "llama: enable undefined sanitizer" OFF)
 # utils
 option(LLAMA_BUILD_COMMON "llama: build common utils library" ${LLAMA_STANDALONE})
 option(LLAMA_BUILD_COMMON_LOCAL "llama: build only the local common utils library (no network, argv or subprocess)" OFF)
+option(LLAMA_BUILD_SERVER_CORE  "llama: build the private server inference core without HTTP (engine/)" OFF)
 
 # extra artifacts
 option(LLAMA_BUILD_TESTS     "llama: build tests"                                                                ${LLAMA_STANDALONE})
@@ -237,11 +238,11 @@ add_subdirectory(src)
 
 add_subdirectory(vendor)
 
-if (LLAMA_BUILD_COMMON OR LLAMA_BUILD_COMMON_LOCAL)
+if (LLAMA_BUILD_COMMON OR LLAMA_BUILD_COMMON_LOCAL OR LLAMA_BUILD_SERVER_CORE)
     add_subdirectory(common)
 endif()
 
-if (LLAMA_BUILD_COMMON AND LLAMA_BUILD_TOOLS AND LLAMA_BUILD_SERVER AND NOT EMSCRIPTEN)
+if ((LLAMA_BUILD_COMMON AND LLAMA_BUILD_TOOLS AND LLAMA_BUILD_SERVER AND NOT EMSCRIPTEN) OR LLAMA_BUILD_SERVER_CORE)
     add_subdirectory(engine)
 endif()
 
@@ -269,7 +270,7 @@ endif()
 # mtmd is already built by the tools/ subdirectory above; this hook only fires
 # when LLAMA_BUILD_TOOLS is OFF to avoid double-adding the target.
 option(LLAMA_BUILD_MTMD "llama: build tools/mtmd library standalone" OFF)
-if (LLAMA_BUILD_MTMD AND NOT (LLAMA_BUILD_COMMON AND LLAMA_BUILD_TOOLS))
+if ((LLAMA_BUILD_MTMD OR LLAMA_BUILD_SERVER_CORE) AND NOT (LLAMA_BUILD_COMMON AND LLAMA_BUILD_TOOLS))
     add_subdirectory(tools/mtmd)
 endif()
 

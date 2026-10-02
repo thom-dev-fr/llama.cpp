@@ -138,6 +138,11 @@ if (NOT LLAMA_BUILD_COMMON)
     llama_build_and_test(test-chat-auto-parser.cpp WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
     llama_build_and_test(test-chat-template.cpp)
     llama_build_and_test(test-log.cpp)
+    if (TARGET server-core AND (NOT WIN32 OR NOT BUILD_SHARED_LIBS))
+        # server-core without HTTP: its headers and chat conversion are used from a local-only build
+        llama_build_and_test(test-chat.cpp WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
+        target_link_libraries(test-chat PRIVATE server-core)
+    endif()
     llama_build_and_test(
         test-peg-parser.cpp
         peg-parser/simple-tokenize.cpp

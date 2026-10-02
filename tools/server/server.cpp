@@ -9,6 +9,7 @@
 #include "arg.h"
 #include "build-info.h"
 #include "common.h"
+#include "download.h"
 #include "fit.h"
 #include "llama.h"
 #include "log.h"
@@ -50,6 +51,19 @@ void llama_server_terminate() {
     }
 }
 
+
+// remote media of chat requests (http/https URLs)
+static raw_buffer server_fetch_media(const std::string & url) {
+    // TODO @ngxson : maybe make these params configurable
+    common_remote_params params;
+    params.max_size = 1024 * 1024 * 10; // 10MB
+    params.timeout  = 10; // seconds
+    auto res = common_remote_get_content(url, params);
+    if (200 <= res.first && res.first < 300) {
+        return raw_buffer(res.second.begin(), res.second.end());
+    }
+    throw std::runtime_error("Failed to download image");
+}
 
 // wrapper function that handles exceptions and logs errors
 // this is to make sure handler_t never throws exceptions; instead, it returns an error response
@@ -485,6 +499,8 @@ int llama_server(common_params & params, int argc, char ** argv, server_child & 
                 child.notify_to_router(server_state_to_str(state), payload);
             });
         }
+
+        ctx_server.set_media_fetcher(server_fetch_media);
 
         if (!ctx_server.load_model(params)) {
             clean_up();

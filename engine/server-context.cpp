@@ -948,6 +948,7 @@ public:
     server_chat_params chat_params;
 
     server_state_callback_t callback_state = [](server_state, json) -> void {};
+    server_media_fetcher_t fetch_media;
 
     server_context_impl() {
         mtmd_helper_log_set(common_log_default_callback, nullptr);
@@ -1615,7 +1616,8 @@ private:
                 /* reasoning_budget      */ params_base.sampling.reasoning_budget_tokens,
                 /* reasoning_budget_msg  */ params_base.sampling.reasoning_budget_message,
                 /* media_path            */ params_base.media_path,
-                /* force_pure_content    */ params_base.force_pure_content_parser
+                /* force_pure_content    */ params_base.force_pure_content_parser,
+                /* fetch_media           */ fetch_media,
             };
 
             {
@@ -4573,6 +4575,10 @@ server_context_meta server_context::get_meta() const {
 
 void server_context::set_state_callback(server_state_callback_t callback) {
     impl->callback_state = std::move(callback);
+}
+
+void server_context::set_media_fetcher(server_media_fetcher_t fetcher) {
+    impl->fetch_media = std::move(fetcher);
 }
 
 server_queue & server_context::get_queue_tasks() {

@@ -27,4 +27,4 @@ if (BUILD_SHARED_LIBS)
 endif()
 
 target_include_directories(${TARGET} PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
-target_link_libraries(${TARGET} PUBLIC llama-common mtmd ${CMAKE_THREAD_LIBS_INIT})
+target_link_libraries(${TARGET} PUBLIC llama-common-local mtmd ${CMAKE_THREAD_LIBS_INIT})

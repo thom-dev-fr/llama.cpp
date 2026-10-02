@@ -21,7 +21,7 @@ endif()
 
 target_include_directories(${TARGET} PRIVATE ../mtmd)
 target_include_directories(${TARGET} PRIVATE ${PROJECT_SOURCE_DIR})
-target_link_libraries(${TARGET} PUBLIC server-core ${CMAKE_THREAD_LIBS_INIT})
+target_link_libraries(${TARGET} PUBLIC server-core llama-common ${CMAKE_THREAD_LIBS_INIT})
 
 # llama-server-impl: server logic, reusable by app
 

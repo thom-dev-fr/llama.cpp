@@ -100,6 +100,7 @@ struct server_context {
     void start_loop();
 
     // terminate main loop (will unblock start_loop)
+    // note: no effect before start_loop() runs; it does not wake readers, their should_stop does
     void terminate();
 
     // get the underlaying llama_context, can return nullptr if sleeping
@@ -107,6 +108,7 @@ struct server_context {
     llama_context * get_llama_context() const;
 
     // get a new response reader, used by CLI application
+    // note: a reader uses the task queues, destroy it before server_context
     server_response_reader get_response_reader();
 
     // get server metadata (read-only), can only be called after load_model()
@@ -115,6 +117,10 @@ struct server_context {
 
     // note: must be set before load_model() is called
     void set_state_callback(server_state_callback_t callback);
+
+    // used for http(s) media URLs in chat requests, they are rejected if not set
+    // note: must be set before load_model() is called
+    void set_media_fetcher(server_media_fetcher_t fetcher);
 
     // used by the HTTP routes; the pointers change when the model is reloaded after sleep
     server_queue    & get_queue_tasks();
@@ -127,6 +133,7 @@ struct server_context {
     // operation preparation, shared by all consumers
     // params are the caller params (not the ones modified by load_model), task ids come from rd
     // invalid input throws, the caller formats the error
+    // must not be called while sleeping (the model is unloaded), see server_queue::wait_until_no_sleep()
     std::vector<server_task> prepare_completion(
             server_response_reader & rd,
             const common_params & params,

@@ -7713,6 +7713,53 @@ static void test_deepseek_v4_tool_result_ordering() {
     }
 }
 
+// http(s) media URLs go through the fetcher provided by the host, and are rejected without one
+static void test_remote_media_fetcher() {
+    LOG_DBG("%s\n", __func__);
+
+    server_chat_params opt;
+    opt.tmpls       = read_templates("models/templates/Qwen-Qwen3-0.6B.jinja");
+    opt.use_jinja   = true;
+    opt.allow_image = true;
+
+    const std::string url = "http://127.0.0.1:1/image.png";
+    auto make_body = [&]() {
+        return json {
+            {"messages", json::array({json{{"role", "user"}, {"content", json::array({
+                json{{"type", "image_url"}, {"image_url", {{"url", url}}}},
+            })}}})},
+        };
+    };
+
+    {
+        json body = make_body();
+        std::vector<raw_buffer> out_files;
+        bool rejected = false;
+        try {
+            oaicompat_chat_params_parse(body, opt, out_files);
+        } catch (const std::invalid_argument & e) {
+            rejected = std::string(e.what()) == "remote media URLs are not supported";
+        }
+        if (!rejected || !out_files.empty()) {
+            throw std::runtime_error("remote media URL must be rejected without a fetcher");
+        }
+    }
+
+    {
+        std::string fetched;
+        opt.fetch_media = [&](const std::string & u) {
+            fetched = u;
+            return raw_buffer { 1, 2, 3 };
+        };
+        json body = make_body();
+        std::vector<raw_buffer> out_files;
+        oaicompat_chat_params_parse(body, opt, out_files);
+        if (fetched != url || out_files.size() != 1 || out_files[0] != raw_buffer { 1, 2, 3 }) {
+            throw std::runtime_error("remote media URL must be loaded through the fetcher");
+        }
+    }
+}
+
 static void test_reasoning_budget_tokens_per_request() {
     LOG_DBG("%s\n", __func__);
     // Use Qwen3 template which has <think>...</think> reasoning markers.
@@ -7956,6 +8003,7 @@ int main(int argc, char ** argv) {
         test_deepseek_v4_tool_result_ordering();
         test_template_generation_prompt();
         test_reasoning_effort_caps();
+        test_remote_media_fetcher();
         test_reasoning_budget_tokens_per_request();
         test_reasoning_budget_message_per_request();
         test_template_output_peg_parsers(detailed_debug);
