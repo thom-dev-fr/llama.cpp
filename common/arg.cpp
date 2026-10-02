@@ -2172,11 +2172,9 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
                     return a + ", '" + formatted_b + "'";
                 }).c_str()),
         [](common_params & params, const std::string & value) {
-            static bool defaults_cleared = false;
-
-            if (!defaults_cleared) {
+            if (!params.sampling.dry_sequence_breakers_set) {
                 params.sampling.dry_sequence_breakers.clear();
-                defaults_cleared = true;
+                params.sampling.dry_sequence_breakers_set = true;
             }
 
             if (value == "none") {
