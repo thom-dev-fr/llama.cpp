@@ -1,5 +1,7 @@
 #pragma once
 
+#include "server-attachment.h"
+
 #include <atomic>
 #include <functional>
 #include <map>
@@ -38,14 +40,6 @@ struct server_http_res {
 // unique pointer, used by set_chunked_content_provider
 // httplib requires the stream provider to be stored in heap
 using server_http_res_ptr = std::unique_ptr<server_http_res>;
-using raw_buffer = std::vector<uint8_t>;
-
-struct uploaded_file {
-    raw_buffer data;
-    std::string filename;
-    std::string content_type;
-};
-
 struct server_http_req {
     std::map<std::string, std::string> params; // path_params + query_params
     std::map<std::string, std::string> headers; // used by MCP proxy

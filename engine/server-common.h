@@ -6,6 +6,7 @@
 #include "chat.h"
 #include "mtmd.h"
 #include "mtmd-helper.h"
+#include "server-attachment.h"
 #include "subproc.h"
 
 #include "json.h"
@@ -37,7 +38,6 @@ using json = common_json;
 #define SRV_ERR(fmt, ...) LOG_ERR("srv  %12.*s: " fmt, 12, __func__, __VA_ARGS__)
 #define SRV_CNT(fmt, ...) LOG_CNT(""              fmt,               __VA_ARGS__)
 
-using raw_buffer = std::vector<uint8_t>;
 
 template <typename T>
 static T json_value(const json & body, const std::string & key, const T & default_value) {

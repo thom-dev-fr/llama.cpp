@@ -3,8 +3,8 @@
 #pragma once
 
 #include "chat.h"
+#include "server-attachment.h"
 #include "server-common.h"
-#include "server-http.h"
 
 #include "json.h"
 

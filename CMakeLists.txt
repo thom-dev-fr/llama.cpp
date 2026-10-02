@@ -241,6 +241,10 @@ if (LLAMA_BUILD_COMMON OR LLAMA_BUILD_COMMON_LOCAL)
     add_subdirectory(common)
 endif()
 
+if (LLAMA_BUILD_COMMON AND LLAMA_BUILD_TOOLS AND LLAMA_BUILD_SERVER AND NOT EMSCRIPTEN)
+    add_subdirectory(engine)
+endif()
+
 if ((LLAMA_BUILD_COMMON OR LLAMA_BUILD_COMMON_LOCAL) AND LLAMA_BUILD_TESTS AND NOT CMAKE_JS_VERSION)
     include(CTest)
     add_subdirectory(tests)
