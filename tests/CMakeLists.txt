@@ -142,6 +142,9 @@ if (NOT LLAMA_BUILD_COMMON)
         # server-core without HTTP: its headers and chat conversion are used from a local-only build
         llama_build_and_test(test-chat.cpp WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
         target_link_libraries(test-chat PRIVATE server-core)
+        llama_build(test-server-core.cpp)
+        target_link_libraries(test-server-core PRIVATE server-core)
+        llama_test(test-server-core NAME test-server-core-load ARGS load)
     endif()
     llama_build_and_test(
         test-peg-parser.cpp
@@ -310,6 +313,15 @@ set_tests_properties(test-download-model PROPERTIES FIXTURES_SETUP test-download
 
 llama_build_and_test(test-thread-safety.cpp ARGS -m "${MODEL_DEST}" -ngl 99 -p "The meaning of life is" -n 128 -c 256 -ub 32 -np 4 -t 2)
 set_tests_properties(test-thread-safety PROPERTIES FIXTURES_REQUIRED test-download-model)
+
+if (TARGET server-core AND (NOT WIN32 OR NOT BUILD_SHARED_LIBS))
+    # the other cases of test-server-core need larger models, see examples/engine-simple/README.md
+    llama_build(test-server-core.cpp)
+    target_link_libraries(test-server-core PRIVATE server-core)
+    llama_test(test-server-core NAME test-server-core-load ARGS load)
+    llama_test(test-server-core NAME test-server-core-lifecycle LABEL "model" ARGS lifecycle -m "${MODEL_DEST}")
+    set_tests_properties(test-server-core-lifecycle PROPERTIES FIXTURES_REQUIRED test-download-model)
+endif()
 
 llama_build_and_test(test-arg-parser.cpp)
 llama_build_and_test(test-model-resolution.cpp)

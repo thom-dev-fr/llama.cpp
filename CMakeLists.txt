@@ -254,6 +254,8 @@ endif()
 if (LLAMA_BUILD_COMMON AND LLAMA_BUILD_EXAMPLES)
     add_subdirectory(examples)
     add_subdirectory(pocs)
+elseif (LLAMA_BUILD_SERVER_CORE AND LLAMA_BUILD_EXAMPLES)
+    add_subdirectory(examples)
 endif()
 
 if (LLAMA_BUILD_COMMON AND LLAMA_BUILD_TOOLS)

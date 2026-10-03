@@ -12,6 +12,12 @@ llama_add_compile_flags()
 
 # examples
 
+if (NOT LLAMA_BUILD_COMMON)
+    # only the examples that do not need argv parsing, downloads or subprocess
+    add_subdirectory(engine-simple)
+    return()
+endif()
+
 if (EMSCRIPTEN)
 else()
     add_subdirectory(batched)
@@ -34,6 +40,9 @@ else()
     add_subdirectory(gen-docs)
     add_subdirectory(training)
     add_subdirectory(diffusion)
+    if (TARGET server-core)
+        add_subdirectory(engine-simple)
+    endif()
     if (NOT GGML_BACKEND_DL)
         add_subdirectory(convert-llama2c-to-ggml)
         # these examples use the backends directly and cannot be built with dynamic loading
