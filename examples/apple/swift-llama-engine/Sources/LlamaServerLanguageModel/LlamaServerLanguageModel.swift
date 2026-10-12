@@ -19,7 +19,7 @@ public import LlamaOpenAICompatible
 /// ```swift
 /// let model = LlamaServerLanguageModel(
 ///     name: "Qwen3-4B-Instruct",
-///     url: URL(string: "http://localhost:8080")!,
+///     url: URL(string: "http://localhost:9931")!,
 ///     additionalHeaders: [
 ///         "Authorization": "Bearer token"
 ///     ],
