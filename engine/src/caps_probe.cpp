@@ -2,6 +2,7 @@
 
 #include "ggml.h"
 #include "gguf.h"
+#include "llama.h"
 
 #include "chat.h"
 #include "log.h"
@@ -144,56 +145,6 @@ static bool gguf_get_bool_by_suffix(const gguf_context * ctx, const char * suffi
         }
     }
     return false;
-}
-
-// Format a `general.file_type` enum value as a quantization label, mirroring
-// upstream's static llama_model_ftype_name() in src/llama-model-loader.cpp.
-// Inlined here because the upstream function is not exported.
-static const char * ftype_label(uint32_t ftype) {
-    // The "guessed" bit (1 << 31 in some codebases, but actually just an
-    // additive flag in upstream; we mask it conservatively).
-    constexpr uint32_t GUESSED = 1024; // LLAMA_FTYPE_GUESSED in llama.h
-    const uint32_t f   = ftype & ~GUESSED;
-    const char * name  = nullptr;
-    switch (f) {
-        case 0:  name = "all F32";                       break;
-        case 1:  name = "F16";                           break;
-        case 2:  name = "Q4_0";                          break;
-        case 3:  name = "Q4_1";                          break;
-        case 7:  name = "Q8_0";                          break;
-        case 8:  name = "Q5_0";                          break;
-        case 9:  name = "Q5_1";                          break;
-        case 10: name = "Q2_K - Medium";                 break;
-        case 11: name = "Q3_K - Small";                  break;
-        case 12: name = "Q3_K - Medium";                 break;
-        case 13: name = "Q3_K - Large";                  break;
-        case 14: name = "Q4_K - Small";                  break;
-        case 15: name = "Q4_K - Medium";                 break;
-        case 16: name = "Q5_K - Small";                  break;
-        case 17: name = "Q5_K - Medium";                 break;
-        case 18: name = "Q6_K";                          break;
-        case 19: name = "IQ2_XXS - 2.0625 bpw";          break;
-        case 20: name = "IQ2_XS - 2.3125 bpw";           break;
-        case 21: name = "Q2_K - Small";                  break;
-        case 22: name = "IQ3_XS - 3.3 bpw";              break;
-        case 23: name = "IQ3_XXS - 3.0625 bpw";          break;
-        case 24: name = "IQ1_S - 1.5625 bpw";            break;
-        case 25: name = "IQ4_NL - 4.5 bpw";              break;
-        case 26: name = "IQ3_S - 3.4375 bpw";            break;
-        case 27: name = "IQ3_S mix - 3.66 bpw";          break;
-        case 28: name = "IQ2_S - 2.5 bpw";               break;
-        case 29: name = "IQ2_M - 2.7 bpw";               break;
-        case 30: name = "IQ4_XS - 4.25 bpw";             break;
-        case 31: name = "IQ1_M - 1.75 bpw";              break;
-        case 32: name = "BF16";                          break;
-        case 36: name = "TQ1_0 - 1.69 bpw ternary";      break;
-        case 37: name = "TQ2_0 - 2.06 bpw ternary";      break;
-        case 38: name = "MXFP4 MoE";                     break;
-        case 39: name = "Q1_0";                          break;
-        case 40: name = "NVFP4";                         break;
-        default: name = "unknown, may not work";         break;
-    }
-    return name;
 }
 
 // strdup() to malloc'd memory with explicit empty handling.
@@ -460,7 +411,7 @@ llama_engine_status probe_model_info(const char * model_path,
     if (gguf_get_str(gctx, "general.name", tmp)) { out.name = heap_str(tmp); }
 
     if (out.metadata.has_file_type) {
-        out.quantization = heap_str(ftype_label(out.metadata.file_type));
+        out.quantization = heap_str(llama_ftype_name((enum llama_ftype) out.metadata.file_type));
     }
 
     out.architecture = heap_str(arch); // empty string if absent (per contract).
