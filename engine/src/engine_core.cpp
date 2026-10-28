@@ -8,6 +8,7 @@
 #include "ggml-backend.h"
 
 #include <algorithm>
+#include <chrono>
 #include <functional>
 #include <stdexcept>
 #include <utility>
@@ -164,8 +165,11 @@ llama_engine_status engine_core::load_from_params_locked(std::unique_lock<std::m
         return LLAMA_ENGINE_ERR_CANCELLED;
     }
 
-    loop_thread = std::thread([this]() {
+    std::promise<void> loop_exit;
+    loop_done   = loop_exit.get_future();
+    loop_thread = std::thread([this, loop_exit = std::move(loop_exit)]() mutable {
         ctx->start_loop();
+        loop_exit.set_value();
     });
 
     lifecycle.complete_load_success();
@@ -186,6 +190,11 @@ void engine_core::teardown_locked(std::unique_lock<std::mutex> & lock) {
         ctx->terminate();
         lock.unlock();
         if (loop_thread.joinable()) {
+            // start_loop() sets running = true on entry, so a terminate() sent
+            // before the loop thread got there is lost: repeat it until the loop exits
+            while (loop_done.wait_for(std::chrono::milliseconds(50)) == std::future_status::timeout) {
+                ctx->terminate();
+            }
             loop_thread.join();
         }
         lock.lock();
