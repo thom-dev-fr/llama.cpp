@@ -38,6 +38,7 @@ set(LLAMA_ENGINE_SOURCES
     ${LLAMA_ENGINE_ROOT}/src/params_translator.cpp
     ${LLAMA_ENGINE_ROOT}/src/caps_probe.cpp
     ${LLAMA_ENGINE_ROOT}/src/runtime_caps.cpp
+    ${LLAMA_ENGINE_ROOT}/src/memory_measure.cpp
     ${LLAMA_ENGINE_ROOT}/src/chat_route_adapter.cpp
     ${LLAMA_ENGINE_ROOT}/src/engine_lifecycle.cpp
     ${LLAMA_ENGINE_ROOT}/src/inflight_registry.cpp

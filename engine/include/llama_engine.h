@@ -57,7 +57,7 @@ typedef enum {
 // Strings must remain valid for the duration of the call; they are copied internally.
 typedef struct {
     const char * model_path;                 // required
-    int32_t      context_size;               // n_ctx. 0 => default (4096)
+    int32_t      context_size;               // n_ctx. 0 => model training context, lowered at load by the memory fit if needed
     int32_t      gpu_layers;                 // -1 => all
     int32_t      parallel_slots;             // n_parallel. 0 => 1
     int32_t      cpu_threads;                // 0 or <0 => auto (hw_concurrency)
@@ -319,6 +319,42 @@ llama_engine_status llama_engine_probe_chat_capabilities(
 llama_engine_status llama_engine_get_capabilities(
     llama_engine_t * engine,
     char          ** out_json);
+
+// Native memory measurement of a configuration, as a JSON document that the
+// caller frees with llama_engine_free_string(). The model and its context are
+// created with no_alloc: no weights are read and no buffer is allocated, but
+// the GGUF is opened and the backend is initialised once. It does not touch any
+// llama_engine_t, so it can run while an engine is loaded; measurements are
+// serialised with each other. The config is measured as is: unlike
+// llama_engine_load(), it does not fit unset values to the free memory.
+//
+//   {
+//     "schema_version": 1, "source": "native",
+//     "effective": { "n_ctx", "n_ctx_train", "n_batch", "n_ubatch", "n_seq_max",
+//                    "kv_unified", "type_k", "type_v", "flash_attention", "gpu_layers" },
+//     "rows": [ { "kind": "device" | "host" | "buffer_type", "name", "description"?,
+//                 "model_bytes", "context_bytes", "compute_bytes",
+//                 "device_total_bytes"?, "device_free_bytes"? } ],
+//     "required_bytes": { "model", "context", "compute", "total" },
+//     "coverage": { "model", "context", "projector", "mtp_draft" },
+//     "complete": bool,   // false when a part of the config is not measured
+//     "warnings": [string]
+//   }
+//
+// Rows do not overlap and "required_bytes" is their sum. Device total/free
+// values describe the device, they are not part of the requirement. The
+// multimodal projector and the MTP draft context are not measured: "coverage"
+// says so and "complete" is false. Weights and KV cache match a loaded
+// context; compute buffers are an upper bound (the no_alloc reservation can
+// count the host compute buffer twice). Not the process RSS.
+//
+// Returns LLAMA_ENGINE_ERR_INVALID_ARG for an invalid config and
+// LLAMA_ENGINE_ERR_LOAD_FAILED when the model or the context cannot be
+// created, with `*out_error_msg` set (if non-NULL).
+llama_engine_status llama_engine_measure_memory(
+    const llama_engine_config * config,
+    char                     ** out_json,
+    char                     ** out_error_msg); // optional; caller frees with llama_engine_free_string()
 
 // Returns true when Multi-Token Prediction speculative decoding is currently
 // wired up against the loaded model (either self-MTP on the target, or an

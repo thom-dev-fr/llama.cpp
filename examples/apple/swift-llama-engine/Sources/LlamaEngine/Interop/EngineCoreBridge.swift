@@ -119,6 +119,30 @@ extension LlamaEngine {
         return try EngineCapabilities(json: json)
     }
 
+    static func measureMemorySync(for config: ModelConfig) throws -> NativeMemoryReport {
+        var outJSON: UnsafeMutablePointer<CChar>? = nil
+        var errPtr: UnsafeMutablePointer<CChar>? = nil
+        let status = config.withCConfig { cfg in
+            llama_engine_measure_memory(&cfg, &outJSON, &errPtr)
+        }
+        let json = outJSON.map { String(cString: $0) }
+        let message = errPtr.map { String(cString: $0) } ?? "memory measurement failed"
+        llama_engine_free_string(outJSON)
+        llama_engine_free_string(errPtr)
+
+        switch status {
+        case LLAMA_ENGINE_OK:
+            guard let json else { throw LlamaError.internalError("empty memory report") }
+            return try NativeMemoryReport(json: json)
+        case LLAMA_ENGINE_ERR_INVALID_ARG:
+            throw LlamaError.invalidArgument(message)
+        case LLAMA_ENGINE_ERR_LOAD_FAILED:
+            throw LlamaError.loadFailed(message)
+        default:
+            throw LlamaError.internalError(message)
+        }
+    }
+
     func lastErrorMessage() -> String? {
         guard let cstr = llama_engine_last_error(handle) else { return nil }
         return String(cString: cstr)
