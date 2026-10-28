@@ -116,7 +116,6 @@ private:
     std::unique_ptr<server_context_meta>   meta;
     std::string                            caps_json;
     const llama_vocab *                    vocab = nullptr;
-    struct mtmd_context *                  mctx  = nullptr; // unused in v1
 
     static std::once_flag     backend_once;
     static std::atomic<int>   log_verbosity;

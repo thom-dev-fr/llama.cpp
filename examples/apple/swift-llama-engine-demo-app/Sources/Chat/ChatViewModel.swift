@@ -27,6 +27,8 @@ final class ChatViewModel {
 
     private(set) var engineState: EngineState = .unloaded
     private(set) var modelInfo: ModelInfo? = nil
+    /// Snapshot of the loaded configuration, `nil` unless the engine is ready.
+    private(set) var runtimeCapabilities: EngineCapabilities? = nil
     var lastError: String?
 
     // MARK: - Engine
@@ -47,6 +49,16 @@ final class ChatViewModel {
     /// model is loaded. Convenience for the view layer.
     var capabilities: ModelCapabilities {
         modelInfo?.capabilities ?? ModelCapabilities()
+    }
+
+    /// Image attachments need the loaded configuration to accept them, not
+    /// only a projector with a vision encoder.
+    var canAttachImages: Bool {
+        runtimeCapabilities?.engineOperations?.imageInput == true
+    }
+
+    var canAttachAudio: Bool {
+        runtimeCapabilities?.engineOperations?.audioInput == true
     }
 
     var canSend: Bool {
@@ -347,6 +359,11 @@ final class ChatViewModel {
 
     private func refreshState() async {
         engineState = engine.state
+        if engineState == .ready {
+            runtimeCapabilities = try? await engine.capabilities()
+        } else {
+            runtimeCapabilities = nil
+        }
     }
 
     // MARK: - Attachments
@@ -354,8 +371,8 @@ final class ChatViewModel {
     /// Adds an attachment only when the loaded model supports its modality.
     func addAttachment(_ attachment: ChatMessage.Attachment) {
         switch attachment.kind {
-        case .image where !capabilities.supportsVision: return
-        case .audio where !capabilities.supportsAudio:  return
+        case .image where !canAttachImages: return
+        case .audio where !canAttachAudio:  return
         default: break
         }
         pendingAttachments.append(attachment)
@@ -367,7 +384,7 @@ final class ChatViewModel {
 
     /// Adds an image selected by the UI.
     func addImage(fromURL url: URL) {
-        guard capabilities.supportsVision else { return }
+        guard canAttachImages else { return }
         // Required for sandboxed file importers.
         let needsStop = url.startAccessingSecurityScopedResource()
         defer { if needsStop { url.stopAccessingSecurityScopedResource() } }
@@ -380,7 +397,7 @@ final class ChatViewModel {
 
     /// Adds a .wav or .mp3 file selected by the UI.
     func addAudio(fromURL url: URL) {
-        guard capabilities.supportsAudio else { return }
+        guard canAttachAudio else { return }
         let needsStop = url.startAccessingSecurityScopedResource()
         defer { if needsStop { url.stopAccessingSecurityScopedResource() } }
         if let a = AttachmentSupport.makeAudioAttachment(from: url) {

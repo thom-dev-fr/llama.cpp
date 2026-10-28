@@ -13,7 +13,7 @@ struct ComposerView: View {
             }
 
             HStack(alignment: .bottom, spacing: 8) {
-                if vm.capabilities.supportsVision {
+                if vm.canAttachImages {
                     Button {
                         showImagePicker = true
                     } label: {
@@ -32,7 +32,7 @@ struct ComposerView: View {
                         }
                     }
                 }
-                if vm.capabilities.supportsAudio {
+                if vm.canAttachAudio {
                     Button {
                         showAudioPicker = true
                     } label: {

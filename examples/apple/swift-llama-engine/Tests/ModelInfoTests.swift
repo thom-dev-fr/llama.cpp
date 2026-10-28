@@ -168,4 +168,34 @@ struct ModelInfoTests {
         #expect(estimate.modelBytes == 42)
         #expect(!nativeError.isEmpty)
     }
+
+    @Test func decodesRuntimeSections() throws {
+        let json = #"""
+        {
+          "schema_version": 1,
+          "chat_template": {"source": "gguf"},
+          "model_capabilities": {"chat": true, "input_audio": true, "audio_stream": true,
+                                 "realtime_conversation": true, "output_modalities": ["text"]},
+          "engine_operations": {"chat_completion": true, "audio_input": true, "realtime": false,
+                                "future_operation": true}
+        }
+        """#
+
+        let caps = try EngineCapabilities(json: json)
+
+        #expect(caps.modelCapabilities?.realtimeConversation == true)
+        #expect(caps.modelCapabilities?.inputImage == nil)
+        #expect(caps.modelCapabilities?.outputModalities == ["text"])
+        #expect(caps.engineOperations?.audioInput == true)
+        #expect(caps.engineOperations?.realtime == false)
+        #expect(caps.engineOperations?.imageInput == nil)
+        #expect(caps.rawJSON.contains("future_operation"))
+    }
+
+    @Test func probeDocumentHasNoRuntimeSections() throws {
+        let caps = try EngineCapabilities(json: #"{"schema_version":1,"chat_template":{"source":"gguf"}}"#)
+
+        #expect(caps.modelCapabilities == nil)
+        #expect(caps.engineOperations == nil)
+    }
 }
