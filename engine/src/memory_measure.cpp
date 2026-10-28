@@ -5,6 +5,8 @@
 
 #include "ggml.h"
 #include "llama.h"
+#include "mtmd.h"
+#include "speculative.h"
 
 #include <algorithm>
 #include <mutex>
@@ -70,12 +72,19 @@ json memory_measure::report(const common_params & params,
     const bool has_mtp       = std::find(params.speculative.types.begin(), params.speculative.types.end(),
                                          COMMON_SPECULATIVE_TYPE_DRAFT_MTP) != params.speculative.types.end();
 
+    const bool projector_measured = !has_projector || m.projector.has_value();
+    const bool mtp_draft_measured = !has_mtp       || m.mtp_draft.has_value();
+    const uint64_t projector = m.projector.value_or(0);
+    const uint64_t mtp_draft = m.mtp_draft.value_or(0);
+
     json warnings = json::array();
-    if (has_projector) {
-        warnings.push_back("the multimodal projector is not measured");
+    if (!projector_measured) {
+        warnings.push_back("the multimodal projector could not be measured: " + m.projector_error);
+    } else if (has_projector) {
+        warnings.push_back("projector bytes include the compute buffer of the warmup input, the largest the projector accepts");
     }
-    if (has_mtp) {
-        warnings.push_back("the MTP draft context and an external draft model are not measured");
+    if (!mtp_draft_measured) {
+        warnings.push_back("the MTP draft context could not be measured: " + m.mtp_draft_error);
     }
     if (params.fit_params) {
         warnings.push_back("the load path fits unset parameters (context_size=0, gpu_layers=-1) to the free memory at load time, the loaded values can be lower than the measured ones");
@@ -100,20 +109,71 @@ json memory_measure::report(const common_params & params,
         }},
         { "rows", rows },
         { "required_bytes", {
-            { "model",   model                     },
-            { "context", context                   },
-            { "compute", compute                   },
-            { "total",   model + context + compute },
+            { "model",     model     },
+            { "context",   context   },
+            { "compute",   compute   },
+            { "projector", projector },
+            { "mtp_draft", mtp_draft },
+            { "total",     model + context + compute + projector + mtp_draft },
         }},
         { "coverage", {
-            { "model",     true           },
-            { "context",   true           },
-            { "projector", !has_projector },
-            { "mtp_draft", !has_mtp       },
+            { "model",     true               },
+            { "context",   true               },
+            { "projector", projector_measured },
+            { "mtp_draft", mtp_draft_measured },
         }},
-        { "complete", !has_projector && !has_mtp },
+        { "complete", projector_measured && mtp_draft_measured },
         { "warnings", warnings },
     };
+}
+
+// same draft context as the load path, see common_fit_apply(): an MTP context
+// that follows the main context, on the weights of the main model unless an
+// external draft model is set
+static uint64_t measure_mtp_draft(const common_params & params, uint32_t n_ctx_main) {
+    const bool has_draft = params.speculative.has_dft();
+
+    common_params params_dft = common_base_params_to_speculative(params);
+
+    auto mparams_dft = common_model_params_to_llama(params_dft);
+    auto cparams_dft = common_context_params_to_llama(params_dft);
+    cparams_dft.ctx_type = LLAMA_CONTEXT_TYPE_MTP;
+    cparams_dft.n_ctx    = n_ctx_main;
+    cparams_dft.n_rs_seq = 0;
+
+    uint64_t bytes = 0;
+    for (const auto & r : common_fit_measure(params_dft.model.path.c_str(), &mparams_dft, &cparams_dft,
+                                             nullptr, nullptr, GGML_LOG_LEVEL_ERROR)) {
+        // the weights of the main model are already in the rows
+        bytes += (has_draft ? r.model : 0) + r.context + r.compute;
+    }
+    return bytes;
+}
+
+// same projector params as the load path, see server_context, with the warmup
+// that reserves the compute buffer of the largest input
+static std::optional<uint64_t> measure_projector(const common_params & params) {
+    mtmd_context_params mparams = mtmd_context_params_default();
+    mparams.use_gpu          = params.mmproj_use_gpu;
+    mparams.device           = params.mmproj_device;
+    mparams.print_timings    = false;
+    mparams.n_threads        = params.cpuparams.n_threads;
+    mparams.flash_attn_type  = params.flash_attn_type;
+    // the load path skips the warmup, but the first image reserves the same compute buffer
+    mparams.warmup           = true;
+    mparams.image_min_tokens = params.image_min_tokens;
+    mparams.image_max_tokens = params.image_max_tokens;
+    mparams.batch_max_tokens = params.mtmd_batch_max_tokens;
+
+    const mtmd_memory_usage usage = mtmd_get_memory_usage(params.mmproj.path.c_str(), mparams);
+    if (usage.backend_mem_usage.empty()) {
+        return std::nullopt;
+    }
+    uint64_t bytes = 0;
+    for (const auto & [dev, size] : usage.backend_mem_usage) {
+        bytes += size;
+    }
+    return bytes;
 }
 
 llama_engine_status memory_measure::measure(const llama_engine_config & cfg,
@@ -147,6 +207,22 @@ llama_engine_status memory_measure::measure(const llama_engine_config & cfg,
         } catch (const std::exception & e) {
             error = std::string("memory measurement failed: ") + e.what();
             return LLAMA_ENGINE_ERR_LOAD_FAILED;
+        }
+
+        // the main measurement is enough for a report: a part that fails is reported as not measured
+        if (std::find(params.speculative.types.begin(), params.speculative.types.end(),
+                      COMMON_SPECULATIVE_TYPE_DRAFT_MTP) != params.speculative.types.end()) {
+            try {
+                m.mtp_draft = measure_mtp_draft(params, m.n_ctx);
+            } catch (const std::exception & e) {
+                m.mtp_draft_error = e.what();
+            }
+        }
+        if (!params.mmproj.path.empty()) {
+            m.projector = measure_projector(params);
+            if (!m.projector) {
+                m.projector_error = "mtmd could not create the projector";
+            }
         }
     }
 
