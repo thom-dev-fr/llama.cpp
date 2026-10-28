@@ -153,6 +153,43 @@ public final class LlamaEngine: @unchecked Sendable {
         }.value
     }
 
+    /// Measures the memory a configuration needs, with the native engine.
+    ///
+    /// llama.cpp creates the model and its context without allocating them:
+    /// no weights are read, but the GGUF file is opened and the backend is
+    /// initialised. The call does not change any loaded engine. The
+    /// configuration is measured as is; ``load(_:)`` can still lower unset
+    /// values to fit the free memory. Use ``ModelInfo/estimatedMemoryUsage(config:)``
+    /// for a cheaper metadata-only estimate.
+    ///
+    /// The native work cannot be interrupted: cancelling the calling task
+    /// does not stop it.
+    ///
+    /// - Parameter config: The configuration to measure.
+    /// - Returns: The native report, see ``NativeMemoryReport/isComplete``.
+    public static func measureMemory(for config: ModelConfig) async throws -> NativeMemoryReport {
+        try await Task.detached(priority: .userInitiated) {
+            try LlamaEngine.measureMemorySync(for: config)
+        }.value
+    }
+
+    /// Measures the memory a configuration needs, with an explicit fallback.
+    ///
+    /// - Parameters:
+    ///   - config: The configuration to measure.
+    ///   - fallback: What to return when the native measurement fails.
+    /// - Returns: The native report, or the estimate with the native error
+    ///   when `fallback` allows it.
+    public static func memoryUsage(for config: ModelConfig,
+                                   fallback: MemoryMeasurementFallback = .none) async throws -> MemoryUsage {
+        do {
+            return .native(try await measureMemory(for: config))
+        } catch {
+            guard case .estimate(let info) = fallback else { throw error }
+            return .estimated(info.estimatedMemoryUsage(config: config), nativeError: "\(error)")
+        }
+    }
+
     // MARK: - Lifecycle
 
     /// Loads a model into the engine.

@@ -119,4 +119,53 @@ struct ModelInfoTests {
         let decoded = try JSONDecoder().decode(ModelCapabilities.self, from: JSONEncoder().encode(caps))
         #expect(decoded.reasoningEffortLevels == ["max"])
     }
+
+    @Test func decodesNativeMemoryReport() throws {
+        let json = #"""
+        {
+          "schema_version": 1, "source": "native",
+          "effective": {"n_ctx": 4096, "n_ctx_train": 32768, "type_k": "f16", "gpu_layers": -1, "future": 1},
+          "rows": [
+            {"kind": "device", "name": "MTL0", "model_bytes": 6442450944, "context_bytes": 1073741824,
+             "compute_bytes": 1, "device_total_bytes": 34359738368, "device_free_bytes": 0},
+            {"kind": "something_new", "name": "X", "model_bytes": 1, "context_bytes": 0, "compute_bytes": 0}
+          ],
+          "required_bytes": {"model": 6442450945, "context": 1073741824, "compute": 1, "total": 7516192770},
+          "coverage": {"model": true, "context": true, "projector": false, "mtp_draft": true},
+          "complete": false,
+          "warnings": ["the multimodal projector is not measured"]
+        }
+        """#
+
+        let report = try NativeMemoryReport(json: json)
+
+        #expect(report.effective.contextSize == 4096)
+        #expect(report.effective.batchSize == nil)
+        #expect(report.rows[0].kind == .device)
+        #expect(report.rows[0].totalBytes == 7_516_192_769)
+        #expect(report.rows[0].deviceTotalBytes == 34_359_738_368)
+        #expect(report.rows[1].kind == .unknown)
+        #expect(report.requiredBytes.total == 7_516_192_770)
+        #expect(!report.isComplete)
+        #expect(!report.coverage.projector)
+    }
+
+    @Test func memoryUsageFallsBackOnlyWhenAsked() async throws {
+        let config = ModelConfig(modelPath: URL(fileURLWithPath: "/nonexistent/model.gguf"))
+
+        await #expect(throws: LlamaError.self) {
+            _ = try await LlamaEngine.memoryUsage(for: config)
+        }
+
+        let usage = try await LlamaEngine.memoryUsage(
+            for: config,
+            fallback: .estimate(ModelInfo(metadata: GGUFFileInfo(fileSize: 42)))
+        )
+        guard case .estimated(let estimate, let nativeError) = usage else {
+            Issue.record("expected an estimate")
+            return
+        }
+        #expect(estimate.modelBytes == 42)
+        #expect(!nativeError.isEmpty)
+    }
 }

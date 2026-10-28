@@ -1,6 +1,7 @@
 #include "llama_engine.h"
 #include "engine_core.hpp"
 #include "caps_probe.hpp"
+#include "memory_measure.hpp"
 
 #include "log.h"
 
@@ -109,6 +110,36 @@ extern "C" llama_engine_status llama_engine_probe_chat_capabilities(
     } catch (...) {
         st  = LLAMA_ENGINE_ERR_INTERNAL;
         err = "unknown exception in probe_chat_capabilities";
+    }
+    if (st != LLAMA_ENGINE_OK) {
+        if (out_error_msg && !err.empty()) *out_error_msg = dup_string(err);
+        return st;
+    }
+    *out_json = dup_string(json);
+    return *out_json ? LLAMA_ENGINE_OK : LLAMA_ENGINE_ERR_INTERNAL;
+}
+
+extern "C" llama_engine_status llama_engine_measure_memory(
+    const llama_engine_config * config,
+    char                     ** out_json,
+    char                     ** out_error_msg)
+{
+    if (out_error_msg) *out_error_msg = nullptr;
+    if (!out_json) return LLAMA_ENGINE_ERR_INVALID_ARG;
+    *out_json = nullptr;
+    if (!config) return LLAMA_ENGINE_ERR_INVALID_ARG;
+
+    std::string json;
+    std::string err;
+    llama_engine_status st;
+    try {
+        st = llama_engine::memory_measure::measure(*config, json, err);
+    } catch (const std::exception & e) {
+        st  = LLAMA_ENGINE_ERR_INTERNAL;
+        err = e.what();
+    } catch (...) {
+        st  = LLAMA_ENGINE_ERR_INTERNAL;
+        err = "unknown exception in measure_memory";
     }
     if (st != LLAMA_ENGINE_OK) {
         if (out_error_msg && !err.empty()) *out_error_msg = dup_string(err);

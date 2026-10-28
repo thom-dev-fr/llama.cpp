@@ -10,6 +10,7 @@ add_executable(test-llama-engine-pure
     test_inflight_registry.cpp
     test_chat_route_adapter.cpp
     test_runtime_caps.cpp
+    test_memory_measure.cpp
 )
 
 # vocab-only GGUF shipped with the repo: metadata and tokenizer, no weights
@@ -60,12 +61,28 @@ else()
     set_tests_properties(llama-engine-download-model PROPERTIES FIXTURES_SETUP llama-engine-model LABELS "engine;model")
 endif()
 
+add_executable(test-llama-engine-memory test_memory_model.cpp)
+target_include_directories(test-llama-engine-memory PRIVATE
+    ${LLAMA_REPO_ROOT_T}/engine/include
+    ${LLAMA_REPO_ROOT_T}/engine/src
+    ${LLAMA_REPO_ROOT_T}/tools/server
+    ${LLAMA_REPO_ROOT_T}
+    ${LLAMA_REPO_ROOT_T}/vendor
+)
+target_link_libraries(test-llama-engine-memory PRIVATE llama-engine llama-common)
+target_compile_features(test-llama-engine-memory PRIVATE cxx_std_17)
+
+add_test(NAME llama-engine-memory-cpu COMMAND test-llama-engine-memory "${LLAMA_ENGINE_CAPI_MODEL}" 0)
+set_tests_properties(llama-engine-memory-cpu PROPERTIES SKIP_RETURN_CODE 77 LABELS "engine;model" FIXTURES_REQUIRED llama-engine-model TIMEOUT 600)
+
 add_test(NAME llama-engine-capi-cpu COMMAND test-llama-engine-capi "${LLAMA_ENGINE_CAPI_MODEL}" 0)
 set_tests_properties(llama-engine-capi-cpu PROPERTIES SKIP_RETURN_CODE 77 LABELS "engine;model" FIXTURES_REQUIRED llama-engine-model TIMEOUT 600)
 
 if (GGML_METAL)
     add_test(NAME llama-engine-capi-metal COMMAND test-llama-engine-capi "${LLAMA_ENGINE_CAPI_MODEL}" 99)
     set_tests_properties(llama-engine-capi-metal PROPERTIES SKIP_RETURN_CODE 77 LABELS "engine;model;metal" FIXTURES_REQUIRED llama-engine-model TIMEOUT 600)
+    add_test(NAME llama-engine-memory-metal COMMAND test-llama-engine-memory "${LLAMA_ENGINE_CAPI_MODEL}" 99)
+    set_tests_properties(llama-engine-memory-metal PROPERTIES SKIP_RETURN_CODE 77 LABELS "engine;model;metal" FIXTURES_REQUIRED llama-engine-model TIMEOUT 600)
 endif()
 
 set_tests_properties(llama-engine-pure PROPERTIES LABELS "engine")
