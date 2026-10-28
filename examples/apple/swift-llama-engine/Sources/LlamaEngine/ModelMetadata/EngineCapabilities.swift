@@ -23,16 +23,29 @@ public struct EngineCapabilities: Sendable, Hashable {
     /// Why ``chatTemplate`` is `nil`, when the engine reported a reason.
     public var chatTemplateError: String?
 
+    /// What the loaded model, projector and build can do. Only in the
+    /// snapshot of a loaded engine, `nil` before loading.
+    public var modelCapabilities: RuntimeModelCapabilities?
+
+    /// What the engine API can run with the loaded configuration. Only in the
+    /// snapshot of a loaded engine, `nil` before loading. Check this, not
+    /// ``modelCapabilities``, before offering a feature.
+    public var engineOperations: EngineOperations?
+
     /// The JSON document as returned by the engine.
     public var rawJSON: String
 
     public init(schemaVersion: Int = 1,
                 chatTemplate: ChatTemplateCapabilities? = nil,
                 chatTemplateError: String? = nil,
+                modelCapabilities: RuntimeModelCapabilities? = nil,
+                engineOperations: EngineOperations? = nil,
                 rawJSON: String = "{}") {
         self.schemaVersion = schemaVersion
         self.chatTemplate = chatTemplate
         self.chatTemplateError = chatTemplateError
+        self.modelCapabilities = modelCapabilities
+        self.engineOperations = engineOperations
         self.rawJSON = rawJSON
     }
 
@@ -45,6 +58,8 @@ public struct EngineCapabilities: Sendable, Hashable {
             schemaVersion: document.schemaVersion ?? 0,
             chatTemplate: document.chatTemplate,
             chatTemplateError: document.chatTemplateError,
+            modelCapabilities: document.modelCapabilities,
+            engineOperations: document.engineOperations,
             rawJSON: json
         )
     }
@@ -53,11 +68,15 @@ public struct EngineCapabilities: Sendable, Hashable {
         var schemaVersion: Int?
         var chatTemplate: ChatTemplateCapabilities?
         var chatTemplateError: String?
+        var modelCapabilities: RuntimeModelCapabilities?
+        var engineOperations: EngineOperations?
 
         enum CodingKeys: String, CodingKey {
             case schemaVersion = "schema_version"
             case chatTemplate = "chat_template"
             case chatTemplateError = "chat_template_error"
+            case modelCapabilities = "model_capabilities"
+            case engineOperations = "engine_operations"
         }
     }
 }
@@ -135,5 +154,69 @@ public struct ChatTemplateCapabilities: Sendable, Hashable, Codable {
             supportsReasoningEffort:   try c.decodeIfPresent(Bool.self, forKey: .supportsReasoningEffort),
             reasoningEffortLevels:     try c.decodeIfPresent([String].self, forKey: .reasoningEffortLevels)
         )
+    }
+}
+
+/// What the loaded model, projector and build can do, copied from the loaded
+/// configuration. A capability here does not mean the engine API exposes it,
+/// see ``EngineOperations``. `nil` means unknown.
+public struct RuntimeModelCapabilities: Sendable, Hashable, Decodable {
+    public var chat: Bool?
+    public var inputImage: Bool?
+    public var inputAudio: Bool?
+    public var inputVideo: Bool?
+    /// Output modalities, for example `["text"]` or `["text", "audio"]`.
+    public var outputModalities: [String]?
+    public var audioGeneration: Bool?
+    public var audioSpeakerReference: Bool?
+    /// Realtime transcription. On its own it does not mean a voice conversation.
+    public var audioStream: Bool?
+    public var realtimeConversation: Bool?
+    public var multimodalProjector: Bool?
+
+    enum CodingKeys: String, CodingKey {
+        case chat
+        case inputImage = "input_image"
+        case inputAudio = "input_audio"
+        case inputVideo = "input_video"
+        case outputModalities = "output_modalities"
+        case audioGeneration = "audio_generation"
+        case audioSpeakerReference = "audio_speaker_reference"
+        case audioStream = "audio_stream"
+        case realtimeConversation = "realtime_conversation"
+        case multimodalProjector = "multimodal_projector"
+    }
+}
+
+/// What ``LlamaEngine`` can run with the loaded configuration. `false` also
+/// covers features the model supports but the engine does not expose yet, such
+/// as speech generation or realtime sessions. `nil` means unknown: treat it as
+/// unavailable.
+public struct EngineOperations: Sendable, Hashable, Decodable {
+    public var chatCompletion: Bool?
+    public var chatCompletionStream: Bool?
+    public var countChatTokens: Bool?
+    public var tokenize: Bool?
+    /// Image content in chat completion requests.
+    public var imageInput: Bool?
+    /// Audio content in chat completion requests.
+    public var audioInput: Bool?
+    /// Video content in chat completion requests.
+    public var videoInput: Bool?
+    public var speechGeneration: Bool?
+    public var transcription: Bool?
+    public var realtime: Bool?
+
+    enum CodingKeys: String, CodingKey {
+        case chatCompletion = "chat_completion"
+        case chatCompletionStream = "chat_completion_stream"
+        case countChatTokens = "count_chat_tokens"
+        case tokenize
+        case imageInput = "image_input"
+        case audioInput = "audio_input"
+        case videoInput = "video_input"
+        case speechGeneration = "speech_generation"
+        case transcription
+        case realtime
     }
 }

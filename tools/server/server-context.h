@@ -27,6 +27,7 @@ struct server_context_meta {
     bool has_cap_chat;
     bool has_cap_tts;
     bool has_audio_stream; // realtime transcription, see mtmd_support_audio_stream()
+    bool has_audio_gen_spk_ref; // speech generation accepts a speaker reference
     std::vector<std::string> tts_voices; // predefined voices of the audio generation model
     json json_ui_settings;
     int slot_n_ctx;

@@ -182,6 +182,11 @@ static void test_capabilities(llama_engine_t * engine) {
     fprintf(stderr, "  * runtime capabilities\n");
     EXPECT(caps_contain(engine, "\"schema_version\":1"));
     EXPECT(caps_contain(engine, "\"reasoning_effort_levels\""));
+    EXPECT(caps_contain(engine, "\"engine_operations\""));
+    EXPECT(caps_contain(engine, "\"chat_completion\":true"));
+    EXPECT(caps_contain(engine, "\"image_input\":false"));
+    EXPECT(caps_contain(engine, "\"realtime\":false"));
+    EXPECT(caps_contain(engine, "\"multimodal_projector\":false"));
     EXPECT_STATUS(llama_engine_get_capabilities(engine, NULL), LLAMA_ENGINE_ERR_INVALID_ARG);
 }
 
