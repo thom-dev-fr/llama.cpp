@@ -161,8 +161,20 @@ llama_engine_status engine_core::load_from_params_locked(std::unique_lock<std::m
     routes = std::move(new_routes);
     meta   = std::make_unique<server_context_meta>(ctx->get_meta());
     // get_meta() is not thread-safe: take the snapshot before the loop starts
-    caps_json = runtime_caps::document(runtime_caps::chat_template_section(
-        meta->chat_template_caps, !last_params->chat_template.empty()));
+    {
+        runtime_caps::runtime_flags flags;
+        flags.has_mtmd          = meta->has_mtmd;
+        flags.inp_image         = meta->has_inp_image;
+        flags.inp_audio         = meta->has_inp_audio;
+        flags.inp_video         = meta->has_inp_video;
+        flags.cap_chat          = meta->has_cap_chat;
+        flags.cap_tts           = meta->has_cap_tts;
+        flags.audio_stream      = meta->has_audio_stream;
+        flags.audio_gen_spk_ref = meta->has_audio_gen_spk_ref;
+        flags.output_modalities = meta->model_output_modalities;
+        caps_json = runtime_caps::runtime_document(runtime_caps::chat_template_section(
+            meta->chat_template_caps, !last_params->chat_template.empty()), flags);
+    }
     vocab  = llama_model_get_vocab(llama_get_model(ctx->get_llama_context()));
     routes->update_meta(*ctx);
 

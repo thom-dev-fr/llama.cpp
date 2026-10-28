@@ -292,9 +292,23 @@ void llama_engine_free_model_info(llama_engine_model_info * info);
 //     } | null,
 //     "chat_template_error": string                 // only when chat_template is null
 //   }
+// llama_engine_get_capabilities() adds two sections for the loaded config:
+//     "model_capabilities": {     // what the loaded model, projector and build can do
+//       "chat", "input_image", "input_audio", "input_video", "audio_generation",
+//       "audio_speaker_reference", "audio_stream", "realtime_conversation",
+//       "multimodal_projector": bool, "output_modalities": [string]
+//     },
+//     "engine_operations": {      // what this C API can run with that config
+//       "chat_completion", "chat_completion_stream", "count_chat_tokens", "tokenize",
+//       "image_input", "audio_input", "video_input",  // as chat completion content
+//       "speech_generation", "transcription", "realtime"  // false: not exposed yet
+//     }
+// A capability of the model does not mean the engine exposes it: check
+// "engine_operations" before offering a feature. "audio_stream" alone means
+// realtime transcription, not a voice conversation.
 // Unknown keys must be ignored: later versions add sections without changing
-// the existing ones. Effort levels come from template rendering: an empty list
-// does not mean the model cannot reason.
+// the existing ones. An absent key means unknown, not false. Effort levels come
+// from template rendering: an empty list does not mean the model cannot reason.
 
 // Chat capabilities of a configuration, before loading it. Uses the same
 // template selection as llama_engine_load(): the GGUF "tool_use" template,

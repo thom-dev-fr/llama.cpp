@@ -109,6 +109,73 @@ static void test_probe_chat_capabilities_errors() {
     EXPECT_EQ((int) llama_engine_get_capabilities(nullptr, &json_out), (int) LLAMA_ENGINE_ERR_INVALID_ARG);
 }
 
+static json runtime_doc(const runtime_caps::runtime_flags & f) {
+    return json::parse(runtime_caps::runtime_document(json::object(), f));
+}
+
+static void test_runtime_sections_text_only() {
+    CASE("text-only model: chat operations only");
+    runtime_caps::runtime_flags f;
+    f.cap_chat          = true;
+    f.output_modalities = { "text" };
+    json doc = runtime_doc(f);
+    const auto & m  = doc.at("model_capabilities");
+    const auto & op = doc.at("engine_operations");
+    EXPECT(m.at("chat").get<bool>());
+    EXPECT(!m.at("input_image").get<bool>());
+    EXPECT(!m.at("multimodal_projector").get<bool>());
+    EXPECT_EQ(m.at("output_modalities").dump(), std::string(R"(["text"])"));
+    EXPECT(op.at("chat_completion").get<bool>());
+    EXPECT(op.at("tokenize").get<bool>());
+    EXPECT(!op.at("image_input").get<bool>());
+    EXPECT(!op.at("realtime").get<bool>());
+}
+
+static void test_runtime_sections_multimodal_inputs() {
+    CASE("vision and audio inputs become chat operations, video only when built");
+    runtime_caps::runtime_flags f;
+    f.has_mtmd  = true;
+    f.cap_chat  = true;
+    f.inp_image = true;
+    f.inp_audio = true;
+    json doc = runtime_doc(f);
+    EXPECT(doc.at("engine_operations").at("image_input").get<bool>());
+    EXPECT(doc.at("engine_operations").at("audio_input").get<bool>());
+    EXPECT(!doc.at("engine_operations").at("video_input").get<bool>());
+    EXPECT(!doc.at("model_capabilities").at("input_video").get<bool>());
+}
+
+static void test_runtime_sections_audio_models() {
+    CASE("TTS, transcription and conversation models are not engine operations yet");
+    runtime_caps::runtime_flags tts;
+    tts.has_mtmd          = true;
+    tts.cap_tts           = true;
+    tts.audio_gen_spk_ref = true;
+    tts.output_modalities = { "audio" };
+    json doc = runtime_doc(tts);
+    EXPECT(doc.at("model_capabilities").at("audio_generation").get<bool>());
+    EXPECT(doc.at("model_capabilities").at("audio_speaker_reference").get<bool>());
+    EXPECT(!doc.at("model_capabilities").at("chat").get<bool>());
+    EXPECT(!doc.at("engine_operations").at("chat_completion").get<bool>());
+    EXPECT(!doc.at("engine_operations").at("speech_generation").get<bool>());
+
+    runtime_caps::runtime_flags asr;
+    asr.has_mtmd     = true;
+    asr.inp_audio    = true;
+    asr.audio_stream = true;
+    doc = runtime_doc(asr);
+    EXPECT(doc.at("model_capabilities").at("audio_stream").get<bool>());
+    EXPECT(!doc.at("model_capabilities").at("realtime_conversation").get<bool>());
+    EXPECT(!doc.at("engine_operations").at("audio_input").get<bool>());
+    EXPECT(!doc.at("engine_operations").at("transcription").get<bool>());
+
+    runtime_caps::runtime_flags conv = asr;
+    conv.cap_chat = true;
+    doc = runtime_doc(conv);
+    EXPECT(doc.at("model_capabilities").at("realtime_conversation").get<bool>());
+    EXPECT(!doc.at("engine_operations").at("realtime").get<bool>());
+}
+
 void run_runtime_caps_tests() {
     std::fprintf(stderr, "RuntimeCaps:\n");
     test_chat_template_section_known_toggle();
@@ -116,4 +183,7 @@ void run_runtime_caps_tests() {
     test_documents();
     test_probe_chat_capabilities();
     test_probe_chat_capabilities_errors();
+    test_runtime_sections_text_only();
+    test_runtime_sections_multimodal_inputs();
+    test_runtime_sections_audio_models();
 }
