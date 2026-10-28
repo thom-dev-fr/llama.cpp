@@ -1956,13 +1956,15 @@ common_json common_chat_templates_get_caps(const common_chat_templates * chat_te
     common_json result = tmpl.caps.to_map();
     result["reasoning_effort_levels"] = tmpl.caps.reasoning_effort_levels;
 
-    result["supports_reasoning"]        = false;
-    result["supports_reasoning_toggle"] = false;
+    result["supports_reasoning"]              = false;
+    result["supports_reasoning_toggle"]       = false;
+    result["supports_reasoning_toggle_known"] = false;
     try {
         autoparser::autoparser analysis;
         analysis.analyze_template(tmpl);
-        result["supports_reasoning"]        = analysis.reasoning.supports_reasoning;
-        result["supports_reasoning_toggle"] = analysis.reasoning.supports_reasoning_toggle;
+        result["supports_reasoning"]              = analysis.reasoning.supports_reasoning;
+        result["supports_reasoning_toggle"]       = analysis.reasoning.supports_reasoning_toggle;
+        result["supports_reasoning_toggle_known"] = analysis.reasoning.supports_reasoning_toggle_known;
     } catch (const std::exception & e) {
         LOG_WRN("Failed to analyze reasoning capabilities: %s\n", e.what());
     }

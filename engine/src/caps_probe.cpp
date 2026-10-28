@@ -1,8 +1,12 @@
 #include "caps_probe.hpp"
+#include "engine_core.hpp"
+#include "params_translator.hpp"
+#include "runtime_caps.hpp"
 
 #include "ggml.h"
 #include "gguf.h"
 #include "llama.h"
+#include "llama-cpp.h"
 
 #include "chat.h"
 #include "log.h"
@@ -446,6 +450,41 @@ llama_engine_status probe_model_info(const char * model_path,
         }
     }
 
+    return LLAMA_ENGINE_OK;
+}
+
+llama_engine_status probe_chat_capabilities(const llama_engine_config & cfg,
+                                            std::string &               out_json,
+                                            std::string &               error)
+{
+    out_json.clear();
+    error.clear();
+
+    common_params params;
+    try {
+        params = params_translator::translate(cfg);
+    } catch (const std::exception & e) {
+        error = std::string("invalid config: ") + e.what();
+        return LLAMA_ENGINE_ERR_INVALID_ARG;
+    }
+
+    engine_core::ensure_backend_initialized();
+
+    llama_model_params mparams = llama_model_default_params();
+    mparams.vocab_only = true;
+    llama_model_ptr model(llama_model_load_from_file(params.model.path.c_str(), mparams));
+    if (!model) {
+        error = "failed to read the model vocabulary: " + params.model.path;
+        return LLAMA_ENGINE_ERR_INVALID_ARG;
+    }
+
+    try {
+        auto tmpls = common_chat_templates_init(model.get(), params.chat_template);
+        const auto caps = common_chat_templates_get_caps(tmpls.get());
+        out_json = runtime_caps::document(runtime_caps::chat_template_section(caps, !params.chat_template.empty()));
+    } catch (const std::exception & e) {
+        out_json = runtime_caps::error_document(e.what());
+    }
     return LLAMA_ENGINE_OK;
 }
 

@@ -43,9 +43,16 @@ public:
     // load_model() did not enable a DRAFT_MTP speculative type.
     bool is_mtp_active() const;
 
+    // Copy of the capabilities snapshot taken after the last successful load.
+    // NOT_LOADED unless READY; never loads or resumes the model.
+    llama_engine_status get_capabilities(std::string & out_json);
+
     const char * last_error();
 
     static void set_log_verbosity(int verbosity);
+
+    // one-time ggml/llama backend init, shared with the handle-less helpers
+    static void ensure_backend_initialized();
 
     // Tokenization
     llama_engine_status tokenize(const std::string & text, bool add_special,
@@ -93,8 +100,6 @@ private:
                                                 bool from_resume);
     void                teardown_locked(std::unique_lock<std::mutex> & lock);
 
-    static void         ensure_backend_initialized();
-
     void                set_error(std::string msg);
 
     mutable std::mutex      mtx;
@@ -109,6 +114,7 @@ private:
     std::thread                            loop_thread;
     std::future<void>                      loop_done;
     std::unique_ptr<server_context_meta>   meta;
+    std::string                            caps_json;
     const llama_vocab *                    vocab = nullptr;
     struct mtmd_context *                  mctx  = nullptr; // unused in v1
 

@@ -88,6 +88,48 @@ extern "C" llama_engine_status llama_engine_probe_model_info(
     return st;
 }
 
+extern "C" llama_engine_status llama_engine_probe_chat_capabilities(
+    const llama_engine_config * config,
+    char                     ** out_json,
+    char                     ** out_error_msg)
+{
+    if (out_error_msg) *out_error_msg = nullptr;
+    if (!out_json) return LLAMA_ENGINE_ERR_INVALID_ARG;
+    *out_json = nullptr;
+    if (!config) return LLAMA_ENGINE_ERR_INVALID_ARG;
+
+    std::string json;
+    std::string err;
+    llama_engine_status st;
+    try {
+        st = llama_engine::probe_chat_capabilities(*config, json, err);
+    } catch (const std::exception & e) {
+        st  = LLAMA_ENGINE_ERR_INTERNAL;
+        err = e.what();
+    } catch (...) {
+        st  = LLAMA_ENGINE_ERR_INTERNAL;
+        err = "unknown exception in probe_chat_capabilities";
+    }
+    if (st != LLAMA_ENGINE_OK) {
+        if (out_error_msg && !err.empty()) *out_error_msg = dup_string(err);
+        return st;
+    }
+    *out_json = dup_string(json);
+    return *out_json ? LLAMA_ENGINE_OK : LLAMA_ENGINE_ERR_INTERNAL;
+}
+
+extern "C" llama_engine_status llama_engine_get_capabilities(llama_engine_t * engine, char ** out_json) {
+    if (!out_json) return LLAMA_ENGINE_ERR_INVALID_ARG;
+    *out_json = nullptr;
+    if (!engine) return LLAMA_ENGINE_ERR_INVALID_ARG;
+
+    std::string json;
+    auto st = engine->core.get_capabilities(json);
+    if (st != LLAMA_ENGINE_OK) return st;
+    *out_json = dup_string(json);
+    return *out_json ? LLAMA_ENGINE_OK : LLAMA_ENGINE_ERR_INTERNAL;
+}
+
 static void free_gguf_metadata(llama_engine_gguf_metadata & meta) {
     std::free(meta.size_label);
     meta.size_label = nullptr;

@@ -1,6 +1,7 @@
 #include "engine_core.hpp"
 
 #include "params_translator.hpp"
+#include "runtime_caps.hpp"
 
 #include "common.h"
 #include "log.h"
@@ -57,6 +58,17 @@ bool engine_core::is_mtp_active() const {
     const auto & types = last_params->speculative.types;
     return std::find(types.begin(), types.end(),
                      COMMON_SPECULATIVE_TYPE_DRAFT_MTP) != types.end();
+}
+
+llama_engine_status engine_core::get_capabilities(std::string & out_json) {
+    std::lock_guard<std::mutex> lock(mtx);
+    out_json.clear();
+    if (lifecycle.state() != LLAMA_ENGINE_STATE_READY || caps_json.empty()) {
+        set_error("engine not ready");
+        return LLAMA_ENGINE_ERR_NOT_LOADED;
+    }
+    out_json = caps_json;
+    return LLAMA_ENGINE_OK;
 }
 
 const char * engine_core::last_error() {
@@ -148,6 +160,9 @@ llama_engine_status engine_core::load_from_params_locked(std::unique_lock<std::m
     ctx    = std::move(new_ctx);
     routes = std::move(new_routes);
     meta   = std::make_unique<server_context_meta>(ctx->get_meta());
+    // get_meta() is not thread-safe: take the snapshot before the loop starts
+    caps_json = runtime_caps::document(runtime_caps::chat_template_section(
+        meta->chat_template_caps, !last_params->chat_template.empty()));
     vocab  = llama_model_get_vocab(llama_get_model(ctx->get_llama_context()));
     routes->update_meta(*ctx);
 
@@ -200,6 +215,7 @@ void engine_core::teardown_locked(std::unique_lock<std::mutex> & lock) {
         lock.lock();
         routes.reset();
         meta.reset();
+        caps_json.clear();
         ctx.reset();
         vocab = nullptr;
     }

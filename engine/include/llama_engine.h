@@ -280,6 +280,46 @@ llama_engine_status llama_engine_probe_model_info(
 // Safe to call on a zero-initialised struct.
 void llama_engine_free_model_info(llama_engine_model_info * info);
 
+// Capabilities as JSON documents. Both return a heap-allocated string that the
+// caller frees with llama_engine_free_string(). The document has stable keys:
+//   {
+//     "schema_version": 1,
+//     "chat_template": {
+//       "source": "gguf" | "override",
+//       "supports_tool_calls": bool, "supports_reasoning": bool, ... (jinja caps),
+//       "supports_reasoning_toggle": bool | null,   // null: not determined
+//       "reasoning_effort_levels": [string] | null  // [] : analysed, no distinct level
+//     } | null,
+//     "chat_template_error": string                 // only when chat_template is null
+//   }
+// Unknown keys must be ignored: later versions add sections without changing
+// the existing ones. Effort levels come from template rendering: an empty list
+// does not mean the model cannot reason.
+
+// Chat capabilities of a configuration, before loading it. Uses the same
+// template selection as llama_engine_load(): the GGUF "tool_use" template,
+// the BOS/EOS tokens and `chat_template_override`. Loads the vocabulary only,
+// not the weights, and initialises the backend once like llama_engine_load().
+// Independent of any llama_engine_t handle.
+//
+// Returns LLAMA_ENGINE_ERR_INVALID_ARG with `*out_error_msg` set (if non-NULL)
+// for an invalid config or an unreadable model. A template that fails to
+// parse returns LLAMA_ENGINE_OK with "chat_template": null.
+llama_engine_status llama_engine_probe_chat_capabilities(
+    const llama_engine_config * config,
+    char                     ** out_json,
+    char                     ** out_error_msg); // optional; caller frees with llama_engine_free_string()
+
+// Capabilities of the configuration loaded in `engine`, copied after the last
+// successful load or resume. Only valid in READY: any other state (UNLOADED,
+// PAUSED, transitions) returns LLAMA_ENGINE_ERR_NOT_LOADED and *out_json ==
+// NULL. Never loads or resumes the model. The idle sleep of the server does
+// not invalidate it: the document describes the configuration, it does not
+// mean the context is resident.
+llama_engine_status llama_engine_get_capabilities(
+    llama_engine_t * engine,
+    char          ** out_json);
+
 // Returns true when Multi-Token Prediction speculative decoding is currently
 // wired up against the loaded model (either self-MTP on the target, or an
 // external `mtp-*.gguf` draft head). Reflects the actual state after load:

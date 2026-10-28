@@ -72,4 +72,51 @@ struct ModelInfoTests {
         #expect(estimate.warnings.contains { $0.contains("context_length is missing") })
         #expect(estimate.warnings.contains { $0.contains("block_count is missing") })
     }
+
+    @Test func decodesEngineCapabilitiesDocument() throws {
+        let json = #"""
+        {
+          "schema_version": 1,
+          "future_section": {"x": 1},
+          "chat_template": {
+            "source": "override",
+            "supports_tool_calls": true,
+            "supports_reasoning": true,
+            "supports_reasoning_toggle": null,
+            "reasoning_effort_levels": ["low", "high", "ultra"],
+            "future_flag": true
+          }
+        }
+        """#
+
+        let caps = try EngineCapabilities(json: json)
+
+        #expect(caps.schemaVersion == 1)
+        #expect(caps.chatTemplate?.source == "override")
+        #expect(caps.chatTemplate?.supportsToolCalls == true)
+        #expect(caps.chatTemplate?.supportsReasoningToggle == nil)
+        #expect(caps.chatTemplate?.supportsSystemRole == nil)
+        #expect(caps.chatTemplate?.reasoningEffortLevels == ["low", "high", "ultra"])
+        #expect(caps.rawJSON.contains("future_section"))
+    }
+
+    @Test func distinguishesUnknownAndEmptyEffortLevels() throws {
+        let unknown = try EngineCapabilities(json: #"{"schema_version":1,"chat_template":{"reasoning_effort_levels":null}}"#)
+        let empty = try EngineCapabilities(json: #"{"schema_version":1,"chat_template":{"reasoning_effort_levels":[]}}"#)
+        let failed = try EngineCapabilities(json: #"{"schema_version":1,"chat_template":null,"chat_template_error":"bad"}"#)
+
+        #expect(unknown.chatTemplate?.reasoningEffortLevels == nil)
+        #expect(empty.chatTemplate?.reasoningEffortLevels == [])
+        #expect(failed.chatTemplate == nil)
+        #expect(failed.chatTemplateError == "bad")
+    }
+
+    @Test func modelCapabilitiesKeepEffortLevelsOptional() throws {
+        let old = try JSONDecoder().decode(ModelCapabilities.self, from: Data(#"{"supportsReasoning":true}"#.utf8))
+        #expect(old.reasoningEffortLevels == nil)
+
+        let caps = ModelCapabilities(supportsReasoning: true, reasoningEffortLevels: ["max"])
+        let decoded = try JSONDecoder().decode(ModelCapabilities.self, from: JSONEncoder().encode(caps))
+        #expect(decoded.reasoningEffortLevels == ["max"])
+    }
 }

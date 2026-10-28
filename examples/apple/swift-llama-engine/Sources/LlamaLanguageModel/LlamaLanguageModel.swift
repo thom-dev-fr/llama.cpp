@@ -33,7 +33,7 @@ public import LlamaOpenAICompatible
 /// ```
 ///
 /// If the capability set should be read from GGUF metadata, create the adapter
-/// with ``probing(name:configuration:)``.
+/// with ``probing(name:configuration:reasoningEffortMapping:)``.
 @available(iOS 27.0, macOS 27.0, *)
 public struct LlamaLanguageModel: Sendable, LanguageModel {
     /// OpenAI-compatible reasoning-effort value type used by this adapter.
@@ -69,6 +69,10 @@ public struct LlamaLanguageModel: Sendable, LanguageModel {
     /// The model capabilities declared to Foundation Models.
     public let capabilities: LanguageModelCapabilities
 
+    /// The llama.cpp capabilities detected by ``probing(name:configuration:reasoningEffortMapping:)``,
+    /// `nil` when the model was created with an explicit capability set.
+    public let detectedCapabilities: ModelCapabilities?
+
     /// Shared local runtime state owned by this model value's reference storage.
     ///
     /// `LanguageModelExecutor` instances are created and cached by Foundation
@@ -88,18 +92,22 @@ public struct LlamaLanguageModel: Sendable, LanguageModel {
     ///     `ContextOptions.reasoningLevel` into llama.cpp `chat_template_kwargs`
     ///     when the request asks for reasoning.
     ///   - capabilities: The capabilities to expose to Foundation Models.
+    ///   - detectedCapabilities: The llama.cpp capabilities the declared set
+    ///     was derived from, when known.
     public init(
         name: String,
         configuration: ModelConfig,
         extraBody: [String: LlamaOpenAICompatibleJSONValue] = [:],
         reasoningEffortMapping: ReasoningEffortMapping = .openAICompatible,
-        capabilities: LanguageModelCapabilities
+        capabilities: LanguageModelCapabilities,
+        detectedCapabilities: ModelCapabilities? = nil
     ) {
         self.name = name
         self.configuration = configuration
         self.extraBody = extraBody
         self.reasoningEffortMapping = reasoningEffortMapping
         self.capabilities = capabilities
+        self.detectedCapabilities = detectedCapabilities
         self.runtimeStorage = LlamaLanguageModelRuntimeStorage(
             configuration: Executor.Configuration(
                 name: name,
@@ -143,8 +151,14 @@ public struct LlamaLanguageModel: Sendable, LanguageModel {
     /// metadata.
     ///
     /// This method asks `LlamaEngine` to inspect GGUF metadata for the model
-    /// and optional multimodal projector in `configuration`. It does not load
-    /// the full model weights for generation.
+    /// and optional multimodal projector in `configuration`, and the chat
+    /// template selected by the full configuration, including
+    /// ``ModelConfig/chatTemplateOverride``. It reads the vocabulary but does
+    /// not load the model weights.
+    ///
+    /// Without an explicit `reasoningEffortMapping`, the mapping is built with
+    /// ``LlamaOpenAICompatibleReasoningEffortMapping/automatic(reasoningEffortLevels:supportsReasoningToggle:)``
+    /// from the detected effort levels.
     ///
     /// ```swift
     /// let model = try await LlamaLanguageModel.probing(
@@ -160,20 +174,40 @@ public struct LlamaLanguageModel: Sendable, LanguageModel {
     ///   - name: The model identifier to include in generation requests.
     ///   - configuration: The model configuration whose model and projector
     ///     metadata should be inspected.
+    ///   - reasoningEffortMapping: A manual mapping that takes precedence over
+    ///     the detected one.
     /// - Returns: A model whose capabilities match the metadata reported by
     ///   `LlamaEngine`.
     public static func probing(
         name: String,
-        configuration: ModelConfig
+        configuration: ModelConfig,
+        reasoningEffortMapping: ReasoningEffortMapping? = nil
     ) async throws -> LlamaLanguageModel {
         let info = try await LlamaEngine.modelInfo(
             modelURL: configuration.modelPath,
             mmprojURL: configuration.mtmdProjectorPath
         )
+        let chat = try await LlamaEngine.chatCapabilities(for: configuration)
+
+        var detected = info.capabilities
+        detected.reasoningEffortLevels = chat.chatTemplate?.reasoningEffortLevels
+        if let chatTemplate = chat.chatTemplate {
+            // the effective template wins over the embedded one read by the GGUF probe
+            detected.supportsToolCalls = chatTemplate.supportsToolCalls ?? detected.supportsToolCalls
+            detected.supportsReasoning = chatTemplate.supportsReasoning ?? detected.supportsReasoning
+            detected.supportsReasoningToggle = chatTemplate.supportsReasoningToggle
+            detected.supportsPreserveReasoning = chatTemplate.supportsPreserveReasoning ?? detected.supportsPreserveReasoning
+        }
+
         return LlamaLanguageModel(
             name: name,
             configuration: configuration,
-            capabilities: foundationModelCapabilities(from: info.capabilities)
+            reasoningEffortMapping: reasoningEffortMapping ?? .automatic(
+                reasoningEffortLevels: detected.reasoningEffortLevels,
+                supportsReasoningToggle: detected.supportsReasoningToggle
+            ),
+            capabilities: foundationModelCapabilities(from: detected),
+            detectedCapabilities: detected
         )
     }
 
