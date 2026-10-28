@@ -90,6 +90,35 @@ extension LlamaEngine {
         return EngineStream(engine: self, handle: streamHandle)
     }
 
+    func capabilitiesSync() throws -> EngineCapabilities {
+        var outJSON: UnsafeMutablePointer<CChar>? = nil
+        let status = llama_engine_get_capabilities(handle, &outJSON)
+        let json = outJSON.map { String(cString: $0) }
+        llama_engine_free_string(outJSON)
+
+        try throwIfError(status)
+        guard let json else { throw LlamaError.internalError("empty capabilities document") }
+        return try EngineCapabilities(json: json)
+    }
+
+    static func chatCapabilitiesSync(for config: ModelConfig) throws -> EngineCapabilities {
+        var outJSON: UnsafeMutablePointer<CChar>? = nil
+        var errPtr: UnsafeMutablePointer<CChar>? = nil
+        let status = config.withCConfig { cfg in
+            llama_engine_probe_chat_capabilities(&cfg, &outJSON, &errPtr)
+        }
+        let json = outJSON.map { String(cString: $0) }
+        let message = errPtr.map { String(cString: $0) }
+        llama_engine_free_string(outJSON)
+        llama_engine_free_string(errPtr)
+
+        if status != LLAMA_ENGINE_OK {
+            throw LlamaError.invalidArgument(message ?? "chat capabilities probe failed")
+        }
+        guard let json else { throw LlamaError.internalError("empty capabilities document") }
+        return try EngineCapabilities(json: json)
+    }
+
     func lastErrorMessage() -> String? {
         guard let cstr = llama_engine_last_error(handle) else { return nil }
         return String(cString: cstr)

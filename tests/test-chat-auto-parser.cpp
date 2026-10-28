@@ -2139,6 +2139,14 @@ static void test_reasoning_capabilities(testing & t) {
     const auto cohere_caps      = common_chat_templates_get_caps(cohere_templates.get());
     t.assert_true("Cohere2MoE caps should support reasoning", cohere_caps.at("supports_reasoning").get<bool>());
     t.assert_true("Cohere2MoE caps should support reasoning toggle", cohere_caps.at("supports_reasoning_toggle").get<bool>());
+    t.assert_true("Cohere2MoE caps should know the reasoning toggle", cohere_caps.at("supports_reasoning_toggle_known").get<bool>());
+    // the fork flags coexist with the upstream effort levels
+    t.assert_true("Cohere2MoE caps should keep the effort levels", cohere_caps.at("reasoning_effort_levels").is_array());
+
+    const auto gpt_oss_templates = common_chat_templates_init(nullptr, load_template(t, "models/templates/openai-gpt-oss-120b.jinja").source());
+    const auto gpt_oss_caps      = common_chat_templates_get_caps(gpt_oss_templates.get());
+    t.assert_true("GPT-OSS caps should support reasoning", gpt_oss_caps.at("supports_reasoning").get<bool>());
+    t.assert_true("GPT-OSS caps should keep all effort levels", gpt_oss_caps.at("reasoning_effort_levels").size() == 6);
     t.assert_true("Cohere2MoE should support reasoning toggle",
                   common_chat_templates_supports_reasoning_toggle(cohere_templates.get()));
 
