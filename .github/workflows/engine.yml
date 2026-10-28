@@ -1,0 +1,191 @@
+name: CI (engine)
+
+# Fork-only workflow for engine/ and the Swift package. Kept apart from the
+# upstream workflows so that rebases do not conflict with them.
+
+on:
+  workflow_dispatch:
+    inputs:
+      ios:
+        description: 'Also build the iOS device and simulator slices'
+        type: boolean
+        default: false
+  push:
+    paths: &engine_paths
+      - '.github/workflows/engine.yml'
+      - 'CMakeLists.txt'
+      - 'cmake/**'
+      - 'engine/**'
+      - 'common/**'
+      - 'include/**'
+      - 'src/**'
+      - 'ggml/**'
+      - 'tools/server/**'
+      - 'tools/mtmd/**'
+      - 'vendor/**'
+      - 'examples/apple/swift-llama-engine/**'
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths: *engine_paths
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref && github.ref || github.run_id }}
+  cancel-in-progress: true
+
+env:
+  # same fixture and hash as tests/CMakeLists.txt
+  ENGINE_TEST_MODEL_NAME: tinyllamas/stories15M-q4_0.gguf
+  ENGINE_TEST_MODEL_SHA256: 66967fbece6dbe97886593fdbb73589584927e29119ec31f08090732d1861739
+  # Xcode with the SDK that ships the Foundation Models APIs used by the package
+  ENGINE_XCODE: /Applications/Xcode_27.1.app
+
+jobs:
+  engine-cpu:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Clone
+        uses: actions/checkout@v6
+
+      - name: Restore test model
+        id: model_cache
+        uses: actions/cache@v5
+        with:
+          path: models-cache
+          key: engine-model-${{ env.ENGINE_TEST_MODEL_SHA256 }}
+
+      - name: Download test model
+        if: steps.model_cache.outputs.cache-hit != 'true'
+        run: |
+          cmake -DDEST="$PWD/models-cache/${ENGINE_TEST_MODEL_NAME}" -DNAME="${ENGINE_TEST_MODEL_NAME}" \
+                -DHASH="SHA256=${ENGINE_TEST_MODEL_SHA256}" -P cmake/download-models.cmake
+
+      - name: Build
+        run: |
+          cmake -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DLLAMA_HTTPLIB=OFF \
+            -DLLAMA_BUILD_SERVER=OFF \
+            -DLLAMA_BUILD_TESTS=OFF \
+            -DLLAMA_BUILD_TOOLS=OFF \
+            -DLLAMA_BUILD_EXAMPLES=OFF \
+            -DLLAMA_BUILD_COMMON=ON \
+            -DLLAMA_BUILD_MTMD=ON \
+            -DLLAMA_BUILD_ENGINE=ON \
+            -DLLAMA_BUILD_ENGINE_TESTS=ON \
+            -DLLAMA_ENGINE_TEST_MODEL="$PWD/models-cache/${ENGINE_TEST_MODEL_NAME}"
+          cmake --build build --config Release -j $(nproc) --target test-llama-engine-pure test-llama-engine-capi
+
+      - name: Test
+        run: |
+          ctest --test-dir build -L engine --output-on-failure --no-tests=error --output-junit engine-cpu.xml
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: engine-cpu-results
+          path: |
+            build/CMakeCache.txt
+            build/engine-cpu.xml
+
+  engine-macos:
+    runs-on: macos-26
+
+    steps:
+      - name: Clone
+        uses: actions/checkout@v6
+
+      - name: Select Xcode
+        run: |
+          if [ ! -d "${ENGINE_XCODE}" ]; then
+            echo "::error::${ENGINE_XCODE} not found on this runner, the Swift package needs its SDK"
+            ls -d /Applications/Xcode*.app || true
+            exit 1
+          fi
+          sudo xcode-select -s "${ENGINE_XCODE}"
+          xcodebuild -version
+          git rev-parse HEAD
+
+      - name: Restore test model
+        id: model_cache
+        uses: actions/cache@v5
+        with:
+          path: models-cache
+          key: engine-model-${{ env.ENGINE_TEST_MODEL_SHA256 }}
+
+      - name: Download test model
+        if: steps.model_cache.outputs.cache-hit != 'true'
+        run: |
+          cmake -DDEST="$PWD/models-cache/${ENGINE_TEST_MODEL_NAME}" -DNAME="${ENGINE_TEST_MODEL_NAME}" \
+                -DHASH="SHA256=${ENGINE_TEST_MODEL_SHA256}" -P cmake/download-models.cmake
+
+      - name: Build engine tests
+        run: |
+          cmake -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DLLAMA_HTTPLIB=OFF \
+            -DLLAMA_BUILD_SERVER=OFF \
+            -DLLAMA_BUILD_TESTS=OFF \
+            -DLLAMA_BUILD_TOOLS=OFF \
+            -DLLAMA_BUILD_EXAMPLES=OFF \
+            -DLLAMA_BUILD_COMMON=ON \
+            -DLLAMA_BUILD_MTMD=ON \
+            -DLLAMA_BUILD_ENGINE=ON \
+            -DLLAMA_BUILD_ENGINE_TESTS=ON \
+            -DGGML_METAL=ON \
+            -DLLAMA_ENGINE_TEST_MODEL="$PWD/models-cache/${ENGINE_TEST_MODEL_NAME}"
+          cmake --build build --config Release -j $(sysctl -n hw.logicalcpu) --target test-llama-engine-pure test-llama-engine-capi
+
+      - name: Test engine (CPU + Metal)
+        run: |
+          ctest --test-dir build -L engine --output-on-failure --no-tests=error --output-junit engine-macos.xml
+
+      - name: Build XCFramework (macOS)
+        run: |
+          rm -rf examples/apple/swift-llama-engine/build/LlamaEngineCore.xcframework
+          ./examples/apple/swift-llama-engine/scripts/build-xcframework.sh --platform macos --release
+          lib=$(find examples/apple/swift-llama-engine/build/LlamaEngineCore.xcframework -path '*LlamaEngineCore.framework/*' -type f -name LlamaEngineCore | head -n 1)
+          if [ -z "${lib}" ]; then
+            echo "::error::XCFramework binary not found"
+            exit 1
+          fi
+          file "${lib}"
+
+      - name: Swift tests
+        working-directory: examples/apple/swift-llama-engine
+        run: |
+          swift build
+          swift test --xunit-output swift-tests.xml
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: engine-macos-results
+          path: |
+            build/CMakeCache.txt
+            build/engine-macos.xml
+            examples/apple/swift-llama-engine/swift-tests*.xml
+
+  engine-ios:
+    if: github.event_name == 'workflow_dispatch' && inputs.ios
+    runs-on: macos-26
+
+    steps:
+      - name: Clone
+        uses: actions/checkout@v6
+
+      - name: Select Xcode
+        run: |
+          sudo xcode-select -s "${ENGINE_XCODE}"
+          xcodebuild -version
+
+      # compile and link only, this does not run anything on a device
+      - name: Build XCFramework (iOS device + simulator)
+        run: |
+          ./examples/apple/swift-llama-engine/scripts/build-xcframework.sh --platform ios --release
+          ./examples/apple/swift-llama-engine/scripts/build-xcframework.sh --platform ios-sim --release

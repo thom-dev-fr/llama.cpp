@@ -79,8 +79,6 @@ if (ANDROID)
     target_compile_options(llama-engine PRIVATE -Wno-missing-prototypes)
 endif()
 
-option(LLAMA_BUILD_ENGINE_TESTS "Build llama-engine C++ unit tests" OFF)
 if (LLAMA_BUILD_ENGINE_TESTS)
-    enable_testing()
     add_subdirectory(${LLAMA_ENGINE_ROOT}/tests ${CMAKE_CURRENT_BINARY_DIR}/tests)
 endif()
