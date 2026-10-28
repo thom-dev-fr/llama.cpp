@@ -26,7 +26,7 @@ cmake -B build -DLLAMA_BUILD_ENGINE=ON
 cmake --build build --target llama-engine
 ```
 
-To build and run the unit tests:
+To build and run the tests:
 
 ```sh
 cmake -S . -B build-engine-tests \
@@ -34,16 +34,26 @@ cmake -S . -B build-engine-tests \
   -DLLAMA_BUILD_ENGINE_TESTS=ON \
   -DLLAMA_BUILD_COMMON=ON \
   -DLLAMA_BUILD_MTMD=ON \
-  -DLLAMA_BUILD_TOOLS=OFF
-cmake --build build-engine-tests --target test-llama-engine-pure
-ctest --test-dir build-engine-tests --output-on-failure -R llama-engine-pure
+  -DLLAMA_BUILD_TOOLS=OFF \
+  -DLLAMA_BUILD_SERVER=OFF \
+  -DLLAMA_HTTPLIB=OFF
+cmake --build build-engine-tests --target test-llama-engine-pure test-llama-engine-capi
+ctest --test-dir build-engine-tests -L engine --output-on-failure --no-tests=error
 ```
 
-You can also run the test binary directly:
+Tests:
+
+- `llama-engine-pure`: unit tests of the internal modules, no model.
+- `llama-engine-capi-cpu` (and `llama-engine-capi-metal` with Metal): end-to-end test of the public C API, written in C. It loads `tinyllamas/stories15M-q4_0.gguf`, downloaded by the `llama-engine-download-model` fixture. Pass `-DLLAMA_ENGINE_TEST_MODEL=/path/to/model.gguf` to use a local file and skip the download. Without a model the test exits with code 77 and CTest reports it as skipped.
+
+You can also run the test binaries directly:
 
 ```sh
 ./build-engine-tests/bin/test-llama-engine-pure
+./build-engine-tests/bin/test-llama-engine-capi /path/to/stories15M-q4_0.gguf [gpu_layers]
 ```
+
+CI runs these tests, the macOS XCFramework build and the Swift package tests in `.github/workflows/engine.yml`.
 
 ## Swift binding example
 

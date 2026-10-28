@@ -275,7 +275,12 @@ if (LLAMA_BUILD_MTMD AND NOT (LLAMA_BUILD_COMMON AND LLAMA_BUILD_TOOLS))
 endif()
 
 option(LLAMA_BUILD_ENGINE "llama: build the embeddable inference engine" OFF)
+option(LLAMA_BUILD_ENGINE_TESTS "llama: build the llama-engine tests" OFF)
 if (LLAMA_BUILD_ENGINE AND LLAMA_BUILD_COMMON)
+    # ctest only finds tests when testing is enabled in the top-level directory
+    if (LLAMA_BUILD_ENGINE_TESTS)
+        enable_testing()
+    endif()
     if (NOT TARGET mtmd)
         message(FATAL_ERROR "llama-engine requires the mtmd target. Configure with -DLLAMA_BUILD_MTMD=ON when LLAMA_BUILD_TOOLS=OFF.")
     endif()
