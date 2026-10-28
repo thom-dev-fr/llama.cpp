@@ -8,6 +8,7 @@
 #include "server-context.h"
 
 #include <atomic>
+#include <future>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -106,6 +107,7 @@ private:
     std::unique_ptr<server_context>        ctx;
     std::shared_ptr<server_routes>         routes;
     std::thread                            loop_thread;
+    std::future<void>                      loop_done;
     std::unique_ptr<server_context_meta>   meta;
     const llama_vocab *                    vocab = nullptr;
     struct mtmd_context *                  mctx  = nullptr; // unused in v1
