@@ -185,6 +185,31 @@ static void test_capabilities(llama_engine_t * engine) {
     EXPECT_STATUS(llama_engine_get_capabilities(engine, NULL), LLAMA_ENGINE_ERR_INVALID_ARG);
 }
 
+static void test_measure_memory(llama_engine_t * engine, const llama_engine_config * cfg) {
+    fprintf(stderr, "  * measure memory while loaded\n");
+    char * json = NULL;
+    char * err  = NULL;
+    EXPECT_STATUS(llama_engine_measure_memory(cfg, &json, &err), LLAMA_ENGINE_OK);
+    EXPECT(err == NULL);
+    EXPECT(json != NULL && strstr(json, "\"source\":\"native\"") != NULL);
+    EXPECT(json != NULL && strstr(json, "\"n_ctx\":256") != NULL);
+    EXPECT(json != NULL && strstr(json, "\"complete\":true") != NULL);
+    llama_engine_free_string(json);
+
+    // the loaded engine is left alone
+    EXPECT(llama_engine_get_state(engine) == LLAMA_ENGINE_STATE_READY);
+    char * out = NULL;
+    EXPECT_STATUS(llama_engine_chat_completion(engine, k_chat_request, &out), LLAMA_ENGINE_OK);
+    llama_engine_free_string(out);
+
+    llama_engine_config missing = *cfg;
+    missing.model_path = "/nonexistent/model.gguf";
+    json = NULL;
+    EXPECT_STATUS(llama_engine_measure_memory(&missing, &json, &err), LLAMA_ENGINE_ERR_LOAD_FAILED);
+    EXPECT(json == NULL && err != NULL);
+    llama_engine_free_string(err);
+}
+
 static void test_pause_resume(llama_engine_t * engine) {
     fprintf(stderr, "  * pause / resume\n");
     EXPECT_STATUS(llama_engine_pause(engine), LLAMA_ENGINE_OK);
@@ -276,6 +301,7 @@ int main(int argc, char ** argv) {
     test_completion(engine);
     test_stream(engine);
     test_stream_cancel(engine);
+    test_measure_memory(engine, &cfg);
     test_pause_resume(engine);
     test_unload(engine, &cfg);
 
