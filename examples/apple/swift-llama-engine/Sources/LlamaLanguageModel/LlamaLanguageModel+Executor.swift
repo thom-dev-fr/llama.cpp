@@ -76,6 +76,11 @@ extension LlamaLanguageModel {
             }
 
             do {
+                if let description = configuration.reasoningEffortMapping.unsupportedLevelDescription(
+                    for: request.contextOptions.reasoningLevel
+                ) {
+                    throw LlamaLanguageModelError.invalidRequest(description)
+                }
                 let requestJSON = try LlamaOpenAICompatibleGenerationRequestBuilder.requestJSON(
                     from: request,
                     modelName: model.name,

@@ -70,6 +70,12 @@ extension LlamaServerLanguageModel {
                 streamingClient: configuration.endpoint.streamingClient(session: model.urlSession)
             )
 
+            if let description = configuration.reasoningEffortMapping.unsupportedLevelDescription(
+                for: request.contextOptions.reasoningLevel
+            ) {
+                throw LlamaServerLanguageModel.RequestError.invalidRequest(description)
+            }
+
             let generationRequest = try LlamaOpenAICompatibleGenerationRequestBuilder.request(
                 from: request,
                 modelName: configuration.endpoint.modelName,

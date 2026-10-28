@@ -119,6 +119,40 @@ public final class LlamaEngine: @unchecked Sendable {
         }.value
     }
 
+    /// Reads the chat capabilities of a configuration without loading it.
+    ///
+    /// Unlike ``modelInfo(modelURL:mmprojURL:)``, this follows the template
+    /// selection of ``load(_:)``: the GGUF `tool_use` template, the BOS/EOS
+    /// tokens and ``ModelConfig/chatTemplateOverride``. It reads the model
+    /// vocabulary, not the weights.
+    ///
+    /// ```swift
+    /// let caps = try await LlamaEngine.chatCapabilities(for: config)
+    /// print(caps.chatTemplate?.reasoningEffortLevels ?? [])
+    /// ```
+    ///
+    /// - Parameter config: The configuration to inspect.
+    /// - Returns: The capabilities document. ``EngineCapabilities/chatTemplate``
+    ///   is `nil` when the template cannot be analysed.
+    public static func chatCapabilities(for config: ModelConfig) async throws -> EngineCapabilities {
+        try await Task.detached(priority: .userInitiated) {
+            try LlamaEngine.chatCapabilitiesSync(for: config)
+        }.value
+    }
+
+    /// Reads the capabilities of the loaded configuration.
+    ///
+    /// The engine copies this snapshot after each successful load or resume.
+    /// The call never loads or resumes a model: it throws
+    /// ``LlamaError/notLoaded`` unless the engine is ``EngineState/ready``.
+    ///
+    /// - Returns: The capabilities of the loaded configuration.
+    public func capabilities() async throws -> EngineCapabilities {
+        try await Task.detached(priority: .userInitiated) {
+            try self.capabilitiesSync()
+        }.value
+    }
+
     // MARK: - Lifecycle
 
     /// Loads a model into the engine.

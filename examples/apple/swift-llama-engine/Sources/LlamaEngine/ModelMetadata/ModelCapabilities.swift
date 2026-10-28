@@ -41,6 +41,11 @@ public struct ModelCapabilities: Sendable, Hashable, Codable {
     /// is actually wired up at runtime is reported by `LlamaEngine.isMTPActive`.
     public var supportsMTP: Bool
 
+    /// Reasoning-effort values detected for the effective chat template, from
+    /// ``LlamaEngine/chatCapabilities(for:)``. `nil` means unknown: the GGUF
+    /// metadata probe does not fill it.
+    public var reasoningEffortLevels: [String]?
+
     public init(hasMultimodal: Bool = false,
                 supportsVision: Bool = false,
                 supportsAudio: Bool = false,
@@ -48,7 +53,8 @@ public struct ModelCapabilities: Sendable, Hashable, Codable {
                 supportsReasoning: Bool = false,
                 supportsReasoningToggle: Bool? = nil,
                 supportsPreserveReasoning: Bool = false,
-                supportsMTP: Bool = false) {
+                supportsMTP: Bool = false,
+                reasoningEffortLevels: [String]? = nil) {
         self.hasMultimodal             = hasMultimodal
         self.supportsVision            = supportsVision
         self.supportsAudio             = supportsAudio
@@ -57,6 +63,7 @@ public struct ModelCapabilities: Sendable, Hashable, Codable {
         self.supportsReasoningToggle   = supportsReasoningToggle
         self.supportsPreserveReasoning = supportsPreserveReasoning
         self.supportsMTP               = supportsMTP
+        self.reasoningEffortLevels     = reasoningEffortLevels
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -68,6 +75,7 @@ public struct ModelCapabilities: Sendable, Hashable, Codable {
         case supportsReasoningToggle
         case supportsPreserveReasoning
         case supportsMTP
+        case reasoningEffortLevels
     }
 
     public init(from decoder: Decoder) throws {
@@ -80,7 +88,8 @@ public struct ModelCapabilities: Sendable, Hashable, Codable {
             supportsReasoning:         try c.decodeIfPresent(Bool.self, forKey: .supportsReasoning) ?? false,
             supportsReasoningToggle:   try c.decodeIfPresent(Bool.self, forKey: .supportsReasoningToggle),
             supportsPreserveReasoning: try c.decodeIfPresent(Bool.self, forKey: .supportsPreserveReasoning) ?? false,
-            supportsMTP:               try c.decodeIfPresent(Bool.self, forKey: .supportsMTP) ?? false
+            supportsMTP:               try c.decodeIfPresent(Bool.self, forKey: .supportsMTP) ?? false,
+            reasoningEffortLevels:     try c.decodeIfPresent([String].self, forKey: .reasoningEffortLevels)
         )
     }
 
@@ -94,6 +103,7 @@ public struct ModelCapabilities: Sendable, Hashable, Codable {
         try c.encodeIfPresent(supportsReasoningToggle, forKey: .supportsReasoningToggle)
         try c.encode(supportsPreserveReasoning, forKey: .supportsPreserveReasoning)
         try c.encode(supportsMTP, forKey: .supportsMTP)
+        try c.encodeIfPresent(reasoningEffortLevels, forKey: .reasoningEffortLevels)
     }
 
     /// Returns true as soon as any feature flag is set.

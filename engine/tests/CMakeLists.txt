@@ -9,7 +9,12 @@ add_executable(test-llama-engine-pure
     test_engine_lifecycle.cpp
     test_inflight_registry.cpp
     test_chat_route_adapter.cpp
+    test_runtime_caps.cpp
 )
+
+# vocab-only GGUF shipped with the repo: metadata and tokenizer, no weights
+target_compile_definitions(test-llama-engine-pure PRIVATE
+    LLAMA_ENGINE_TEST_VOCAB="${LLAMA_REPO_ROOT_T}/models/ggml-vocab-qwen2.gguf")
 
 target_include_directories(test-llama-engine-pure PRIVATE
     ${LLAMA_REPO_ROOT_T}/engine/include

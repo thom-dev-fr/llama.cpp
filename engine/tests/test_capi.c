@@ -158,13 +158,48 @@ static void test_stream_cancel(llama_engine_t * engine) {
     llama_engine_stream_close(stream);
 }
 
+static bool caps_contain(llama_engine_t * engine, const char * needle) {
+    char * json = NULL;
+    llama_engine_status st = llama_engine_get_capabilities(engine, &json);
+    bool found = st == LLAMA_ENGINE_OK && json != NULL && strstr(json, needle) != NULL;
+    llama_engine_free_string(json);
+    return found;
+}
+
+static void test_probe_chat_capabilities(const llama_engine_config * cfg) {
+    fprintf(stderr, "  * probe chat capabilities\n");
+    char * json = NULL;
+    char * err  = NULL;
+    EXPECT_STATUS(llama_engine_probe_chat_capabilities(cfg, &json, &err), LLAMA_ENGINE_OK);
+    EXPECT(err == NULL);
+    // stories15M has no template: the chatml fallback is reported as the GGUF one
+    EXPECT(json != NULL && strstr(json, "\"schema_version\":1") != NULL);
+    EXPECT(json != NULL && strstr(json, "\"source\":\"gguf\"") != NULL);
+    llama_engine_free_string(json);
+}
+
+static void test_capabilities(llama_engine_t * engine) {
+    fprintf(stderr, "  * runtime capabilities\n");
+    EXPECT(caps_contain(engine, "\"schema_version\":1"));
+    EXPECT(caps_contain(engine, "\"reasoning_effort_levels\""));
+    EXPECT_STATUS(llama_engine_get_capabilities(engine, NULL), LLAMA_ENGINE_ERR_INVALID_ARG);
+}
+
 static void test_pause_resume(llama_engine_t * engine) {
     fprintf(stderr, "  * pause / resume\n");
     EXPECT_STATUS(llama_engine_pause(engine), LLAMA_ENGINE_OK);
     EXPECT(llama_engine_get_state(engine) == LLAMA_ENGINE_STATE_PAUSED);
     EXPECT_STATUS(llama_engine_pause(engine), LLAMA_ENGINE_OK);
+
+    // the getter does not resume a paused engine
+    char * json = NULL;
+    EXPECT_STATUS(llama_engine_get_capabilities(engine, &json), LLAMA_ENGINE_ERR_NOT_LOADED);
+    EXPECT(json == NULL);
+    EXPECT(llama_engine_get_state(engine) == LLAMA_ENGINE_STATE_PAUSED);
+
     EXPECT_STATUS(llama_engine_resume(engine), LLAMA_ENGINE_OK);
     EXPECT(llama_engine_get_state(engine) == LLAMA_ENGINE_STATE_READY);
+    EXPECT(caps_contain(engine, "\"schema_version\":1"));
 
     // a request on a paused engine resumes it
     EXPECT_STATUS(llama_engine_pause(engine), LLAMA_ENGINE_OK);
@@ -185,6 +220,14 @@ static void test_unload(llama_engine_t * engine, const llama_engine_config * cfg
     EXPECT(out == NULL);
     EXPECT(llama_engine_last_error(engine) != NULL);
     EXPECT_STATUS(llama_engine_resume(engine), LLAMA_ENGINE_ERR_NOT_LOADED);
+    EXPECT(!caps_contain(engine, "schema_version"));
+
+    // a reload with another template must not show the old snapshot
+    llama_engine_config cfg_override = *cfg;
+    cfg_override.chat_template_override = "chatml";
+    EXPECT_STATUS(llama_engine_load(engine, &cfg_override), LLAMA_ENGINE_OK);
+    EXPECT(caps_contain(engine, "\"source\":\"override\""));
+    EXPECT_STATUS(llama_engine_unload(engine), LLAMA_ENGINE_OK);
 }
 
 int main(int argc, char ** argv) {
@@ -204,6 +247,7 @@ int main(int argc, char ** argv) {
     if (!engine) return 1;
 
     test_not_loaded(engine);
+    EXPECT(!caps_contain(engine, "schema_version"));
 
     llama_engine_config cfg;
     memset(&cfg, 0, sizeof(cfg));
@@ -217,6 +261,8 @@ int main(int argc, char ** argv) {
     cfg.kv_cache_type      = LLAMA_ENGINE_KV_F16;
     cfg.idle_pause_seconds = -1;
 
+    test_probe_chat_capabilities(&cfg);
+
     EXPECT_STATUS(llama_engine_load(engine, &cfg), LLAMA_ENGINE_OK);
     if (llama_engine_get_state(engine) != LLAMA_ENGINE_STATE_READY) {
         const char * err = llama_engine_last_error(engine);
@@ -225,6 +271,7 @@ int main(int argc, char ** argv) {
         return 1;
     }
 
+    test_capabilities(engine);
     test_tokens(engine);
     test_completion(engine);
     test_stream(engine);
