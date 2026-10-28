@@ -4,11 +4,11 @@ import Foundation
 /// ``LlamaEngine/measureMemory(for:)``.
 ///
 /// Unlike ``MemoryEstimate``, these values come from llama.cpp creating the
-/// model and its context without allocating them. Weights and KV cache match a
-/// loaded context; compute buffers are an upper bound. ``coverage`` and
-/// ``isComplete`` say what is not measured, for example the multimodal
-/// projector. This is not the process memory footprint, and device free memory
-/// can change before a load.
+/// model, its context, the multimodal projector and the MTP draft context
+/// without allocating them. Weights and KV cache match a loaded context;
+/// compute buffers are an upper bound. ``coverage`` and ``isComplete`` say
+/// which part could not be measured. This is not the process memory
+/// footprint, and device free memory can change before a load.
 public struct NativeMemoryReport: Sendable, Hashable, Decodable {
     /// One device, the host, or a separate buffer type. Rows do not overlap.
     public struct Row: Sendable, Hashable, Decodable {
@@ -75,10 +75,34 @@ public struct NativeMemoryReport: Sendable, Hashable, Decodable {
     }
 
     public struct RequiredBytes: Sendable, Hashable, Decodable {
+        /// Weights of the main model, with its MTP head.
         public var model: UInt64
         public var context: UInt64
         public var compute: UInt64
+        /// The multimodal projector: weights and the compute buffer of its
+        /// largest input. `0` without a projector or when it is not measured.
+        public var projector: UInt64
+        /// Context and compute of the MTP draft context, with the weights of
+        /// an external draft model. `0` without MTP or when it is not measured.
+        public var mtpDraft: UInt64
+        /// All the parts above.
         public var total: UInt64
+
+        enum CodingKeys: String, CodingKey {
+            case model, context, compute, projector, total
+            case mtpDraft = "mtp_draft"
+        }
+
+        public init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            model     = try c.decode(UInt64.self, forKey: .model)
+            context   = try c.decode(UInt64.self, forKey: .context)
+            compute   = try c.decode(UInt64.self, forKey: .compute)
+            // schema 1 did not measure them
+            projector = try c.decodeIfPresent(UInt64.self, forKey: .projector) ?? 0
+            mtpDraft  = try c.decodeIfPresent(UInt64.self, forKey: .mtpDraft) ?? 0
+            total     = try c.decode(UInt64.self, forKey: .total)
+        }
     }
 
     /// Which parts of the configuration are measured.

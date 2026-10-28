@@ -148,6 +148,29 @@ struct ModelInfoTests {
         #expect(report.requiredBytes.total == 7_516_192_770)
         #expect(!report.isComplete)
         #expect(!report.coverage.projector)
+        #expect(report.requiredBytes.projector == 0)
+        #expect(report.requiredBytes.mtpDraft == 0)
+    }
+
+    @Test func decodesMeasuredProjectorAndMTPDraft() throws {
+        let json = #"""
+        {
+          "schema_version": 2, "source": "native",
+          "effective": {"n_ctx": 4096},
+          "rows": [{"kind": "device", "name": "MTL0", "model_bytes": 1000, "context_bytes": 200, "compute_bytes": 30}],
+          "required_bytes": {"model": 1000, "context": 200, "compute": 30, "projector": 400, "mtp_draft": 50, "total": 1680},
+          "coverage": {"model": true, "context": true, "projector": true, "mtp_draft": true},
+          "complete": true,
+          "warnings": []
+        }
+        """#
+
+        let report = try NativeMemoryReport(json: json)
+
+        #expect(report.requiredBytes.projector == 400)
+        #expect(report.requiredBytes.mtpDraft == 50)
+        #expect(report.requiredBytes.total == 1680)
+        #expect(report.isComplete)
     }
 
     @Test func memoryUsageFallsBackOnlyWhenAsked() async throws {

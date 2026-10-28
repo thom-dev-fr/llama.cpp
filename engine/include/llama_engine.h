@@ -335,32 +335,38 @@ llama_engine_status llama_engine_get_capabilities(
     char          ** out_json);
 
 // Native memory measurement of a configuration, as a JSON document that the
-// caller frees with llama_engine_free_string(). The model and its context are
-// created with no_alloc: no weights are read and no buffer is allocated, but
-// the GGUF is opened and the backend is initialised once. It does not touch any
+// caller frees with llama_engine_free_string(). The model, its context, the
+// multimodal projector and the MTP draft context are created with no_alloc: no
+// weights are read and no buffer is allocated, but the GGUF files are opened
+// and the backend is initialised once. It does not touch any
 // llama_engine_t, so it can run while an engine is loaded; measurements are
 // serialised with each other. The config is measured as is: unlike
 // llama_engine_load(), it does not fit unset values to the free memory.
 //
 //   {
-//     "schema_version": 1, "source": "native",
+//     "schema_version": 2, "source": "native",
 //     "effective": { "n_ctx", "n_ctx_train", "n_batch", "n_ubatch", "n_seq_max",
 //                    "kv_unified", "type_k", "type_v", "flash_attention", "gpu_layers" },
 //     "rows": [ { "kind": "device" | "host" | "buffer_type", "name", "description"?,
 //                 "model_bytes", "context_bytes", "compute_bytes",
 //                 "device_total_bytes"?, "device_free_bytes"? } ],
-//     "required_bytes": { "model", "context", "compute", "total" },
+//     "required_bytes": { "model", "context", "compute", "projector", "mtp_draft", "total" },
 //     "coverage": { "model", "context", "projector", "mtp_draft" },
 //     "complete": bool,   // false when a part of the config is not measured
 //     "warnings": [string]
 //   }
 //
-// Rows do not overlap and "required_bytes" is their sum. Device total/free
-// values describe the device, they are not part of the requirement. The
-// multimodal projector and the MTP draft context are not measured: "coverage"
-// says so and "complete" is false. Weights and KV cache match a loaded
-// context; compute buffers are an upper bound (the no_alloc reservation can
-// count the host compute buffer twice). Not the process RSS.
+// Rows describe the main model and context: they do not overlap and "model",
+// "context" and "compute" are their sum. Device total/free values describe the
+// device, they are not part of the requirement. "projector" is the multimodal
+// projector, weights and the compute buffer of its largest input. "mtp_draft"
+// is the context and compute of the MTP draft context, plus the weights of an
+// external draft model; an MTP head of the main model is already in "model".
+// "total" adds them all. A part that fails to measure counts 0, "coverage"
+// says so, a warning gives the reason and "complete" is false. Weights and KV
+// cache match a loaded context; compute buffers are an upper bound (the
+// no_alloc reservation can count the host compute buffer twice). Not the
+// process RSS.
 //
 // Returns LLAMA_ENGINE_ERR_INVALID_ARG for an invalid config and
 // LLAMA_ENGINE_ERR_LOAD_FAILED when the model or the context cannot be
