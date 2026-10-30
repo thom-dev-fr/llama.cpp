@@ -3,6 +3,13 @@ import Testing
 @testable import LlamaEngine
 
 struct ModelInfoTests {
+    @Test func knowsTheArchitecturesOfThisBuild() {
+        #expect(LlamaEngine.supportsArchitecture("llama"))
+        #expect(LlamaEngine.supportsArchitecture("lfm3"))
+        #expect(!LlamaEngine.supportsArchitecture("not-an-architecture"))
+        #expect(!LlamaEngine.supportsArchitecture(""))
+    }
+
     @Test func decodesMissingModelInfoFieldsDefensively() throws {
         let data = Data("{}".utf8)
 

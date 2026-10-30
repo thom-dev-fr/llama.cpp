@@ -57,6 +57,12 @@ static void test_probe(const char * model_path) {
     EXPECT_STATUS(llama_engine_probe_model_info("/nonexistent/model.gguf", NULL, &info, &err), LLAMA_ENGINE_ERR_INVALID_ARG);
     EXPECT(err != NULL);
     llama_engine_free_string(err);
+
+    EXPECT(llama_engine_supports_architecture("llama"));
+    EXPECT(llama_engine_supports_architecture("lfm3"));
+    EXPECT(!llama_engine_supports_architecture("not-an-architecture"));
+    EXPECT(!llama_engine_supports_architecture(""));
+    EXPECT(!llama_engine_supports_architecture(NULL));
 }
 
 static void test_not_loaded(llama_engine_t * engine) {
