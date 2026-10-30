@@ -90,6 +90,24 @@ extension LlamaEngine {
         return EngineStream(engine: self, handle: streamHandle)
     }
 
+    func openRealtimeSessionSync(intent: RealtimeSessionIntent) throws -> RealtimeSession {
+        let config: String? = intent == .transcription ? #"{"intent":"transcription"}"# : nil
+        var rawPtr: OpaquePointer? = nil
+        let status: llama_engine_status
+        if let config {
+            status = config.withCString { llama_engine_realtime_open(handle, $0, &rawPtr) }
+        } else {
+            status = llama_engine_realtime_open(handle, nil, &rawPtr)
+        }
+        try throwIfError(status)
+        guard let sessionHandle = rawPtr else {
+            throw LlamaError.internalError("null realtime handle")
+        }
+        let session = RealtimeSession(handle: sessionHandle)
+        session.readFirstEvent()
+        return session
+    }
+
     func capabilitiesSync() throws -> EngineCapabilities {
         var outJSON: UnsafeMutablePointer<CChar>? = nil
         let status = llama_engine_get_capabilities(handle, &outJSON)
@@ -164,6 +182,7 @@ extension LlamaEngine {
         case LLAMA_ENGINE_ERR_INFERENCE:         return .inference(message, payload: payload)
         case LLAMA_ENGINE_ERR_CANCELLED:         return .cancelled
         case LLAMA_ENGINE_ERR_TIMEOUT:           return .timeout
+        case LLAMA_ENGINE_ERR_BUSY:              return .busy(message)
         default:                                 return .internalError(message)
         }
     }

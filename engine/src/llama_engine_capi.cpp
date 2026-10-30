@@ -7,12 +7,15 @@
 
 #include <cstdlib>
 #include <cstring>
+#include <memory>
 #include <new>
 #include <string>
 #include <vector>
 
 using llama_engine::engine_core;
 using llama_engine::stream_handle;
+using llama_engine::realtime_conn;
+using llama_engine::realtime_session;
 
 struct llama_engine_t {
     engine_core core;
@@ -23,6 +26,10 @@ struct llama_engine_t {
 struct llama_engine_stream_t {
     stream_handle * handle;
     engine_core   * owner;
+};
+
+struct llama_engine_realtime_t {
+    std::shared_ptr<realtime_session> session;
 };
 
 static char * dup_string(const std::string & s) {
@@ -349,4 +356,65 @@ extern "C" void llama_engine_stream_close(llama_engine_stream_t * stream) {
     if (!stream) return;
     stream->owner->stream_close(stream->handle);
     delete stream;
+}
+
+extern "C" llama_engine_status llama_engine_realtime_open(
+    llama_engine_t * engine, const char * config_json, llama_engine_realtime_t ** out_session)
+{
+    if (!engine || !out_session) return LLAMA_ENGINE_ERR_INVALID_ARG;
+    *out_session = nullptr;
+
+    std::shared_ptr<realtime_session> session;
+    auto st = engine->core.realtime_open(config_json ? config_json : "", session);
+    if (st != LLAMA_ENGINE_OK) return st;
+
+    auto * wrapper = new (std::nothrow) llama_engine_realtime_t();
+    if (!wrapper) {
+        session->conn().close();
+        return LLAMA_ENGINE_ERR_INTERNAL;
+    }
+    wrapper->session = std::move(session);
+    *out_session = wrapper;
+    return LLAMA_ENGINE_OK;
+}
+
+extern "C" llama_engine_status llama_engine_realtime_send(
+    llama_engine_realtime_t * session, const char * event_json)
+{
+    if (!session || !event_json) return LLAMA_ENGINE_ERR_INVALID_ARG;
+    switch (session->session->conn().push(event_json)) {
+        case realtime_conn::push_status::ok:        return LLAMA_ENGINE_OK;
+        case realtime_conn::push_status::too_large: return LLAMA_ENGINE_ERR_INVALID_ARG;
+        case realtime_conn::push_status::closed:
+        case realtime_conn::push_status::overflow:  return LLAMA_ENGINE_ERR_CANCELLED;
+    }
+    return LLAMA_ENGINE_ERR_INTERNAL;
+}
+
+extern "C" llama_engine_status llama_engine_realtime_next(
+    llama_engine_realtime_t * session, char ** out_event_json, bool * out_done)
+{
+    if (!session || !out_event_json || !out_done) return LLAMA_ENGINE_ERR_INVALID_ARG;
+    *out_event_json = nullptr;
+    *out_done       = false;
+
+    std::string event;
+    if (!session->session->conn().next(event)) {
+        *out_done = true;
+        return LLAMA_ENGINE_OK;
+    }
+    *out_event_json = dup_string(event);
+    return *out_event_json ? LLAMA_ENGINE_OK : LLAMA_ENGINE_ERR_INTERNAL;
+}
+
+extern "C" void llama_engine_realtime_close(llama_engine_realtime_t * session) {
+    if (!session) return;
+    session->session->conn().close();
+}
+
+extern "C" void llama_engine_realtime_free(llama_engine_realtime_t * session) {
+    if (!session) return;
+    // the engine joins the worker; if it is gone it has joined already, so this does not wait
+    session->session->conn().close();
+    delete session;
 }

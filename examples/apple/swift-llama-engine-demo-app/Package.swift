@@ -12,6 +12,10 @@ let package = Package(
             name: "LlamaChatDemo",
             targets: ["LlamaChatDemo"]
         ),
+        .executable(
+            name: "LlamaRealtimeFileDemo",
+            targets: ["LlamaRealtimeFileDemo"]
+        ),
     ],
     dependencies: [
         .package(name: "LlamaEngine", path: "../swift-llama-engine"),
@@ -23,6 +27,13 @@ let package = Package(
                 .product(name: "LlamaEngine", package: "LlamaEngine"),
             ],
             path: "Sources"
+        ),
+        .executableTarget(
+            name: "LlamaRealtimeFileDemo",
+            dependencies: [
+                .product(name: "LlamaEngine", package: "LlamaEngine"),
+            ],
+            path: "RealtimeFileDemo"
         ),
     ]
 )

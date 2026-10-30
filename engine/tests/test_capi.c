@@ -190,6 +190,20 @@ static void test_capabilities(llama_engine_t * engine) {
     EXPECT_STATUS(llama_engine_get_capabilities(engine, NULL), LLAMA_ENGINE_ERR_INVALID_ARG);
 }
 
+static void test_realtime_refused(llama_engine_t * engine) {
+    fprintf(stderr, "  * realtime refused for a text model and a bad config\n");
+    llama_engine_realtime_t * session = NULL;
+    EXPECT_STATUS(llama_engine_realtime_open(engine, NULL, &session), LLAMA_ENGINE_ERR_INVALID_REQUEST);
+    EXPECT(session == NULL);
+    EXPECT_STATUS(llama_engine_realtime_open(engine, "{\"intent\": \"other\"}", &session), LLAMA_ENGINE_ERR_INVALID_ARG);
+    EXPECT_STATUS(llama_engine_realtime_open(engine, "[]", &session), LLAMA_ENGINE_ERR_INVALID_ARG);
+    EXPECT_STATUS(llama_engine_realtime_open(engine, NULL, NULL), LLAMA_ENGINE_ERR_INVALID_ARG);
+    EXPECT(session == NULL);
+    EXPECT_STATUS(llama_engine_realtime_send(NULL, "{}"), LLAMA_ENGINE_ERR_INVALID_ARG);
+    llama_engine_realtime_close(NULL);
+    llama_engine_realtime_free(NULL);
+}
+
 static void test_measure_memory(llama_engine_t * engine, const llama_engine_config * cfg) {
     fprintf(stderr, "  * measure memory while loaded\n");
     char * json = NULL;
@@ -302,6 +316,7 @@ int main(int argc, char ** argv) {
     }
 
     test_capabilities(engine);
+    test_realtime_refused(engine);
     test_tokens(engine);
     test_completion(engine);
     test_stream(engine);

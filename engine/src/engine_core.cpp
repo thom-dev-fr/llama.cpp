@@ -40,7 +40,7 @@ void engine_core::ensure_backend_initialized() {
 engine_core::~engine_core() {
     std::unique_lock<std::mutex> lock(mtx);
     if (lifecycle.state() != LLAMA_ENGINE_STATE_UNLOADED) {
-        teardown_locked(lock);
+        teardown_locked(lock, "engine destroyed");
     }
 }
 
@@ -171,6 +171,7 @@ llama_engine_status engine_core::load_from_params_locked(std::unique_lock<std::m
         flags.cap_tts           = meta->has_cap_tts;
         flags.audio_stream      = meta->has_audio_stream;
         flags.audio_gen_spk_ref = meta->has_audio_gen_spk_ref;
+        flags.idle_sleep        = last_params->sleep_idle_seconds >= 0;
         flags.output_modalities = meta->model_output_modalities;
         caps_json = runtime_caps::runtime_document(runtime_caps::chat_template_section(
             meta->chat_template_caps, !last_params->chat_template.empty()), flags);
@@ -186,7 +187,7 @@ llama_engine_status engine_core::load_from_params_locked(std::unique_lock<std::m
     // join() in teardown_locked() would hang forever.
     if (pause_won) {
         lifecycle.enter_pausing();
-        teardown_locked(lock);
+        teardown_locked(lock, "engine paused");
         set_error("load preempted by pause()");
         lifecycle.enter_paused();
         return LLAMA_ENGINE_ERR_CANCELLED;
@@ -203,14 +204,19 @@ llama_engine_status engine_core::load_from_params_locked(std::unique_lock<std::m
     return LLAMA_ENGINE_OK;
 }
 
-void engine_core::teardown_locked(std::unique_lock<std::mutex> & lock) {
+void engine_core::teardown_locked(std::unique_lock<std::mutex> & lock, const char * reason) {
     // Drain in-flight chat work before destroying ctx/routes. The drain
     // releases the registry's own mutex during the bounded wait; we drop
     // ours too because preempt callbacks acquire per-stream mutexes.
+    auto session = std::move(realtime);
     lock.unlock();
     registry.preempt_all_and_drain([](stream_handle * s) {
         chat_route_adapter::stream_preempt(s);
     });
+    // no deadline here: a realtime worker uses ctx until it returns
+    if (session) {
+        session->terminate(reason);
+    }
     lock.lock();
 
     if (ctx) {
@@ -245,7 +251,7 @@ llama_engine_status engine_core::unload() {
         return LLAMA_ENGINE_ERR_INTERNAL;
     }
     lifecycle.enter_unloading();
-    teardown_locked(lock);
+    teardown_locked(lock, "engine unloaded");
     last_params.reset();
     lifecycle.enter_unloaded();
     return LLAMA_ENGINE_OK;
@@ -293,7 +299,7 @@ llama_engine_status engine_core::pause() {
     }
 
     lifecycle.enter_pausing();
-    teardown_locked(lock);
+    teardown_locked(lock, "engine paused");
     // last_params intentionally retained for resume().
     lifecycle.enter_paused();
     return LLAMA_ENGINE_OK;
@@ -358,10 +364,17 @@ llama_engine_status engine_core::detokenize(const std::vector<int32_t> & tokens,
     return LLAMA_ENGINE_OK;
 }
 
-llama_engine_status engine_core::admit_request_locked(std::unique_lock<std::mutex> & lock,
-                                                       active_request & req,
-                                                       admitted_request & out)
-{
+llama_engine_status engine_core::admit_ready_locked(std::unique_lock<std::mutex> & lock, bool uses_slot) {
+    // a closed session holds the slot until its worker returns, within one polling interval of its result loop
+    if (uses_slot && realtime && !realtime->is_open()) {
+        auto closing = realtime;
+        lock.unlock();
+        closing->join();
+        lock.lock();
+        if (realtime == closing) {
+            realtime.reset();
+        }
+    }
     if (lifecycle.state() == LLAMA_ENGINE_STATE_PAUSED) {
         auto st = load_from_params_locked(lock, /*from_resume=*/true);
         if (st != LLAMA_ENGINE_OK) return st;
@@ -370,6 +383,20 @@ llama_engine_status engine_core::admit_request_locked(std::unique_lock<std::mute
         set_error("engine not loaded");
         return LLAMA_ENGINE_ERR_NOT_LOADED;
     }
+    if (uses_slot && realtime) {
+        set_error("a realtime session is open");
+        return LLAMA_ENGINE_ERR_BUSY;
+    }
+    return LLAMA_ENGINE_OK;
+}
+
+llama_engine_status engine_core::admit_request_locked(std::unique_lock<std::mutex> & lock,
+                                                       active_request & req,
+                                                       bool uses_slot,
+                                                       admitted_request & out)
+{
+    auto st = admit_ready_locked(lock, uses_slot);
+    if (st != LLAMA_ENGINE_OK) return st;
 
     out.routes = routes;
     out.guard = registry.track_request(&req);
@@ -380,14 +407,8 @@ llama_engine_status engine_core::admit_stream_locked(std::unique_lock<std::mutex
                                                      const std::string & request_json,
                                                      admitted_stream & out)
 {
-    if (lifecycle.state() == LLAMA_ENGINE_STATE_PAUSED) {
-        auto st = load_from_params_locked(lock, /*from_resume=*/true);
-        if (st != LLAMA_ENGINE_OK) return st;
-    }
-    if (lifecycle.state() != LLAMA_ENGINE_STATE_READY || !routes) {
-        set_error("engine not loaded");
-        return LLAMA_ENGINE_ERR_NOT_LOADED;
-    }
+    auto st = admit_ready_locked(lock, /*uses_slot=*/true);
+    if (st != LLAMA_ENGINE_OK) return st;
 
     auto handle = chat_route_adapter::make_stream_handle(request_json);
     if (!handle) {
@@ -411,7 +432,7 @@ llama_engine_status engine_core::chat_completion(const std::string & request_jso
 
     {
         std::unique_lock<std::mutex> lock(mtx);
-        auto st = admit_request_locked(lock, req_state, admission);
+        auto st = admit_request_locked(lock, req_state, /*uses_slot=*/true, admission);
         if (st != LLAMA_ENGINE_OK) return st;
     }
 
@@ -433,7 +454,7 @@ llama_engine_status engine_core::count_chat_tokens(const std::string & request_j
 
     {
         std::unique_lock<std::mutex> lock(mtx);
-        auto st = admit_request_locked(lock, req_state, admission);
+        auto st = admit_request_locked(lock, req_state, /*uses_slot=*/false, admission);
         if (st != LLAMA_ENGINE_OK) return st;
     }
 
@@ -485,6 +506,59 @@ void engine_core::stream_close(stream_handle * s) {
     // preempt_all_and_drain() can observe the count drop.
     registry.remove_stream(s);
     chat_route_adapter::stream_close(s);
+}
+
+llama_engine_status engine_core::realtime_open(const std::string & config_json,
+                                               std::shared_ptr<realtime_session> & out)
+{
+    out.reset();
+
+    std::string intent;
+    if (!config_json.empty()) {
+        const auto cfg = common_json::parse_no_throw(config_json);
+        if (!cfg.is_object()) {
+            std::lock_guard<std::mutex> lock(mtx);
+            set_error("realtime config must be a JSON object");
+            return LLAMA_ENGINE_ERR_INVALID_ARG;
+        }
+        for (const auto & [key, value] : cfg.items()) {
+            if (key != "intent" || !value.is_string() || value.get<std::string>() != "transcription") {
+                std::lock_guard<std::mutex> lock(mtx);
+                set_error("realtime config: unknown key or value: " + key);
+                return LLAMA_ENGINE_ERR_INVALID_ARG;
+            }
+            intent = value.get<std::string>();
+        }
+    }
+
+    std::unique_lock<std::mutex> lock(mtx);
+    auto st = admit_ready_locked(lock, /*uses_slot=*/true);
+    if (st != LLAMA_ENGINE_OK) return st;
+    if (last_params->sleep_idle_seconds >= 0) {
+        set_error("realtime sessions need idle_pause_seconds = -1");
+        return LLAMA_ENGINE_ERR_INVALID_REQUEST;
+    }
+    if (!meta->has_audio_stream) {
+        set_error("the loaded model does not support realtime sessions");
+        return LLAMA_ENGINE_ERR_INVALID_REQUEST;
+    }
+    if (registry.stream_count() + registry.request_count() > 0) {
+        set_error("a chat completion is in progress");
+        return LLAMA_ENGINE_ERR_BUSY;
+    }
+
+    auto session_routes = routes;
+    try {
+        out = realtime_session::start(
+            [session_routes](const server_http_req & req, server_http_context::ws_conn & conn) {
+                session_routes->ws_realtime(req, conn);
+            }, intent);
+    } catch (const std::exception & e) {
+        set_error(std::string("failed to start the realtime session: ") + e.what());
+        return LLAMA_ENGINE_ERR_INTERNAL;
+    }
+    realtime = out;
+    return LLAMA_ENGINE_OK;
 }
 
 } // namespace llama_engine

@@ -100,7 +100,7 @@ static void test_context_size_override() {
 static void test_extra_json_valid_keys() {
     CASE("extra_json applies known keys and ignores unknown ones");
     auto cfg = make_minimal_cfg();
-    cfg.extra_json = R"({"n_batch": 1024, "n_ubatch": 256, "unknown_key": 42, "use_jinja": false, "cache_ram_mib": 128, "cache_idle_slots": false, "mtmd_batch_max_tokens": 512})";
+    cfg.extra_json = R"({"n_batch": 1024, "n_ubatch": 256, "unknown_key": 42, "use_jinja": false, "cache_ram_mib": 128, "cache_idle_slots": false, "mtmd_batch_max_tokens": 512, "mmproj_use_gpu": false})";
     auto p = params_translator::translate(cfg);
     EXPECT_EQ(p.n_batch, 1024);
     EXPECT_EQ(p.n_ubatch, 256);
@@ -108,6 +108,7 @@ static void test_extra_json_valid_keys() {
     EXPECT_EQ(p.cache_ram_mib, 128);
     EXPECT_EQ(p.cache_idle_slots, false);
     EXPECT_EQ(p.mtmd_batch_max_tokens, 512);
+    EXPECT(!p.mmproj_use_gpu);
 }
 
 static void test_extra_json_invalid() {

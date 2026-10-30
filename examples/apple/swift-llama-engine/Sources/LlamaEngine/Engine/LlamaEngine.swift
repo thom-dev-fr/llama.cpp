@@ -304,4 +304,22 @@ public final class LlamaEngine: @unchecked Sendable {
             try self.openChatCompletionStreamSync(requestJSON: requestJSON)
         }.value
     }
+
+    // MARK: - Realtime
+
+    /// Opens a realtime session, see ``RealtimeSession``.
+    ///
+    /// Check ``EngineOperations/realtime`` first: it needs a model with an
+    /// audio stream encoder and ``ModelConfig/idlePauseSeconds`` set to -1.
+    /// One session runs at a time and chat completions wait for it to close:
+    /// both throw ``LlamaError/busy(_:)`` meanwhile. A paused engine is
+    /// resumed first.
+    ///
+    /// - Parameter intent: ``RealtimeSessionIntent/conversation`` by default.
+    /// - Returns: The open session; its first event is `session.created`.
+    public func openRealtimeSession(intent: RealtimeSessionIntent = .conversation) async throws -> RealtimeSession {
+        try await Task.detached(priority: .userInitiated) {
+            try self.openRealtimeSessionSync(intent: intent)
+        }.value
+    }
 }

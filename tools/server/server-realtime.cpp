@@ -14,6 +14,8 @@
 #include <algorithm>
 #include <atomic>
 #include <climits>
+#include <chrono>
+#include <condition_variable>
 #include <cmath>
 #include <cstring>
 #include <map>
@@ -157,13 +159,18 @@ struct realtime_conversation {
     bool        turn_open = false; // a user turn is being filled
     bool        has_audio = false; // the open turn has audio not committed yet
     int64_t     n_turn_samples = 0; // audio of the open turn, at the model rate
+    int         n_items   = 0;     // items of the open turn: committed audio and messages
     bool        tool_results = false; // tool results went in after the last response, the next one answers them
     int         n_turns   = 0;
     std::string next_header;       // text that goes in before the next user turn
     mtmd_helper::resampler_ptr resampler; // input_rate -> model rate
+    std::string client_event_id;   // event_id of the client event being handled, echoed in its errors
 
     // the item or response the results belong to, shared with the result loop
     std::mutex  mutex;
+    std::condition_variable response_cv;
+    bool        response_active     = false; // from response.created to response.done
+    bool        response_cancelling = false; // response.cancel was sent for the active response
     std::string last_item_id;
     std::string transcribe_item_id; // transcription: the item being transcribed
     std::string transcript;
@@ -192,11 +199,17 @@ struct realtime_conversation {
         conn.send(safe_json_to_str(ev));
     }
 
+    void send_error_event(const std::string & message, const std::string & type_err, const std::string & event_id) {
+        json error = {{"type", type_err}, {"code", nullptr}, {"message", message}, {"param", nullptr}};
+        if (!event_id.empty()) {
+            error["event_id"] = event_id;
+        }
+        send_event({{"type", "error"}, {"error", error}});
+    }
+
+    // an error of the client event being handled, only on the reader thread
     void send_error(const std::string & message, const std::string & type_err = "invalid_request_error") {
-        send_event({
-            {"type",  "error"},
-            {"error", {{"type", type_err}, {"code", nullptr}, {"message", message}, {"param", nullptr}}},
-        });
+        send_error_event(message, type_err, client_event_id);
     }
 
     json session_json() const {
@@ -436,6 +449,7 @@ struct realtime_conversation {
         }
         has_audio      = false;
         n_turn_samples = 0;
+        n_items++;
 
         std::lock_guard<std::mutex> lock(mutex);
         const json prev = last_item_id.empty() ? json(nullptr) : json(last_item_id);
@@ -476,6 +490,7 @@ struct realtime_conversation {
         }
         control(SERVER_CONTROL_ACTION_CLEAR);
         turn_open = false;
+        n_items   = 0;
         n_turns   = 0;
     }
 
@@ -505,6 +520,7 @@ struct realtime_conversation {
         if (!ensure_turn() || !control(SERVER_CONTROL_ACTION_TEXT_APPEND, text)) {
             return;
         }
+        n_items++;
         std::lock_guard<std::mutex> lock(mutex);
         const json prev = last_item_id.empty() ? json(nullptr) : json(last_item_id);
         last_item_id = item.contains("id") && item["id"].is_string() ? item["id"].get<std::string>() : "item_" + random_string();
@@ -537,11 +553,26 @@ struct realtime_conversation {
     }
 
     void on_response_create(const json & ev) {
+        {
+            std::unique_lock<std::mutex> lock(mutex);
+            if (response_active && !response_cancelling) {
+                send_error("response.create: a response is already in progress, cancel it first", "conversation_already_has_active_response");
+                return;
+            }
+            // a cancelled response ends at its next step, the next one starts right after it
+            while (response_active && conn.is_open()) {
+                response_cv.wait_for(lock, std::chrono::milliseconds(100));
+            }
+            if (!conn.is_open()) {
+                return;
+            }
+        }
         if (type == "transcription") {
             send_error("response.create: not supported in a transcription session");
             return;
         }
-        if (!turn_open && !tool_results) {
+        // a cleared buffer leaves the turn open without anything in it
+        if ((!turn_open || (n_items == 0 && !has_audio)) && !tool_results) {
             send_error("response.create: commit audio or create a message first", "conversation_empty");
             return;
         }
@@ -608,8 +639,10 @@ struct realtime_conversation {
 
         {
             std::lock_guard<std::mutex> lock(mutex);
-            response_id      = "resp_" + random_string();
-            response_item_id = "item_" + random_string();
+            response_active     = true;
+            response_cancelling = false;
+            response_id         = "resp_" + random_string();
+            response_item_id    = "item_" + random_string();
             response_text.clear();
             parts       = json::array();
             idx_text    = -1;
@@ -625,11 +658,17 @@ struct realtime_conversation {
                         {"status", "in_progress"}, {"output_modalities", output_modalities_json(mode)}, {"output", json::array()}}}});
         }
         if (!control(SERVER_CONTROL_ACTION_RESPONSE_CREATE, prompt, {}, response)) {
+            std::lock_guard<std::mutex> lock(mutex);
+            response_active = false;
+            response_cv.notify_all();
+            send_event({{"type", "response.done"}, {"response", {{"id", response_id}, {"object", "realtime.response"}, {"status", "failed"},
+                        {"output", json::array()}, {"usage", {{"output_tokens", 0}}}}}});
             return;
         }
         // the response ends the turn, its tokens are in the slot; the footer goes in before the next turn
         next_header  = assistant_footer;
         turn_open    = false;
+        n_items      = 0;
         tool_results = false;
         n_turns++;
     }
@@ -752,12 +791,14 @@ struct realtime_conversation {
 
     void handle(const std::string & msg) {
         json ev;
+        client_event_id.clear();
         try {
             ev = json::parse(msg);
         } catch (const std::exception &) {
             send_error("invalid JSON");
             return;
         }
+        client_event_id = json_value(ev, "event_id", std::string());
         const std::string t = json_value(ev, "type", std::string());
         if (t == "session.update" || t == "transcription_session.update") {
             on_session_update(ev);
@@ -766,13 +807,19 @@ struct realtime_conversation {
         } else if (t == "input_audio_buffer.commit") {
             on_commit();
         } else if (t == "input_audio_buffer.clear") {
-            // the audio already went into the conversation
-            send_event({{"type", "input_audio_buffer.cleared"}});
+            if (control(SERVER_CONTROL_ACTION_AUDIO_CLEAR)) {
+                has_audio = false;
+                send_event({{"type", "input_audio_buffer.cleared"}});
+            }
         } else if (t == "conversation.item.create") {
             on_item_create(ev);
         } else if (t == "response.create") {
             on_response_create(ev);
         } else if (t == "response.cancel") {
+            {
+                std::lock_guard<std::mutex> lock(mutex);
+                response_cancelling = response_active;
+            }
             control(SERVER_CONTROL_ACTION_RESPONSE_CANCEL);
         } else {
             send_error("unknown event type: " + t);
@@ -918,6 +965,9 @@ struct realtime_conversation {
         send_event({{"type", "response.done"}, {"response", {{"id", response_id}, {"object", "realtime.response"}, {"status", status},
                     {"output", output}, {"usage", {{"output_tokens", res.n_decoded}}}}}});
         parse.reset();
+        response_active     = false;
+        response_cancelling = false;
+        response_cv.notify_all();
     }
 
     //
@@ -974,18 +1024,19 @@ struct realtime_conversation {
 
         while (true) {
             auto result = rd.next([this]() { return !conn.is_open(); });
-            if (!result) {
+            // should_stop is only checked between results: a response being generated must also see the close
+            if (!result || !conn.is_open()) {
                 break;
             }
             if (result->is_error()) {
-                send_error(json_value(result->to_json(), "message", std::string("server error")), "server_error");
+                send_error_event(json_value(result->to_json(), "message", std::string("server error")), "server_error", "");
                 break;
             }
             if (auto * res = dynamic_cast<server_task_result_realtime *>(result.get())) {
                 try {
                     on_result(*res);
                 } catch (const std::exception & e) {
-                    send_error(e.what(), "server_error");
+                    send_error_event(e.what(), "server_error", "");
                     break;
                 }
             }
@@ -1022,7 +1073,16 @@ void server_realtime_slot::push(server_realtime_op && op) {
 }
 
 void server_realtime_slot::cancel() {
-    cancelled = responding;
+    if (responding) {
+        cancelled = true;
+        return;
+    }
+    for (auto & op : ops) {
+        if (op.action == SERVER_CONTROL_ACTION_RESPONSE_CREATE) {
+            op.cancelled = true;
+            return;
+        }
+    }
 }
 
 bool server_realtime_slot::is_idle() const {
@@ -1102,11 +1162,31 @@ void server_realtime_slot::sample_next() {
     common_sampler_accept(smpl.get(), sampled, true);
 }
 
+// the single token that opens a tool call, from the triggers of the lazy tool call grammar
+static llama_token tool_call_open_token(const llama_vocab * vocab, const common_params_sampling & sparams) {
+    if (sparams.grammar.grammar.empty() || !sparams.grammar_lazy) {
+        return LLAMA_TOKEN_NULL;
+    }
+    for (const auto & trigger : sparams.grammar_triggers) {
+        if (trigger.type == COMMON_GRAMMAR_TRIGGER_TYPE_TOKEN) {
+            return trigger.token;
+        }
+        if (trigger.type == COMMON_GRAMMAR_TRIGGER_TYPE_WORD) {
+            const llama_tokens toks = common_tokenize(vocab, trigger.value, false, true);
+            if (toks.size() == 1) {
+                return toks[0];
+            }
+        }
+    }
+    return LLAMA_TOKEN_NULL;
+}
+
 bool server_realtime_slot::response_start(const server_realtime_op & op) {
     auto sparams = op.response.sampling;
     n_predict = op.response.n_predict;
     n_decoded = 0;
-    cancelled = false;
+    cancelled = op.cancelled;
+    llama_token text_open = LLAMA_TOKEN_NULL;
 
     if (gen.valid()) {
         // the gen-audio pipeline continues the conversation and follows the model's text/audio switching
@@ -1126,6 +1206,15 @@ bool server_realtime_slot::response_start(const server_realtime_op & op) {
                 return fail("unknown voice \"" + op.response.voice + "\"", ERROR_TYPE_INVALID_REQUEST);
             }
             inp.set_speaker_ref(std::move(voice));
+        }
+        // tool calls are text: an interleaved response with tools may open with a call instead, a required one always does
+        if (inp.data.out_mode == MTMD_HELPER_GEN_AUDIO_OUT_MIXED && !sparams.grammar.grammar.empty()) {
+            if (sparams.grammar_lazy) {
+                text_open = tool_call_open_token(vocab, sparams);
+                inp.data.text_open_token = text_open;
+            } else {
+                inp.data.out_mode = MTMD_HELPER_GEN_AUDIO_OUT_TEXT;
+            }
         }
         if (gen.set_input(inp.get()) != 0) {
             return fail("failed to start the response");
@@ -1154,7 +1243,17 @@ bool server_realtime_slot::response_start(const server_realtime_op & op) {
     smpl.reset(common_sampler_init(model, sparams));
     preserved = sparams.preserved_tokens;
     // the logits of the last decode are this slot's only until another slot decodes
-    sample_next();
+    const llama_token mixed_open = gen.valid() ? gen.mixed_open_token() : LLAMA_TOKEN_NULL;
+    if (mixed_open == LLAMA_TOKEN_NULL) {
+        sample_next();
+    } else {
+        // the model opens the response as it would in text, a token that opens no tool call opens the interleaving
+        sampled = common_sampler_sample(smpl.get(), ctx, -1);
+        if (sampled != text_open) {
+            sampled = mixed_open;
+        }
+        common_sampler_accept(smpl.get(), sampled, true);
+    }
     responding = true;
     return true;
 }
@@ -1248,6 +1347,8 @@ bool server_realtime_slot::update() {
             case SERVER_CONTROL_ACTION_AUDIO_APPEND:
                 {
                     if (!stream) {
+                        audio_start = n_past;
+                        audio_checkpoint.update_tgt(ctx, seq_id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
                         stream.reset(mtmd_audio_stream_init(mctx, mtmd_audio_stream_params_default()));
                         if (!stream) {
                             return fail("failed to initialize the audio stream");
@@ -1269,6 +1370,23 @@ bool server_realtime_slot::update() {
                         }
                         stream.reset();
                     }
+                    audio_start = -1;
+                    audio_checkpoint.clear();
+                } break;
+            case SERVER_CONTROL_ACTION_AUDIO_CLEAR:
+                {
+                    if (audio_start >= 0) {
+                        if (!audio_checkpoint.load_tgt(ctx, seq_id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY)) {
+                            return fail("failed to restore the state before uncommitted audio");
+                        }
+                        if (n_past > audio_start && !llama_memory_seq_rm(llama_get_memory(ctx), seq_id, audio_start, -1)) {
+                            return fail("the model cannot discard uncommitted audio; restart the session");
+                        }
+                        n_past = audio_start;
+                    }
+                    stream.reset();
+                    audio_start = -1;
+                    audio_checkpoint.clear();
                 } break;
             case SERVER_CONTROL_ACTION_RESPONSE_CREATE:
                 {
@@ -1281,6 +1399,8 @@ bool server_realtime_slot::update() {
                     llama_memory_seq_rm(llama_get_memory(ctx), seq_id, -1, -1);
                     stream.reset();
                     n_past = 0;
+                    audio_start = -1;
+                    audio_checkpoint.clear();
                 } break;
             default:
                 break;
