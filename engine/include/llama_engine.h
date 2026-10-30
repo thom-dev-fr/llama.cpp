@@ -282,6 +282,12 @@ llama_engine_status llama_engine_probe_model_info(
 // Safe to call on a zero-initialised struct.
 void llama_engine_free_model_info(llama_engine_model_info * info);
 
+// Whether this build of llama.cpp can load models of the given
+// `general.architecture` (e.g. "llama", "lfm3"). The probe reads any
+// architecture name; loading a model whose architecture this build doesn't
+// know fails with a generic load error. False for NULL or an empty name.
+bool llama_engine_supports_architecture(const char * architecture);
+
 // Capabilities as JSON documents. Both return a heap-allocated string that the
 // caller frees with llama_engine_free_string(). The document has stable keys:
 //   {

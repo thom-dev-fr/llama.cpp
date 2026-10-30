@@ -4,6 +4,7 @@
 #include "memory_measure.hpp"
 
 #include "log.h"
+#include "src/llama-ext.h" // staging API: llama_arch_from_string
 
 #include <cstdlib>
 #include <cstring>
@@ -200,6 +201,11 @@ extern "C" void llama_engine_free_model_info(llama_engine_model_info * info) {
     std::free(info->quantization); info->quantization = nullptr;
     info->capabilities  = llama_engine_capabilities{};
     info->has_projector = false;
+}
+
+extern "C" bool llama_engine_supports_architecture(const char * architecture) {
+    if (!architecture || !*architecture) return false;
+    return llama_arch_from_string(architecture) != LLM_ARCH_UNKNOWN;
 }
 
 extern "C" bool llama_engine_is_mtp_active(llama_engine_t * engine) {

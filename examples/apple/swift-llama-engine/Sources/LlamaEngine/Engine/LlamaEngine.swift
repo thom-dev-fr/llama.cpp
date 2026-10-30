@@ -119,6 +119,26 @@ public final class LlamaEngine: @unchecked Sendable {
         }.value
     }
 
+    /// Whether this build of llama.cpp can load models of an architecture.
+    ///
+    /// ``modelInfo(modelURL:mmprojURL:)`` reads any `general.architecture`,
+    /// but ``load(_:)`` fails with a generic ``LlamaError/loadFailed(_:)``
+    /// for an architecture this build doesn't know.
+    ///
+    /// ```swift
+    /// let info = try await LlamaEngine.modelInfo(modelURL: modelURL)
+    /// if !LlamaEngine.supportsArchitecture(info.architecture) {
+    ///     print("update llama.cpp to load \(info.architecture)")
+    /// }
+    /// ```
+    ///
+    /// - Parameter architecture: A `general.architecture` value, such as
+    ///   `"llama"` or `"lfm3"`.
+    /// - Returns: `false` for an unknown or empty architecture.
+    public static func supportsArchitecture(_ architecture: String) -> Bool {
+        llama_engine_supports_architecture(architecture)
+    }
+
     /// Reads the chat capabilities of a configuration without loading it.
     ///
     /// Unlike ``modelInfo(modelURL:mmprojURL:)``, this follows the template
