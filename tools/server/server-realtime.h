@@ -40,6 +40,7 @@ struct server_realtime_op {
     std::string             text;
     std::vector<float>      audio;
     server_control_response response;
+    bool                    cancelled = false;
 };
 
 // the conversation of a slot that holds a realtime session (SERVER_TASK_TYPE_REALTIME), it runs on the server thread
@@ -74,12 +75,14 @@ private:
 
     std::deque<server_realtime_op> ops;
     llama_pos   n_past     = 0;     // positions of the conversation in the sequence
+    llama_pos   audio_start = -1; // start of uncommitted audio
     bool        responding = false;
     bool        cancelled  = false;
     int32_t     n_predict  = 0;
     int32_t     n_decoded  = 0;
     llama_token sampled    = LLAMA_TOKEN_NULL; // next text token of the response, sampled right after the slot's own decode
 
+    common_prompt_checkpoint audio_checkpoint;
     mtmd::audio_stream_ptr stream;   // the audio of the open turn
     mtmd_helper::gen_audio gen;      // set if the model generates audio
     std::vector<float>     h_state;  // hidden state that the gen-audio pipeline steps from

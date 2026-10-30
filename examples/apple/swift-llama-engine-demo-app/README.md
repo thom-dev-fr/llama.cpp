@@ -59,6 +59,21 @@ The demo includes a small `AppDelegate` that calls `NSApp.setActivationPolicy(.r
 
 To remove it entirely, create a regular **macOS/iOS Xcode project** (`File -> New -> Project... -> App`), delete the sample Swift file, add the sources from this package's `Sources/` directory, then add the Apple package as a Swift Package dependency (`File -> Add Package Dependencies... -> Add Local...` -> select `llama.cpp/examples/apple/swift-llama-engine`). The Xcode project generates a complete `Info.plist`, so AppKit can resolve the bundle metadata and the warning disappears.
 
+## Realtime file demo (command line)
+
+`LlamaRealtimeFileDemo` opens a realtime session and sends an audio file (any format `AVAudioFile` reads) in 100 ms chunks at the file's own rate, as a microphone would, then prints the text answer:
+
+```bash
+cd examples/apple/swift-llama-engine-demo-app
+swift run LlamaRealtimeFileDemo LFM3-Omni-2B-Q4_K_M.gguf mmproj-LFM3-Omni-2B-Q8_0.gguf question.wav
+swift run LlamaRealtimeFileDemo LFM3-Omni-2B-Q4_K_M.gguf mmproj-LFM3-Omni-2B-Q8_0.gguf speech.wav --transcribe
+swift run LlamaRealtimeFileDemo LFM3-Omni-2B-Q4_K_M.gguf mmproj-LFM3-Omni-2B-Q8_0.gguf question.wav --speak answer.wav
+```
+
+`--speak` asks for a `["text", "audio"]` response, writes the voice to a 16-bit WAV file at the session output rate (24 kHz for LFM3-Omni) and prints how fast the voice was generated from `response.create`, relative to real time: below 1x, a player would run dry.
+
+The model files come from `LiquidAI/LFM3-Omni-2B-GGUF`.
+
 ## Attachments
 
 When the loaded model advertises compatible capabilities, the composer shows attachment buttons:

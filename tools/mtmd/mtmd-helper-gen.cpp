@@ -109,7 +109,8 @@ public:
     virtual bool supports_continue() const { return false; }
     virtual bool next_is_text() const { return false; }
 
-    std::vector<llama_logit_bias> logit_bias; // see mtmd_helper_gen_audio_get_logit_bias()
+    std::vector<llama_logit_bias> logit_bias;                    // see mtmd_helper_gen_audio_get_logit_bias()
+    llama_token                   mixed_open = LLAMA_TOKEN_NULL; // see mtmd_helper_gen_audio_get_mixed_open_token()
 
 protected:
     // one state per generation, so a fixed seed always gives the same output
@@ -1292,7 +1293,15 @@ public:
         if (continuing) {
             switch (inp->out_mode) {
                 case MTMD_HELPER_GEN_AUDIO_OUT_AUDIO: prompt_tokens.push_back(tok_audio_start); break;
-                case MTMD_HELPER_GEN_AUDIO_OUT_MIXED: prompt_tokens.push_back(tok_mixed_start); break;
+                case MTMD_HELPER_GEN_AUDIO_OUT_MIXED:
+                    if (inp->text_open_token == LLAMA_TOKEN_NULL) {
+                        prompt_tokens.push_back(tok_mixed_start);
+                        break;
+                    }
+                    // the first token the caller samples picks: text_open_token stays in text, anything else interleaves
+                    mixed_open = tok_mixed_start;
+                    logit_bias = { { tok_audio_start, -INFINITY } };
+                    break;
                 case MTMD_HELPER_GEN_AUDIO_OUT_TEXT:
                     logit_bias = { { tok_audio_start, -INFINITY }, { tok_mixed_start, -INFINITY } };
                     break;
@@ -2464,6 +2473,7 @@ struct mtmd_helper_gen_audio_inp mtmd_helper_gen_audio_inp_default(void) {
     inp.temp     = -1.0f; // model default
     inp.seed     = UINT32_MAX; // random
     inp.out_type = MTMD_HELPER_GEN_AUDIO_OUTTYPE_WAV;
+    inp.text_open_token = LLAMA_TOKEN_NULL;
     return inp;
 }
 
@@ -2477,6 +2487,7 @@ int32_t mtmd_helper_gen_audio_set_input(mtmd_helper_gen_audio * ctx, const mtmd_
         return 1;
     }
     ctx->pipeline->logit_bias.clear();
+    ctx->pipeline->mixed_open = LLAMA_TOKEN_NULL;
     return ctx->pipeline->set_input(inp);
 }
 
@@ -2494,6 +2505,10 @@ bool mtmd_helper_gen_audio_next_is_text(mtmd_helper_gen_audio * ctx) {
 const llama_logit_bias * mtmd_helper_gen_audio_get_logit_bias(mtmd_helper_gen_audio * ctx, size_t * n_bias) {
     *n_bias = ctx->pipeline ? ctx->pipeline->logit_bias.size() : 0;
     return *n_bias ? ctx->pipeline->logit_bias.data() : nullptr;
+}
+
+llama_token mtmd_helper_gen_audio_get_mixed_open_token(mtmd_helper_gen_audio * ctx) {
+    return ctx->pipeline ? ctx->pipeline->mixed_open : LLAMA_TOKEN_NULL;
 }
 
 int32_t mtmd_helper_audio_stream_get_logit_bias(const mtmd_context * mctx, const llama_model * model,

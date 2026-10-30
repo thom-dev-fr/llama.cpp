@@ -29,6 +29,7 @@ examples/apple/swift-llama-engine/
     - Non-stream: `chatCompletion(requestJSON:) async throws -> String`
     - Stream: `chatCompletionStream(requestJSON:) async throws -> EngineStream`
 - Multimodal inputs (image / audio) via the OpenAI `image_url` / `input_audio` content parts, gated by the projector shipped with the model
+- Realtime sessions (voice conversation, live transcription): `openRealtimeSession(intent:) async throws -> RealtimeSession`, see [Realtime sessions](#realtime-sessions)
 - Tokenize / detokenize
 - Metal GPU backend with embedded library
 - Thread-safe via the C++ Engine Core, with Swift `EngineStream.cancel()` propagating into `server-context` cancel tasks
@@ -157,6 +158,38 @@ Notes:
 - `file://` URLs require the path gate: set `extraJSON: #"{"media_path":"/some/dir"}"#`
   in `ModelConfig`. Only the specified directory and its relative subpaths are accepted.
 - Accepted audio formats at the OAI layer are `wav` and `mp3` only.
+
+## Realtime sessions
+
+Models with an audio stream encoder (e.g. `LiquidAI/LFM3-Omni-2B-GGUF`) run the `/v1/realtime` protocol of llama-server in-process, without a socket. Check `engineOperations.realtime` after loading: it needs `idlePauseSeconds: -1`. `runtimeModelCapabilities.realtimeConversation` tells a voice conversation model from a live transcription one.
+
+```swift
+let session = try await engine.openRealtimeSession()
+try session.updateSession(instructions: "Answer in one short sentence.", outputModalities: [.text])
+
+// e.g. from an AVAudioEngine input tap, at the hardware rate
+try session.appendAudio(buffer)
+try session.commitAudio()
+try session.createResponse()
+
+for try await event in session {
+    if let text = event.textDelta { print(text, terminator: "") }
+    if let audio = event.audio { /* play it at session.outputSampleRate */ }
+    if event.type == "response.done" { break }
+}
+session.close()
+```
+
+- One session at a time per engine. A chat completion while a session is open, or a session while a chat completion runs, throws `LlamaError.busy`.
+- `appendAudio` mixes channels down and resamples to `inputSampleRate` (16 kHz for LFM3-Omni) with `AVAudioConverter`, keeping the resampler state across chunks; `commitAudio` flushes it. The audio goes as base64 PCM16 in 1 s chunks at most.
+- Events are read on the session's own thread, one per `next()`, so a slow consumer does not grow memory: past 8 MiB of unread events the session ends with an `output_queue_full` error. The base64 audio of `response.output_audio.delta` is decoded on that thread (`event.audio`), unknown events keep their raw `json`.
+- `supportsAudioOutput` is true when `session.created` announces an audio output (`outputSampleRate`, 24 kHz for LFM3-Omni). Ask for a spoken answer with `createResponse(outputModalities: [.text, .audio])`: the text comes as `textDelta`, the voice as `audio`. `maxOutputTokens` counts the audio steps too, and `response.done` comes before the voice has been played.
+- Tools: pass `RealtimeTool`s and a `RealtimeToolChoice` to `updateSession` before the first audio or message. A call comes as `event.functionCall` once its arguments are complete; send its result with `sendFunctionCallOutput(callID:output:)`, then `createResponse()`. A call is always text, even when the response asked for `[.text, .audio]`; LFM3-Omni needs "Respond with function calls, and interleaved text and audio." in the instructions to call tools.
+- `cancelResponse()` stops the response and keeps the conversation; `close()` ends the session. Cancelling the iterating task closes it too.
+- Pause, unload and the end of the engine end the session with a last `error` event (`code == "session_terminated"`); the `RealtimeSession` stays safe to use after that.
+- The engine does not capture or play audio and does not detect the end of a turn (no VAD): the app sends `commitAudio()` itself.
+
+`swift-llama-engine-demo-app` has a command-line demo, `LlamaRealtimeFileDemo`, that sends an audio file as a microphone would; `--speak` writes the spoken answer to a WAV file.
 
 ## Foundation Models adapters
 

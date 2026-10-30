@@ -9,6 +9,8 @@ public enum LlamaError: Error, CustomStringConvertible, Sendable {
     case inference(String, payload: String?)
     case cancelled
     case timeout
+    /// A realtime session and a chat completion cannot run together.
+    case busy(String)
     case streamAlreadyConsumed
     case internalError(String)
 
@@ -22,6 +24,7 @@ public enum LlamaError: Error, CustomStringConvertible, Sendable {
         case .inference(let m, _):    return "inference error: \(m)"
         case .cancelled:              return "cancelled"
         case .timeout:                return "timeout"
+        case .busy(let m):            return "busy: \(m)"
         case .streamAlreadyConsumed:  return "stream already consumed"
         case .internalError(let m):   return "internal error: \(m)"
         }

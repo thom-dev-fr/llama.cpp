@@ -242,6 +242,9 @@ struct mtmd_helper_gen_audio_inp {
     // > 0: continue a sequence of n_past positions with raw text (LFM3-Audio only)
     int32_t n_past;
     enum mtmd_helper_gen_audio_out_mode out_mode; // n_past > 0 only (default: auto)
+    // MIXED only: the response may instead open with this text token and stay in text, e.g. the start of a tool call
+    // (default: LLAMA_TOKEN_NULL, always interleaved)
+    llama_token text_open_token;
 
     mtmd_bitmap * speaker_ref; // optional, can be NULL: audio to clone, or a voice bitmap
     const char * lang; // optional, can be NULL
@@ -291,6 +294,10 @@ MTMD_API bool mtmd_helper_gen_audio_next_is_text(mtmd_helper_gen_audio * ctx);
 
 // bias for the text tokens the caller samples (e.g. no switch to audio in a text-only response), n_bias is set to its size
 MTMD_API const llama_logit_bias * mtmd_helper_gen_audio_get_logit_bias(mtmd_helper_gen_audio * ctx, size_t * n_bias);
+
+// with text_open_token: the token that opens the interleaving, the caller replaces the first token it samples with it
+// unless that token is text_open_token; LLAMA_TOKEN_NULL when the caller samples the first token freely
+MTMD_API llama_token mtmd_helper_gen_audio_get_mixed_open_token(mtmd_helper_gen_audio * ctx);
 
 // bias for the text the caller samples while it transcribes an audio stream opened with a prompt (see mtmd_audio_stream_params)
 // writes up to n_max entries to out, returns the size of the bias
@@ -394,6 +401,9 @@ struct gen_audio {
         size_t n = 0;
         const llama_logit_bias * bias = mtmd_helper_gen_audio_get_logit_bias(ctx.get(), &n);
         return std::vector<llama_logit_bias>(bias, bias + n);
+    }
+    llama_token mixed_open_token() {
+        return mtmd_helper_gen_audio_get_mixed_open_token(ctx.get());
     }
     int32_t get_output(int32_t * out_sample_rate, const char ** out_data, size_t * out_data_len, int64_t * out_n_samples = nullptr) {
         return mtmd_helper_gen_audio_get_output(ctx.get(), out_sample_rate, out_data, out_data_len, out_n_samples);

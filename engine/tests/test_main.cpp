@@ -11,6 +11,8 @@ extern void run_inflight_registry_tests();
 extern void run_chat_route_adapter_tests();
 extern void run_runtime_caps_tests();
 extern void run_memory_measure_tests();
+extern void run_realtime_conn_tests();
+extern void run_realtime_session_tests();
 
 int main() {
     run_params_translator_tests();
@@ -19,6 +21,8 @@ int main() {
     run_chat_route_adapter_tests();
     run_runtime_caps_tests();
     run_memory_measure_tests();
+    run_realtime_conn_tests();
+    run_realtime_session_tests();
 
     std::printf("\n===== %d / %d passed =====\n", g_total - g_failures, g_total);
     return g_failures == 0 ? 0 : 1;

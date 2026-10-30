@@ -7,6 +7,7 @@
 - Model lifecycle: load, unload, pause, and resume.
 - Chat completions through OpenAI-compatible JSON requests.
 - Streaming chat completions with cancellation.
+- Realtime sessions (`/v1/realtime` protocol of llama-server) for voice conversation and live transcription models, over an in-memory connection.
 - Tokenize, detokenize, and input token counting helpers.
 - Lightweight GGUF capability and metadata probing.
 - Optional multimodal projector and MTP speculative decoding support.
@@ -44,6 +45,7 @@ ctest --test-dir build-engine-tests -L engine --output-on-failure --no-tests=err
 Tests:
 
 - `llama-engine-pure`: unit tests of the internal modules, no model.
+- `llama-engine-realtime`: realtime sessions over the in-memory websocket connection and through the C API (exclusivity with chat, pause, unload and destroy during a session), against a realtime conversation model. Opt-in: pass `-DLLAMA_ENGINE_TEST_REALTIME_MODEL=/path/to/LFM3-Omni-2B-Q4_K_M.gguf -DLLAMA_ENGINE_TEST_REALTIME_MMPROJ=/path/to/mmproj-LFM3-Omni-2B-Q8_0.gguf` (from `LiquidAI/LFM3-Omni-2B-GGUF`), skipped otherwise. Set `LLAMA_ENGINE_TEST_TRACE=1` to print every event.
 - `llama-engine-capi-cpu` (and `llama-engine-capi-metal` with Metal): end-to-end test of the public C API, written in C. It loads `tinyllamas/stories15M-q4_0.gguf`, downloaded by the `llama-engine-download-model` fixture. Pass `-DLLAMA_ENGINE_TEST_MODEL=/path/to/model.gguf` to use a local file and skip the download. Without a model the test exits with code 77 and CTest reports it as skipped.
 
 You can also run the test binaries directly:

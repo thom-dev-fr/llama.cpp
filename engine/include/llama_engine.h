@@ -11,6 +11,7 @@ extern "C" {
 
 typedef struct llama_engine_t llama_engine_t;
 typedef struct llama_engine_stream_t llama_engine_stream_t;
+typedef struct llama_engine_realtime_t llama_engine_realtime_t;
 
 typedef enum {
     LLAMA_ENGINE_OK                = 0,
@@ -22,6 +23,7 @@ typedef enum {
     LLAMA_ENGINE_ERR_INFERENCE     = 6,
     LLAMA_ENGINE_ERR_CANCELLED     = 7,
     LLAMA_ENGINE_ERR_TIMEOUT       = 8,
+    LLAMA_ENGINE_ERR_BUSY          = 9,  // a realtime session and a chat completion cannot run together
     LLAMA_ENGINE_ERR_INTERNAL      = 99,
 } llama_engine_status;
 
@@ -301,7 +303,8 @@ void llama_engine_free_model_info(llama_engine_model_info * info);
 //     "engine_operations": {      // what this C API can run with that config
 //       "chat_completion", "chat_completion_stream", "count_chat_tokens", "tokenize",
 //       "image_input", "audio_input", "video_input",  // as chat completion content
-//       "speech_generation", "transcription", "realtime"  // false: not exposed yet
+//       "speech_generation", "transcription",  // false: not exposed yet
+//       "realtime"  // llama_engine_realtime_open(); false with idle_pause_seconds >= 0
 //     }
 // A capability of the model does not mean the engine exposes it: check
 // "engine_operations" before offering a feature. "audio_stream" alone means
@@ -453,6 +456,58 @@ llama_engine_status llama_engine_stream_next(
 void llama_engine_stream_cancel(llama_engine_stream_t * stream);
 
 void llama_engine_stream_close(llama_engine_stream_t * stream);
+
+// Realtime session: the /v1/realtime websocket protocol of llama-server
+// (tools/server/README.md), over an in-memory connection, without any socket.
+// Requires "engine_operations.realtime" (a model with "audio_stream", and
+// idle_pause_seconds = -1). Models with "realtime_conversation" hold a voice
+// conversation; `config_json` {"intent": "transcription"} opens a live
+// transcription session instead, like ?intent=transcription. NULL or "{}" for
+// the default.
+//
+// One session at a time per engine. Opening while a chat completion or another
+// session is in progress, or a chat completion while a session is open, returns
+// LLAMA_ENGINE_ERR_BUSY (count_chat_tokens and tokenize still work). A session
+// that was closed holds the engine until its worker returns, within about one
+// second: opening a session or a chat completion right after waits for it. A
+// paused engine is resumed first.
+//
+// Threads: one writer calls send(), one reader calls next(), close() is safe
+// from any thread. send/next/close/free never use the engine: the handle stays
+// valid after pause, unload or llama_engine_destroy(). Then the session is
+// ended with a last "error" event (code "session_terminated") before *out_done.
+// Always free the handle with llama_engine_realtime_free().
+llama_engine_status llama_engine_realtime_open(
+    llama_engine_t           * engine,
+    const char               * config_json,
+    llama_engine_realtime_t ** out_session);
+
+// Queues one client event (JSON text). Does not block.
+// Returns LLAMA_ENGINE_ERR_INVALID_ARG for an event over 2 MiB (the session
+// stays open) and LLAMA_ENGINE_ERR_CANCELLED once the session has ended. The
+// event is parsed by the session: a bad event gives an "error" event from
+// next(), the session stays open.
+llama_engine_status llama_engine_realtime_send(
+    llama_engine_realtime_t * session,
+    const char              * event_json);
+
+// Blocks until the next server event. On LLAMA_ENGINE_OK:
+//   - If *out_done == false, *out_event_json is a heap-allocated JSON string (free with llama_engine_free_string).
+//   - If *out_done == true, the session has ended and all its events were read; *out_event_json is NULL.
+// A full event queue ends the session with an "error" event (code
+// "input_queue_full" or "output_queue_full") instead of dropping events.
+llama_engine_status llama_engine_realtime_next(
+    llama_engine_realtime_t * session,
+    char                   ** out_event_json,
+    bool                    * out_done);
+
+// Ends the session and wakes next(); the events already sent can still be read.
+// Idempotent, safe from any thread, does not block. To stop a response and
+// keep the conversation, send {"type": "response.cancel"} instead.
+void llama_engine_realtime_close(llama_engine_realtime_t * session);
+
+// Closes the session and frees the handle. Must not race with send/next.
+void llama_engine_realtime_free(llama_engine_realtime_t * session);
 
 #ifdef __cplusplus
 } // extern "C"

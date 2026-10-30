@@ -61,6 +61,8 @@ void params_translator::apply_extra_json(common_params & params, const json & ex
     if (extra.contains("image_min_tokens"))           params.image_min_tokens             = extra.at("image_min_tokens").get<int>();
     if (extra.contains("image_max_tokens"))           params.image_max_tokens             = extra.at("image_max_tokens").get<int>();
     if (extra.contains("mtmd_batch_max_tokens"))      params.mtmd_batch_max_tokens        = extra.at("mtmd_batch_max_tokens").get<int>();
+    // false keeps the projector (image and audio encoders) on the CPU, like --no-mmproj-offload
+    if (extra.contains("mmproj_use_gpu"))             params.mmproj_use_gpu               = extra.at("mmproj_use_gpu").get<bool>();
     if (extra.contains("media_path")) {
         // Gate for file:// URLs in chat image_url/input_audio parts. Matches
         // the behaviour of the amont --media-path flag: the path must be a

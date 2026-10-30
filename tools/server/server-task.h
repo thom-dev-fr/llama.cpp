@@ -62,6 +62,7 @@ enum server_control_action {
     SERVER_CONTROL_ACTION_TEXT_APPEND,     // append control_text to the conversation
     SERVER_CONTROL_ACTION_RESPONSE_CREATE, // generate after control_text, see control_response
     SERVER_CONTROL_ACTION_RESPONSE_CANCEL, // stop the response being generated
+    SERVER_CONTROL_ACTION_AUDIO_CLEAR,     // discard uncommitted audio
     SERVER_CONTROL_ACTION_CLEAR,           // drop the conversation
 };
 

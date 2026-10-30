@@ -6310,8 +6310,8 @@ void server_routes::init_routes() {
 
         while (true) {
             auto result = rd.next([&conn]() { return !conn.is_open(); });
-            if (!result) {
-                break; // connection closed
+            if (!result || !conn.is_open()) {
+                break; // connection closed, also while results keep coming
             }
             if (result->is_error()) {
                 send_error_event(json_value(result->to_json(), "message", std::string("server error")), "server_error");

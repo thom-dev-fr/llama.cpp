@@ -146,7 +146,7 @@ static void test_runtime_sections_multimodal_inputs() {
 }
 
 static void test_runtime_sections_audio_models() {
-    CASE("TTS, transcription and conversation models are not engine operations yet");
+    CASE("TTS and file transcription are not engine operations yet, audio_stream models are realtime");
     runtime_caps::runtime_flags tts;
     tts.has_mtmd          = true;
     tts.cap_tts           = true;
@@ -168,9 +168,15 @@ static void test_runtime_sections_audio_models() {
     EXPECT(!doc.at("model_capabilities").at("realtime_conversation").get<bool>());
     EXPECT(!doc.at("engine_operations").at("audio_input").get<bool>());
     EXPECT(!doc.at("engine_operations").at("transcription").get<bool>());
+    EXPECT(doc.at("engine_operations").at("realtime").get<bool>());
 
     runtime_caps::runtime_flags conv = asr;
     conv.cap_chat = true;
+    doc = runtime_doc(conv);
+    EXPECT(doc.at("model_capabilities").at("realtime_conversation").get<bool>());
+    EXPECT(doc.at("engine_operations").at("realtime").get<bool>());
+
+    conv.idle_sleep = true;
     doc = runtime_doc(conv);
     EXPECT(doc.at("model_capabilities").at("realtime_conversation").get<bool>());
     EXPECT(!doc.at("engine_operations").at("realtime").get<bool>());

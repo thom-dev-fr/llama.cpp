@@ -5,6 +5,7 @@
 #include "chat_route_adapter.hpp"
 #include "engine_lifecycle.hpp"
 #include "inflight_registry.hpp"
+#include "realtime_session.hpp"
 #include "server-context.h"
 
 #include <atomic>
@@ -72,6 +73,11 @@ public:
     void                stream_cancel(stream_handle * stream);
     void                stream_close(stream_handle * stream);
 
+    // Realtime session over ws_realtime. One at a time, and exclusive with
+    // chat completions (LLAMA_ENGINE_ERR_BUSY). `config_json` may be empty.
+    llama_engine_status realtime_open(const std::string & config_json,
+                                      std::shared_ptr<realtime_session> & out);
+
 private:
     struct admitted_request {
         std::shared_ptr<server_routes> routes;
@@ -83,8 +89,10 @@ private:
         std::unique_ptr<stream_handle> handle;
     };
 
+    // `uses_slot` requests are refused while a realtime session is open
     llama_engine_status admit_request_locked(std::unique_lock<std::mutex> & lock,
                                              active_request & req,
+                                             bool uses_slot,
                                              admitted_request & out);
     llama_engine_status admit_stream_locked(std::unique_lock<std::mutex> & lock,
                                             const std::string & request_json,
@@ -98,7 +106,12 @@ private:
     // identical.
     llama_engine_status load_from_params_locked(std::unique_lock<std::mutex> & lock,
                                                 bool from_resume);
-    void                teardown_locked(std::unique_lock<std::mutex> & lock);
+    // `reason` goes in the session_terminated error of the open realtime sessions
+    void                teardown_locked(std::unique_lock<std::mutex> & lock, const char * reason);
+
+    // resumes a paused engine and checks it is ready; `uses_slot` also waits for a
+    // closed realtime session (the lock is released meanwhile) and refuses an open one
+    llama_engine_status admit_ready_locked(std::unique_lock<std::mutex> & lock, bool uses_slot);
 
     void                set_error(std::string msg);
 
@@ -115,6 +128,8 @@ private:
     std::future<void>                      loop_done;
     std::unique_ptr<server_context_meta>   meta;
     std::string                            caps_json;
+    // the realtime session, its worker may still use ctx: joined before ctx goes
+    std::shared_ptr<realtime_session>      realtime;
     const llama_vocab *                    vocab = nullptr;
 
     static std::once_flag     backend_once;

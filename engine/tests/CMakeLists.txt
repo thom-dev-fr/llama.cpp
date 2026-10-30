@@ -11,6 +11,8 @@ add_executable(test-llama-engine-pure
     test_chat_route_adapter.cpp
     test_runtime_caps.cpp
     test_memory_measure.cpp
+    test_realtime_conn.cpp
+    test_realtime_session.cpp
 )
 
 # vocab-only GGUF shipped with the repo: metadata and tokenizer, no weights
@@ -86,3 +88,26 @@ if (GGML_METAL)
 endif()
 
 set_tests_properties(llama-engine-pure PROPERTIES LABELS "engine")
+
+# Realtime session over the in-memory connection, against a realtime conversation model.
+# Opt-in: LiquidAI/LFM3-Omni-2B-GGUF, see the README for the files and revision.
+set(LLAMA_ENGINE_TEST_REALTIME_MODEL  "" CACHE FILEPATH "llama-engine: realtime conversation model, empty to skip")
+set(LLAMA_ENGINE_TEST_REALTIME_MMPROJ "" CACHE FILEPATH "llama-engine: mmproj of the realtime model")
+
+add_executable(test-llama-engine-realtime test_realtime_model.cpp)
+target_include_directories(test-llama-engine-realtime PRIVATE
+    ${LLAMA_REPO_ROOT_T}/engine/include
+    ${LLAMA_REPO_ROOT_T}/engine/src
+    ${LLAMA_REPO_ROOT_T}/tools/server
+    ${LLAMA_REPO_ROOT_T}/tools/mtmd
+    ${LLAMA_REPO_ROOT_T}/common
+    ${LLAMA_REPO_ROOT_T}
+    ${LLAMA_REPO_ROOT_T}/vendor
+)
+target_link_libraries(test-llama-engine-realtime PRIVATE llama-engine server-context llama-common Threads::Threads)
+target_compile_features(test-llama-engine-realtime PRIVATE cxx_std_17)
+
+add_test(NAME llama-engine-realtime COMMAND test-llama-engine-realtime
+    "${LLAMA_ENGINE_TEST_REALTIME_MODEL}" "${LLAMA_ENGINE_TEST_REALTIME_MMPROJ}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/realtime-question-16k.pcm")
+set_tests_properties(llama-engine-realtime PROPERTIES SKIP_RETURN_CODE 77 LABELS "engine;model" TIMEOUT 300)
