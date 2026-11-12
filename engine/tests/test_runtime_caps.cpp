@@ -128,6 +128,8 @@ static void test_runtime_sections_text_only() {
     EXPECT(op.at("chat_completion").get<bool>());
     EXPECT(op.at("tokenize").get<bool>());
     EXPECT(!op.at("image_input").get<bool>());
+    EXPECT(!op.at("speech_generation").get<bool>());
+    EXPECT_EQ(m.at("voices").dump(), std::string("[]"));
     EXPECT(!op.at("realtime").get<bool>());
 }
 
@@ -146,18 +148,20 @@ static void test_runtime_sections_multimodal_inputs() {
 }
 
 static void test_runtime_sections_audio_models() {
-    CASE("TTS and file transcription are not engine operations yet, audio_stream models are realtime");
+    CASE("TTS models give speech generation and their voices, file transcription is not an engine operation yet, audio_stream models are realtime");
     runtime_caps::runtime_flags tts;
     tts.has_mtmd          = true;
     tts.cap_tts           = true;
     tts.audio_gen_spk_ref = true;
     tts.output_modalities = { "audio" };
+    tts.voices            = { "alice", "bob" };
     json doc = runtime_doc(tts);
     EXPECT(doc.at("model_capabilities").at("audio_generation").get<bool>());
     EXPECT(doc.at("model_capabilities").at("audio_speaker_reference").get<bool>());
     EXPECT(!doc.at("model_capabilities").at("chat").get<bool>());
     EXPECT(!doc.at("engine_operations").at("chat_completion").get<bool>());
-    EXPECT(!doc.at("engine_operations").at("speech_generation").get<bool>());
+    EXPECT(doc.at("engine_operations").at("speech_generation").get<bool>());
+    EXPECT_EQ(doc.at("model_capabilities").at("voices").dump(), std::string(R"(["alice","bob"])"));
 
     runtime_caps::runtime_flags asr;
     asr.has_mtmd     = true;

@@ -73,6 +73,14 @@ public:
     void                stream_cancel(stream_handle * stream);
     void                stream_close(stream_handle * stream);
 
+    // Speech generation through /tts, exclusive with a realtime session like
+    // chat completions. `out_pcm` holds F32 LE samples at `out_sample_rate`.
+    llama_engine_status speech(const std::string & request_json,
+                               std::string & out_pcm, int32_t & out_sample_rate);
+    // the chunks of stream_next() are F32 LE samples at the rate of the stream
+    llama_engine_status speech_stream(const std::string & request_json,
+                                      stream_handle ** out_stream);
+
     // Realtime session over ws_realtime. One at a time, and exclusive with
     // chat completions (LLAMA_ENGINE_ERR_BUSY). `config_json` may be empty.
     llama_engine_status realtime_open(const std::string & config_json,
@@ -95,7 +103,7 @@ private:
                                              bool uses_slot,
                                              admitted_request & out);
     llama_engine_status admit_stream_locked(std::unique_lock<std::mutex> & lock,
-                                            const std::string & request_json,
+                                            std::unique_ptr<stream_handle> handle,
                                             admitted_stream & out);
 
     llama_engine_status load_locked(const llama_engine_config & cfg,

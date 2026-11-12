@@ -30,6 +30,7 @@ examples/apple/swift-llama-engine/
     - Stream: `chatCompletionStream(requestJSON:) async throws -> EngineStream`
 - Multimodal inputs (image / audio) via the OpenAI `image_url` / `input_audio` content parts, gated by the projector shipped with the model
 - Realtime sessions (voice conversation, live transcription): `openRealtimeSession(intent:) async throws -> RealtimeSession`, see [Realtime sessions](#realtime-sessions)
+- Speech generation (text to speech): `generateSpeech(_:) async throws -> SpeechAudio` and `speechStream(_:) async throws -> SpeechStream`, see [Speech generation](#speech-generation)
 - Tokenize / detokenize
 - Metal GPU backend with embedded library
 - Thread-safe via the C++ Engine Core, with Swift `EngineStream.cancel()` propagating into `server-context` cancel tasks
@@ -191,6 +192,23 @@ session.close()
 - The engine does not capture or play audio and does not detect the end of a turn (no VAD): the app sends `commitAudio()` itself.
 
 `swift-llama-engine-demo-app` has a command-line demo, `LlamaRealtimeFileDemo`, that sends an audio file as a microphone would; `--speak` writes the spoken answer to a WAV file.
+
+## Speech generation
+
+Models with an audio generation pipeline (e.g. LFM3-Omni) speak a text through the `/tts` route of llama-server. Check `engineOperations.speechGeneration` after loading.
+
+```swift
+let request = SpeechRequest(input: "Hello!", language: "English", seed: 42)
+let audio = try await engine.generateSpeech(request)   // audio.samples at audio.sampleRate
+
+for try await chunk in try await engine.speechStream(request) {
+    // play chunk.samples as they come
+}
+```
+
+- `voice` is one of `runtimeModelCapabilities.voices` (`"female"` or `"male"` for LFM3-Omni, which lists none); `speakerReference` is a WAV or MP3 clip to clone instead, when `audioSpeakerReference` is true.
+- The audio is mono Float PCM at the model rate (24 kHz for LFM3-Omni). The stream opens once the first audio is ready; `cancel()` stops it.
+- Like a chat completion, it throws `LlamaError.busy` while a realtime session is open.
 
 ## Foundation Models adapters
 

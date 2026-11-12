@@ -173,6 +173,9 @@ public struct RuntimeModelCapabilities: Sendable, Hashable, Decodable {
     public var audioStream: Bool?
     public var realtimeConversation: Bool?
     public var multimodalProjector: Bool?
+    /// Predefined voices for ``SpeechRequest/voice`` and the realtime
+    /// `voice`; empty when the model has none.
+    public var voices: [String]?
 
     enum CodingKeys: String, CodingKey {
         case chat
@@ -185,13 +188,13 @@ public struct RuntimeModelCapabilities: Sendable, Hashable, Decodable {
         case audioStream = "audio_stream"
         case realtimeConversation = "realtime_conversation"
         case multimodalProjector = "multimodal_projector"
+        case voices
     }
 }
 
 /// What ``LlamaEngine`` can run with the loaded configuration. `false` also
 /// covers features the model supports but the engine does not expose yet, such
-/// as speech generation or realtime sessions. `nil` means unknown: treat it as
-/// unavailable.
+/// as file transcription. `nil` means unknown: treat it as unavailable.
 public struct EngineOperations: Sendable, Hashable, Decodable {
     public var chatCompletion: Bool?
     public var chatCompletionStream: Bool?
@@ -203,6 +206,7 @@ public struct EngineOperations: Sendable, Hashable, Decodable {
     public var audioInput: Bool?
     /// Video content in chat completion requests.
     public var videoInput: Bool?
+    /// ``LlamaEngine/generateSpeech(_:)`` and ``LlamaEngine/speechStream(_:)``.
     public var speechGeneration: Bool?
     public var transcription: Bool?
     public var realtime: Bool?

@@ -27,6 +27,9 @@ struct stream_handle {
     bool                                    single_shot_sent   = false;
     bool                                    response_done      = false;
     bool                                    opening            = false;
+    // speech stream: the frames are raw PCM bytes, not SSE
+    bool                                    audio              = false;
+    std::string                             content_type;
 };
 
 // Adapter from LlamaEngine's in-process chat interface to upstream
@@ -75,6 +78,32 @@ public:
                                            std::string & out_chunk,
                                            bool & out_done,
                                            const set_error_fn & set_error);
+
+    // Speech generation through the /tts route: `request_json` gets
+    // "response_format": "pcm" (F32 LE samples) and "stream".
+    // `out_sample_rate` comes from the content type of the response.
+    static llama_engine_status speech(
+        const std::shared_ptr<server_routes> & routes,
+        const std::string & request_json,
+        active_request & request_state,
+        std::string & out_pcm,
+        int32_t & out_sample_rate,
+        const set_error_fn & set_error);
+
+    // nullptr with `error` set when `request_json` is not a JSON object
+    static std::unique_ptr<stream_handle> make_speech_stream_handle(
+        const std::string & request_json,
+        std::string & error);
+
+    static llama_engine_status open_registered_speech_stream(
+        const std::shared_ptr<server_routes> & routes,
+        inflight_registry & registry,
+        std::unique_ptr<stream_handle> handle,
+        stream_handle ** out_stream,
+        const set_error_fn & set_error);
+
+    // the rate in "audio/pcm;rate=24000;...", 0 if there is none
+    static int32_t pcm_sample_rate(const std::string & content_type);
 
     static void stream_cancel(stream_handle * stream);
     static void stream_close(stream_handle * stream);

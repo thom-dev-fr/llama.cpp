@@ -28,12 +28,13 @@ struct runtime_caps {
         bool audio_gen_spk_ref    = false;
         bool idle_sleep           = false; // idle_pause_seconds >= 0
         std::vector<std::string> output_modalities;
+        std::vector<std::string> voices;
     };
 
     // What the loaded model and build can do, whatever the engine API exposes.
     static common_json model_capabilities_section(const runtime_flags & f);
     // What the engine C API can run with this configuration. False for what it
-    // does not expose yet (speech generation, file transcription).
+    // does not expose yet (file transcription).
     static common_json engine_operations_section(const runtime_flags & f);
 
     static std::string document(const common_json & chat_template);

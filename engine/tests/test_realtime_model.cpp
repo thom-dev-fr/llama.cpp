@@ -14,6 +14,7 @@
 #include "server-context.h"
 
 #include <algorithm>
+#include <cmath>
 #include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
@@ -595,6 +596,105 @@ static void test_capi_exclusive(llama_engine_t * engine) {
     llama_engine_free_string(out);
 }
 
+static const char * k_speech_request = "{\"input\": \"Hello, this is a short test of the speech output.\", \"seed\": 42}";
+
+static bool valid_audio(const llama_engine_audio & a) {
+    if (!a.samples || a.n_samples == 0 || a.sample_rate <= 0) {
+        return false;
+    }
+    for (size_t i = 0; i < a.n_samples; i++) {
+        if (!std::isfinite(a.samples[i]) || std::fabs(a.samples[i]) > 1.5f) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static void test_capi_speech(llama_engine_t * engine) {
+    std::printf("C API: speech generation, blocking and stream, refused during a session\n");
+    EXPECT(caps_contain(engine, "\"speech_generation\":true"));
+    EXPECT(caps_contain(engine, "\"voices\":["));
+
+    llama_engine_audio audio{};
+    EXPECT(llama_engine_speech(engine, k_speech_request, &audio) == LLAMA_ENGINE_OK);
+    EXPECT(valid_audio(audio));
+    // at least half a second of voice; the quality is checked by ear
+    EXPECT(audio.n_samples >= (size_t) audio.sample_rate / 2);
+    const int32_t rate = audio.sample_rate;
+    std::printf("  blocking: %zu samples at %d Hz\n", audio.n_samples, audio.sample_rate);
+    llama_engine_free_audio(&audio);
+    EXPECT(audio.samples == nullptr && audio.n_samples == 0);
+
+    EXPECT(llama_engine_speech(engine, "{\"input\": \"hi\", \"speaker_ref_b64\": \"%%%\"}", &audio) == LLAMA_ENGINE_ERR_INVALID_REQUEST);
+    EXPECT(audio.samples == nullptr);
+    EXPECT(llama_engine_speech(engine, "{\"input\": \"\"}", &audio) == LLAMA_ENGINE_ERR_INVALID_REQUEST);
+
+    llama_engine_stream_t * stream = nullptr;
+    EXPECT(llama_engine_speech_stream(engine, k_speech_request, &stream) == LLAMA_ENGINE_OK);
+    size_t n_chunks  = 0;
+    size_t n_samples = 0;
+    bool   chunks_ok = true;
+    if (stream) {
+        while (true) {
+            bool done = false;
+            llama_engine_audio chunk{};
+            const auto st = llama_engine_speech_stream_next(stream, &chunk, &done);
+            EXPECT(st == LLAMA_ENGINE_OK);
+            if (st != LLAMA_ENGINE_OK || done) {
+                EXPECT(chunk.samples == nullptr);
+                break;
+            }
+            chunks_ok = chunks_ok && valid_audio(chunk) && chunk.sample_rate == rate;
+            n_chunks++;
+            n_samples += chunk.n_samples;
+            llama_engine_free_audio(&chunk);
+        }
+        llama_engine_stream_close(stream);
+    }
+    std::printf("  stream: %zu samples in %zu chunks\n", n_samples, n_chunks);
+    EXPECT(chunks_ok);
+    EXPECT(n_chunks > 1);
+    EXPECT(n_samples >= (size_t) rate / 2);
+
+    // cancel after the first chunk: the stream ends, the engine goes on
+    stream = nullptr;
+    EXPECT(llama_engine_speech_stream(engine, k_speech_request, &stream) == LLAMA_ENGINE_OK);
+    if (stream) {
+        bool done = false;
+        llama_engine_audio chunk{};
+        EXPECT(llama_engine_speech_stream_next(stream, &chunk, &done) == LLAMA_ENGINE_OK);
+        llama_engine_free_audio(&chunk);
+        llama_engine_stream_cancel(stream);
+        size_t after = 0;
+        while (!done && after < 1000) {
+            if (llama_engine_speech_stream_next(stream, &chunk, &done) != LLAMA_ENGINE_OK) {
+                break;
+            }
+            llama_engine_free_audio(&chunk);
+            after++;
+        }
+        EXPECT(after < 1000);
+        llama_engine_stream_close(stream);
+    }
+
+    // exclusive with a realtime session, like a chat completion
+    llama_engine_realtime_t * rt = nullptr;
+    EXPECT(llama_engine_realtime_open(engine, nullptr, &rt) == LLAMA_ENGINE_OK);
+    {
+        capi_reader reader(rt);
+        EXPECT(reader.wait_for("session.created"));
+        EXPECT(llama_engine_speech(engine, k_speech_request, &audio) == LLAMA_ENGINE_ERR_BUSY);
+        stream = nullptr;
+        EXPECT(llama_engine_speech_stream(engine, k_speech_request, &stream) == LLAMA_ENGINE_ERR_BUSY);
+        EXPECT(stream == nullptr);
+        llama_engine_realtime_close(rt);
+        reader.wait_done();
+    }
+    llama_engine_realtime_free(rt);
+    EXPECT(llama_engine_speech(engine, "{\"input\": \"OK.\", \"seed\": 1}", &audio) == LLAMA_ENGINE_OK);
+    llama_engine_free_audio(&audio);
+}
+
 // starts a long response and waits for its first delta
 static void start_long_response(llama_engine_realtime_t * rt, capi_reader & reader) {
     EXPECT(reader.wait_for("session.created"));
@@ -723,6 +823,7 @@ int main(int argc, char ** argv) {
     llama_engine_t * engine = llama_engine_create();
     EXPECT(llama_engine_load(engine, &cfg) == LLAMA_ENGINE_OK);
     test_capi_exclusive(engine);
+    test_capi_speech(engine);
     test_capi_pause(engine);
     llama_engine_destroy(engine);
     test_capi_destroy(cfg);

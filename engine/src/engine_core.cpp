@@ -173,6 +173,7 @@ llama_engine_status engine_core::load_from_params_locked(std::unique_lock<std::m
         flags.audio_gen_spk_ref = meta->has_audio_gen_spk_ref;
         flags.idle_sleep        = last_params->sleep_idle_seconds >= 0;
         flags.output_modalities = meta->model_output_modalities;
+        flags.voices            = meta->tts_voices;
         caps_json = runtime_caps::runtime_document(runtime_caps::chat_template_section(
             meta->chat_template_caps, !last_params->chat_template.empty()), flags);
     }
@@ -404,17 +405,11 @@ llama_engine_status engine_core::admit_request_locked(std::unique_lock<std::mute
 }
 
 llama_engine_status engine_core::admit_stream_locked(std::unique_lock<std::mutex> & lock,
-                                                     const std::string & request_json,
+                                                     std::unique_ptr<stream_handle> handle,
                                                      admitted_stream & out)
 {
     auto st = admit_ready_locked(lock, /*uses_slot=*/true);
     if (st != LLAMA_ENGINE_OK) return st;
-
-    auto handle = chat_route_adapter::make_stream_handle(request_json);
-    if (!handle) {
-        set_error("failed to allocate stream handle");
-        return LLAMA_ENGINE_ERR_INTERNAL;
-    }
 
     out.routes = routes;
     registry.add_stream(handle.get());
@@ -474,11 +469,62 @@ llama_engine_status engine_core::chat_completion_stream(const std::string & requ
     admitted_stream admission;
     {
         std::unique_lock<std::mutex> lock(mtx);
-        auto st = admit_stream_locked(lock, request_json, admission);
+        auto st = admit_stream_locked(lock, chat_route_adapter::make_stream_handle(request_json), admission);
         if (st != LLAMA_ENGINE_OK) return st;
     }
 
     return chat_route_adapter::open_registered_stream(
+        admission.routes,
+        registry,
+        std::move(admission.handle),
+        out_stream,
+        [this](std::string msg) { set_error(std::move(msg)); });
+}
+
+llama_engine_status engine_core::speech(const std::string & request_json,
+                                        std::string & out_pcm, int32_t & out_sample_rate)
+{
+    out_pcm.clear();
+    out_sample_rate = 0;
+
+    active_request req_state;
+    admitted_request admission;
+
+    {
+        std::unique_lock<std::mutex> lock(mtx);
+        auto st = admit_request_locked(lock, req_state, /*uses_slot=*/true, admission);
+        if (st != LLAMA_ENGINE_OK) return st;
+    }
+
+    return chat_route_adapter::speech(
+        admission.routes,
+        request_json,
+        req_state,
+        out_pcm,
+        out_sample_rate,
+        [this](std::string msg) { set_error(std::move(msg)); });
+}
+
+llama_engine_status engine_core::speech_stream(const std::string & request_json,
+                                               stream_handle ** out_stream)
+{
+    *out_stream = nullptr;
+
+    std::string error;
+    auto handle = chat_route_adapter::make_speech_stream_handle(request_json, error);
+    if (!handle) {
+        set_error(error);
+        return LLAMA_ENGINE_ERR_INVALID_REQUEST;
+    }
+
+    admitted_stream admission;
+    {
+        std::unique_lock<std::mutex> lock(mtx);
+        auto st = admit_stream_locked(lock, std::move(handle), admission);
+        if (st != LLAMA_ENGINE_OK) return st;
+    }
+
+    return chat_route_adapter::open_registered_speech_stream(
         admission.routes,
         registry,
         std::move(admission.handle),

@@ -27,6 +27,7 @@ struct llama_engine_t {
 struct llama_engine_stream_t {
     stream_handle * handle;
     engine_core   * owner;
+    std::string     audio_tail; // bytes of a sample split across two speech chunks
 };
 
 struct llama_engine_realtime_t {
@@ -341,6 +342,7 @@ extern "C" llama_engine_status llama_engine_stream_next(
     if (!stream || !out_chunk_json || !out_done) return LLAMA_ENGINE_ERR_INVALID_ARG;
     *out_chunk_json = nullptr;
     *out_done = false;
+    if (stream->handle->audio) return LLAMA_ENGINE_ERR_INVALID_ARG;
 
     std::string chunk;
     bool done = false;
@@ -351,6 +353,81 @@ extern "C" llama_engine_status llama_engine_stream_next(
         if (!*out_chunk_json) return LLAMA_ENGINE_ERR_INTERNAL;
     }
     return st;
+}
+
+extern "C" void llama_engine_free_audio(llama_engine_audio * audio) {
+    if (!audio) return;
+    std::free(audio->samples);
+    *audio = llama_engine_audio{};
+}
+
+// copies whole F32 samples out of `bytes`, the rest stays in `bytes`
+static llama_engine_status take_samples(std::string & bytes, int32_t sample_rate, llama_engine_audio * out) {
+    const size_t n = bytes.size() / sizeof(float);
+    if (n > 0) {
+        out->samples = static_cast<float *>(std::malloc(n * sizeof(float)));
+        if (!out->samples) return LLAMA_ENGINE_ERR_INTERNAL;
+        std::memcpy(out->samples, bytes.data(), n * sizeof(float));
+        out->n_samples   = n;
+        out->sample_rate = sample_rate;
+    }
+    bytes.erase(0, n * sizeof(float));
+    return LLAMA_ENGINE_OK;
+}
+
+extern "C" llama_engine_status llama_engine_speech(
+    llama_engine_t * engine, const char * request_json, llama_engine_audio * out_audio)
+{
+    if (!engine || !request_json || !out_audio) return LLAMA_ENGINE_ERR_INVALID_ARG;
+    *out_audio = llama_engine_audio{};
+
+    std::string pcm;
+    int32_t rate = 0;
+    auto st = engine->core.speech(request_json, pcm, rate);
+    if (st != LLAMA_ENGINE_OK) return st;
+    return take_samples(pcm, rate, out_audio);
+}
+
+extern "C" llama_engine_status llama_engine_speech_stream(
+    llama_engine_t * engine, const char * request_json, llama_engine_stream_t ** out_stream)
+{
+    if (!engine || !request_json || !out_stream) return LLAMA_ENGINE_ERR_INVALID_ARG;
+    *out_stream = nullptr;
+
+    stream_handle * handle = nullptr;
+    auto st = engine->core.speech_stream(request_json, &handle);
+    return wrap_stream(&engine->core, st, handle, out_stream);
+}
+
+extern "C" llama_engine_status llama_engine_speech_stream_next(
+    llama_engine_stream_t * stream, llama_engine_audio * out_chunk, bool * out_done)
+{
+    if (!stream || !out_chunk || !out_done) return LLAMA_ENGINE_ERR_INVALID_ARG;
+    *out_chunk = llama_engine_audio{};
+    *out_done = false;
+    if (!stream->handle->audio) return LLAMA_ENGINE_ERR_INVALID_ARG;
+
+    const int32_t rate = llama_engine::chat_route_adapter::pcm_sample_rate(stream->handle->content_type);
+    // a chunk shorter than one sample gives no audio: read on
+    while (true) {
+        std::string chunk;
+        bool done = false;
+        auto st = stream->owner->stream_next(stream->handle, chunk, done);
+        if (st != LLAMA_ENGINE_OK) {
+            *out_done = done;
+            return st;
+        }
+        stream->audio_tail += chunk;
+        if (stream->audio_tail.size() >= sizeof(float)) {
+            if (rate == 0) return LLAMA_ENGINE_ERR_INTERNAL;
+            // the last chunk can come with done: give it now, the next call reports the end
+            return take_samples(stream->audio_tail, rate, out_chunk);
+        }
+        if (done) {
+            *out_done = true;
+            return LLAMA_ENGINE_OK;
+        }
+    }
 }
 
 extern "C" void llama_engine_stream_cancel(llama_engine_stream_t * stream) {

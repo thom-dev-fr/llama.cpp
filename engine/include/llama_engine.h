@@ -304,12 +304,14 @@ bool llama_engine_supports_architecture(const char * architecture);
 //     "model_capabilities": {     // what the loaded model, projector and build can do
 //       "chat", "input_image", "input_audio", "input_video", "audio_generation",
 //       "audio_speaker_reference", "audio_stream", "realtime_conversation",
-//       "multimodal_projector": bool, "output_modalities": [string]
+//       "multimodal_projector": bool, "output_modalities": [string],
+//       "voices": [string]        // predefined voices, [] when the model has none
 //     },
 //     "engine_operations": {      // what this C API can run with that config
 //       "chat_completion", "chat_completion_stream", "count_chat_tokens", "tokenize",
 //       "image_input", "audio_input", "video_input",  // as chat completion content
-//       "speech_generation", "transcription",  // false: not exposed yet
+//       "speech_generation",  // llama_engine_speech(), llama_engine_speech_stream()
+//       "transcription",  // false: not exposed yet
 //       "realtime"  // llama_engine_realtime_open(); false with idle_pause_seconds >= 0
 //     }
 // A capability of the model does not mean the engine exposes it: check
@@ -462,6 +464,51 @@ llama_engine_status llama_engine_stream_next(
 void llama_engine_stream_cancel(llama_engine_stream_t * stream);
 
 void llama_engine_stream_close(llama_engine_stream_t * stream);
+
+// Speech generation (text to speech): the /tts route of llama-server
+// (tools/server/README.md). Requires "engine_operations.speech_generation".
+// `request_json` is the /tts body: "input" (text, required), "voice" (one of
+// "model_capabilities.voices"), "lang", "speaker_ref_b64" (a WAV or MP3 voice
+// to clone, base64; not with "voice"), and the sampling fields "seed",
+// "temperature", "top_k", "top_p", "n_predict". The engine sets
+// "response_format" and "stream".
+// Exclusive with a realtime session like a chat completion (LLAMA_ENGINE_ERR_BUSY).
+
+// Mono PCM audio, F32 samples in [-1, 1] at `sample_rate` Hz.
+typedef struct {
+    float   * samples;
+    size_t    n_samples;
+    int32_t   sample_rate;
+} llama_engine_audio;
+
+// Frees the samples and resets `audio`. Safe on a zeroed struct.
+void llama_engine_free_audio(llama_engine_audio * audio);
+
+// Speech generation (non-stream): blocks until the whole audio is generated.
+// On success *out_audio holds the audio, free it with llama_engine_free_audio().
+// On error *out_audio stays zeroed, see llama_engine_last_error().
+llama_engine_status llama_engine_speech(
+    llama_engine_t     * engine,
+    const char         * request_json,
+    llama_engine_audio * out_audio);
+
+// Speech generation (stream): returns once the first audio is ready. Pump the
+// chunks with llama_engine_speech_stream_next(); cancel and close with
+// llama_engine_stream_cancel() / llama_engine_stream_close(), which must always
+// be called. llama_engine_stream_next() refuses a speech stream.
+llama_engine_status llama_engine_speech_stream(
+    llama_engine_t          * engine,
+    const char              * request_json,
+    llama_engine_stream_t  ** out_stream);
+
+// Blocks until the next chunk. On LLAMA_ENGINE_OK:
+//   - If *out_done == false, *out_chunk holds samples (free with llama_engine_free_audio()).
+//   - If *out_done == true, the stream has ended; *out_chunk is zeroed. Close the stream.
+// On error, returns a non-OK status and leaves *out_chunk zeroed.
+llama_engine_status llama_engine_speech_stream_next(
+    llama_engine_stream_t * stream,
+    llama_engine_audio    * out_chunk,
+    bool                  * out_done);
 
 // Realtime session: the /v1/realtime websocket protocol of llama-server
 // (tools/server/README.md), over an in-memory connection, without any socket.

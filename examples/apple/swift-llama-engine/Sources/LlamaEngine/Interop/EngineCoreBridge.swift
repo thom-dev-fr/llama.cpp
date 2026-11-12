@@ -90,6 +90,26 @@ extension LlamaEngine {
         return EngineStream(engine: self, handle: streamHandle)
     }
 
+    func speechSync(_ request: SpeechRequest) throws -> SpeechAudio {
+        let json = try request.json()
+        var audio = llama_engine_audio()
+        let status = json.withCString { llama_engine_speech(handle, $0, &audio) }
+        let result = SpeechAudio(taking: &audio)
+        try throwIfError(status)
+        return result
+    }
+
+    func openSpeechStreamSync(_ request: SpeechRequest) throws -> SpeechStream {
+        let json = try request.json()
+        var rawPtr: OpaquePointer? = nil
+        let status = json.withCString { llama_engine_speech_stream(handle, $0, &rawPtr) }
+        try throwIfError(status)
+        guard let streamHandle = rawPtr else {
+            throw LlamaError.internalError("null stream handle")
+        }
+        return SpeechStream(engine: self, handle: streamHandle)
+    }
+
     func openRealtimeSessionSync(intent: RealtimeSessionIntent) throws -> RealtimeSession {
         let config: String? = intent == .transcription ? #"{"intent":"transcription"}"# : nil
         var rawPtr: OpaquePointer? = nil

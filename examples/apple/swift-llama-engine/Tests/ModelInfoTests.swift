@@ -205,9 +205,10 @@ struct ModelInfoTests {
           "schema_version": 1,
           "chat_template": {"source": "gguf"},
           "model_capabilities": {"chat": true, "input_audio": true, "audio_stream": true,
-                                 "realtime_conversation": true, "output_modalities": ["text"]},
+                                 "realtime_conversation": true, "output_modalities": ["text"],
+                                 "voices": ["alice"]},
           "engine_operations": {"chat_completion": true, "audio_input": true, "realtime": false,
-                                "future_operation": true}
+                                "speech_generation": true, "future_operation": true}
         }
         """#
 
@@ -216,6 +217,8 @@ struct ModelInfoTests {
         #expect(caps.modelCapabilities?.realtimeConversation == true)
         #expect(caps.modelCapabilities?.inputImage == nil)
         #expect(caps.modelCapabilities?.outputModalities == ["text"])
+        #expect(caps.modelCapabilities?.voices == ["alice"])
+        #expect(caps.engineOperations?.speechGeneration == true)
         #expect(caps.engineOperations?.audioInput == true)
         #expect(caps.engineOperations?.realtime == false)
         #expect(caps.engineOperations?.imageInput == nil)

@@ -193,7 +193,46 @@ static void test_capabilities(llama_engine_t * engine) {
     EXPECT(caps_contain(engine, "\"image_input\":false"));
     EXPECT(caps_contain(engine, "\"realtime\":false"));
     EXPECT(caps_contain(engine, "\"multimodal_projector\":false"));
+    EXPECT(caps_contain(engine, "\"speech_generation\":false"));
+    EXPECT(caps_contain(engine, "\"voices\":[]"));
     EXPECT_STATUS(llama_engine_get_capabilities(engine, NULL), LLAMA_ENGINE_ERR_INVALID_ARG);
+}
+
+static void test_speech_refused(llama_engine_t * engine) {
+    fprintf(stderr, "  * speech refused for a text model and bad arguments\n");
+    llama_engine_audio audio;
+    memset(&audio, 0xff, sizeof(audio));
+    EXPECT(llama_engine_speech(engine, "{\"input\": \"hello\"}", &audio) != LLAMA_ENGINE_OK);
+    EXPECT(audio.samples == NULL && audio.n_samples == 0);
+    EXPECT_STATUS(llama_engine_speech(engine, "[1]", &audio), LLAMA_ENGINE_ERR_INVALID_REQUEST);
+    EXPECT_STATUS(llama_engine_speech(engine, NULL, &audio), LLAMA_ENGINE_ERR_INVALID_ARG);
+    EXPECT_STATUS(llama_engine_speech(NULL, "{}", &audio), LLAMA_ENGINE_ERR_INVALID_ARG);
+
+    llama_engine_stream_t * stream = NULL;
+    EXPECT_STATUS(llama_engine_speech_stream(engine, "not json", &stream), LLAMA_ENGINE_ERR_INVALID_REQUEST);
+    EXPECT(stream == NULL);
+
+    // the route error comes with the first chunk, like a chat stream
+    llama_engine_status st = llama_engine_speech_stream(engine, "{\"input\": \"hello\"}", &stream);
+    if (st == LLAMA_ENGINE_OK) {
+        EXPECT(stream != NULL);
+        char * json = NULL;
+        bool   done = false;
+        EXPECT_STATUS(llama_engine_stream_next(stream, &json, &done), LLAMA_ENGINE_ERR_INVALID_ARG);
+        EXPECT(json == NULL);
+        EXPECT(llama_engine_speech_stream_next(stream, &audio, &done) != LLAMA_ENGINE_OK);
+        EXPECT(done && audio.samples == NULL);
+        llama_engine_stream_close(stream);
+    }
+
+    // a chat stream is not a speech stream
+    EXPECT_STATUS(llama_engine_chat_completion_stream(engine, k_stream_request, &stream), LLAMA_ENGINE_OK);
+    bool done = false;
+    EXPECT_STATUS(llama_engine_speech_stream_next(stream, &audio, &done), LLAMA_ENGINE_ERR_INVALID_ARG);
+    llama_engine_stream_close(stream);
+
+    llama_engine_free_audio(&audio);
+    llama_engine_free_audio(NULL);
 }
 
 static void test_realtime_refused(llama_engine_t * engine) {
@@ -323,6 +362,7 @@ int main(int argc, char ** argv) {
 
     test_capabilities(engine);
     test_realtime_refused(engine);
+    test_speech_refused(engine);
     test_tokens(engine);
     test_completion(engine);
     test_stream(engine);

@@ -2,6 +2,7 @@
 
 #include "json.h"
 
+#include <cstdlib>
 #include <cstring>
 #include <utility>
 #include <vector>
@@ -108,7 +109,8 @@ static llama_engine_status completion_impl(
     std::string & out_json,
     const chat_route_adapter::set_error_fn & set_error,
     const char * op_name,
-    const char * stream_hint)
+    const char * stream_hint,
+    std::string * out_content_type = nullptr)
 {
     out_json.clear();
 
@@ -143,6 +145,9 @@ static llama_engine_status completion_impl(
     }
 
     out_json = response->data;
+    if (out_content_type) {
+        *out_content_type = response->content_type;
+    }
     if (response->status >= 400) {
         const std::string fallback = std::string(op_name) + " failed";
         set_error(error_message_from_json(out_json, fallback.c_str()));
@@ -233,17 +238,21 @@ llama_engine_status chat_route_adapter::count_chat_tokens(
         routes->post_chat_completions_tok);
 }
 
-std::unique_ptr<stream_handle> chat_route_adapter::make_stream_handle(
-    const std::string & request_json)
-{
+static std::unique_ptr<stream_handle> make_handle(const char * path, const std::string & body) {
     auto handle = std::make_unique<stream_handle>();
     stream_handle * raw = handle.get();
     handle->opening = true;
     handle->should_stop = [raw]() {
         return raw->cancelled.load();
     };
-    handle->request = make_route_request("/v1/chat/completions", request_json, handle->should_stop);
+    handle->request = make_route_request(path, body, handle->should_stop);
     return handle;
+}
+
+std::unique_ptr<stream_handle> chat_route_adapter::make_stream_handle(
+    const std::string & request_json)
+{
+    return make_handle("/v1/chat/completions", request_json);
 }
 
 static llama_engine_status open_registered_stream_impl(
@@ -325,8 +334,10 @@ static llama_engine_status open_registered_stream_impl(
             raw->response.reset();
             raw->request.reset();
         } else if (response->is_stream()) {
+            raw->content_type = response->content_type;
             raw->response = std::move(response);
         } else {
+            raw->content_type       = response->content_type;
             raw->single_shot_data   = response->data;
             raw->single_shot_status = response->status;
             raw->single_shot_ready  = true;
@@ -372,6 +383,90 @@ llama_engine_status chat_route_adapter::open_stream(
     return open_registered_stream(routes, registry, std::move(handle), out_stream, set_error);
 }
 
+// the /tts body with the output format the engine reads
+static bool speech_body(const std::string & request_json, bool stream, std::string & out_body, std::string & error) {
+    auto body = common_json::parse_no_throw(request_json);
+    if (body.is_discarded() || !body.is_object()) {
+        error = "speech request must be a JSON object";
+        return false;
+    }
+    body["response_format"] = "pcm";
+    body["stream"]          = stream;
+    out_body = body.dump();
+    return true;
+}
+
+int32_t chat_route_adapter::pcm_sample_rate(const std::string & content_type) {
+    const auto pos = content_type.find("rate=");
+    if (pos == std::string::npos) {
+        return 0;
+    }
+    const long rate = std::strtol(content_type.c_str() + pos + std::strlen("rate="), nullptr, 10);
+    return rate > 0 && rate <= 1000000 ? (int32_t) rate : 0;
+}
+
+llama_engine_status chat_route_adapter::speech(
+    const std::shared_ptr<server_routes> & routes,
+    const std::string & request_json,
+    active_request & request_state,
+    std::string & out_pcm,
+    int32_t & out_sample_rate,
+    const set_error_fn & set_error)
+{
+    out_pcm.clear();
+    out_sample_rate = 0;
+
+    std::string body;
+    std::string error;
+    if (!speech_body(request_json, /*stream=*/false, body, error)) {
+        set_error(error);
+        return LLAMA_ENGINE_ERR_INVALID_REQUEST;
+    }
+    std::string content_type;
+    auto st = completion_impl("/tts", routes->post_tts, body, request_state, out_pcm, set_error,
+                              "speech", "speech_stream()", &content_type);
+    if (st != LLAMA_ENGINE_OK) {
+        out_pcm.clear();
+        return st;
+    }
+    out_sample_rate = pcm_sample_rate(content_type);
+    if (out_sample_rate == 0 || out_pcm.size() % sizeof(float) != 0) {
+        out_pcm.clear();
+        set_error("speech route returned no PCM audio");
+        return LLAMA_ENGINE_ERR_INTERNAL;
+    }
+    return LLAMA_ENGINE_OK;
+}
+
+std::unique_ptr<stream_handle> chat_route_adapter::make_speech_stream_handle(
+    const std::string & request_json,
+    std::string & error)
+{
+    std::string body;
+    if (!speech_body(request_json, /*stream=*/true, body, error)) {
+        return nullptr;
+    }
+    auto handle = make_handle("/tts", body);
+    handle->audio = true;
+    return handle;
+}
+
+llama_engine_status chat_route_adapter::open_registered_speech_stream(
+    const std::shared_ptr<server_routes> & routes,
+    inflight_registry & registry,
+    std::unique_ptr<stream_handle> handle,
+    stream_handle ** out_stream,
+    const set_error_fn & set_error)
+{
+    return open_registered_stream_impl(
+        routes->post_tts,
+        registry,
+        std::move(handle),
+        out_stream,
+        set_error,
+        "speech");
+}
+
 llama_engine_status chat_route_adapter::stream_next(stream_handle * s,
                                                     std::string & out_chunk,
                                                     bool & out_done,
@@ -387,7 +482,7 @@ llama_engine_status chat_route_adapter::stream_next(stream_handle * s,
     auto emit_payload = [&]() -> llama_engine_status {
         out_chunk = std::move(s->pending_chunks.front());
         s->pending_chunks.pop_front();
-        if (payload_is_error(out_chunk)) {
+        if (!s->audio && payload_is_error(out_chunk)) {
             out_done = true;
             s->response.reset();
             s->request.reset();
@@ -428,9 +523,14 @@ llama_engine_status chat_route_adapter::stream_next(stream_handle * s,
         std::string frame;
         bool has_next = s->response->next(frame);
         bool saw_done = false;
-        auto payloads = sse_data_payloads(frame, saw_done);
-        for (auto & payload : payloads) {
-            s->pending_chunks.push_back(std::move(payload));
+        if (s->audio) {
+            if (!frame.empty()) {
+                s->pending_chunks.push_back(std::move(frame));
+            }
+        } else {
+            for (auto & payload : sse_data_payloads(frame, saw_done)) {
+                s->pending_chunks.push_back(std::move(payload));
+            }
         }
         if (!has_next || saw_done) {
             s->response_done = true;

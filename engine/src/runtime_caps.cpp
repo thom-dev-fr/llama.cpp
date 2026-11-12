@@ -42,6 +42,7 @@ json runtime_caps::model_capabilities_section(const runtime_flags & f) {
         { "audio_stream",            f.audio_stream          },
         { "realtime_conversation",   f.audio_stream && f.cap_chat },
         { "multimodal_projector",    f.has_mtmd              },
+        { "voices",                  f.voices                },
     };
 }
 
@@ -54,7 +55,7 @@ json runtime_caps::engine_operations_section(const runtime_flags & f) {
         { "image_input",            f.cap_chat && f.inp_image },
         { "audio_input",            f.cap_chat && f.inp_audio },
         { "video_input",            f.cap_chat && f.inp_video },
-        { "speech_generation",      false                   },
+        { "speech_generation",      f.cap_tts               },
         { "transcription",          false                   },
         // the idle sleep can free the context under an open session
         { "realtime",               f.audio_stream && !f.idle_sleep },

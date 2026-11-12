@@ -325,6 +325,33 @@ public final class LlamaEngine: @unchecked Sendable {
         }.value
     }
 
+    // MARK: - Speech
+
+    /// Generates the speech of `request.input` and returns all its audio.
+    ///
+    /// Check ``EngineOperations/speechGeneration`` first. Like a chat
+    /// completion, it throws ``LlamaError/busy(_:)`` while a realtime session
+    /// is open. A paused engine is resumed first.
+    ///
+    /// ```swift
+    /// let audio = try await engine.generateSpeech(SpeechRequest(input: "Hello!"))
+    /// // audio.samples at audio.sampleRate, e.g. 24 kHz
+    /// ```
+    public func generateSpeech(_ request: SpeechRequest) async throws -> SpeechAudio {
+        try await Task.detached(priority: .userInitiated) {
+            try self.speechSync(request)
+        }.value
+    }
+
+    /// Opens a stream of the speech of `request.input`: it returns once the
+    /// first audio is ready, then yields the audio chunk by chunk, all at the
+    /// same sample rate. Same requirements as ``generateSpeech(_:)``.
+    public func speechStream(_ request: SpeechRequest) async throws -> SpeechStream {
+        try await Task.detached(priority: .userInitiated) {
+            try self.openSpeechStreamSync(request)
+        }.value
+    }
+
     // MARK: - Realtime
 
     /// Opens a realtime session, see ``RealtimeSession``.
