@@ -9,6 +9,7 @@
 #include "llama-cpp.h"
 
 #include "chat.h"
+#include "common.h"
 #include "log.h"
 
 #include <algorithm>
@@ -472,7 +473,7 @@ llama_engine_status probe_chat_capabilities(const llama_engine_config & cfg,
 
     llama_model_params mparams = llama_model_default_params();
     mparams.vocab_only = true;
-    llama_model_ptr model(llama_model_load_from_file(params.model.path.c_str(), mparams));
+    llama_model_ptr model(common_model_load(params.model.get_paths(), mparams));
     if (!model) {
         error = "failed to read the model vocabulary: " + params.model.path;
         return LLAMA_ENGINE_ERR_INVALID_ARG;
