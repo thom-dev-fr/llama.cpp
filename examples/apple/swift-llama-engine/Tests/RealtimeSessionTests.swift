@@ -111,6 +111,20 @@ struct RealtimeEventTests {
         #expect(RealtimeSession.audioFormats(of: RealtimeEvent(json: #"{"type":"session.created","session":{}}"#)) == nil)
     }
 
+    @Test func readsTheOutputVoiceAndLanguage() {
+        let set = RealtimeEvent(json: #"{"type":"session.updated","session":{"audio":{"output":{"format":{"type":"audio/pcm","rate":24000},"voice":"alice","language":"fr"}}}}"#)
+        let speech = RealtimeSession.outputSpeech(of: set)
+        #expect(speech.voice == "alice")
+        #expect(speech.language == "fr")
+
+        let defaults = RealtimeEvent(json: #"{"type":"session.created","session":{"audio":{"output":{"format":{"type":"audio/pcm","rate":24000},"voice":null,"language":null}}}}"#)
+        #expect(RealtimeSession.outputSpeech(of: defaults).voice == nil)
+        #expect(RealtimeSession.outputSpeech(of: defaults).language == nil)
+
+        let textOnly = RealtimeEvent(json: #"{"type":"session.created","session":{"audio":{"input":{"format":{"type":"audio/pcm","rate":16000}}}}}"#)
+        #expect(RealtimeSession.outputSpeech(of: textOnly).voice == nil)
+    }
+
     @Test func toleratesInvalidJSON() {
         let e = RealtimeEvent(json: "{not json")
         #expect(e.type == "")
@@ -290,6 +304,32 @@ struct RealtimeSessionModelTests {
         }
         #expect(answer.contains("14") || answer.localizedCaseInsensitiveContains("fourteen"))
         #expect(Double(samples) >= session.outputSampleRate / 2)
+        session.close()
+    }
+
+    @Test(.enabled(if: enabled), .timeLimit(.minutes(3)))
+    func setsTheOutputLanguageBeforeTheFirstMessage() async throws {
+        let engine = try await Self.loadedEngine()
+        let session = try await engine.openRealtimeSession()
+        var iterator = session.makeAsyncIterator()
+        #expect(try await iterator.next()?.type == "session.created")
+        #expect(session.outputLanguage == nil)
+
+        try session.updateSession(language: "French")
+        while let event = try await iterator.next(), event.type != "session.updated" {
+            #expect(event.error == nil)
+        }
+        #expect(session.outputLanguage == "French")
+
+        // fixed once the conversation has started
+        try session.addUserText("Hello.")
+        try session.updateSession(language: "German")
+        var refused = false
+        while let event = try await iterator.next() {
+            if event.error != nil { refused = true; break }
+        }
+        #expect(refused)
+        #expect(session.outputLanguage == "French")
         session.close()
     }
 

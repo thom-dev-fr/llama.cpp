@@ -117,6 +117,8 @@ public final class RealtimeSession: AsyncSequence, @unchecked Sendable {
     private var inputRate: Double = 16_000
     private var outputRate: Double = 24_000
     private var audioOutput = false
+    private var voice: String?
+    private var language: String?
     private var resampler: RealtimeAudioResampler? // guarded by sendLock
     private var firstEvent: Result<RealtimeEvent?, Error>? // read at open, given to the first next()
 
@@ -146,6 +148,17 @@ public final class RealtimeSession: AsyncSequence, @unchecked Sendable {
         stateLock.withLock { audioOutput }
     }
 
+    /// The voice of the spoken responses, from the last `session.created` or
+    /// `session.updated`; nil for the model default or without audio output.
+    public var outputVoice: String? {
+        stateLock.withLock { voice }
+    }
+
+    /// The language of the spoken responses, like ``outputVoice``.
+    public var outputLanguage: String? {
+        stateLock.withLock { language }
+    }
+
     public func makeAsyncIterator() -> AsyncIterator {
         let alreadyConsumed = stateLock.withLock {
             defer { consumed = true }
@@ -171,8 +184,13 @@ public final class RealtimeSession: AsyncSequence, @unchecked Sendable {
         try sendLock.withLock { try sendLocked(json) }
     }
 
-    /// Sends `session.update`. Instructions, tools and type can only change
-    /// before the first audio or message.
+    /// Sends `session.update`. Instructions, tools, type, voice and language
+    /// can only change before the first audio or message.
+    ///
+    /// `voice` and `language` set the spoken responses, an empty string
+    /// selects the model default. A voice the model does not have is
+    /// refused with an `error` event. Both are ignored by a session without
+    /// ``supportsAudioOutput``.
     ///
     /// Throws ``LlamaError/invalidArgument(_:)`` if the parameters of a tool
     /// are not a JSON object.
@@ -180,13 +198,19 @@ public final class RealtimeSession: AsyncSequence, @unchecked Sendable {
                               outputModalities: [RealtimeModality]? = nil,
                               maxOutputTokens: Int? = nil,
                               tools: [RealtimeTool]? = nil,
-                              toolChoice: RealtimeToolChoice? = nil) throws {
+                              toolChoice: RealtimeToolChoice? = nil,
+                              voice: String? = nil,
+                              language: String? = nil) throws {
         var session: [String: Any] = [:]
         if let instructions { session["instructions"] = instructions }
         if let outputModalities { session["output_modalities"] = outputModalities.map(\.rawValue) }
         if let maxOutputTokens { session["max_output_tokens"] = maxOutputTokens }
         if let tools { session["tools"] = try tools.map(Self.toolObject) }
         if let toolChoice { session["tool_choice"] = toolChoice.rawValue }
+        var output: [String: Any] = [:]
+        if let voice { output["voice"] = voice }
+        if let language { output["language"] = language }
+        if !output.isEmpty { session["audio"] = ["output": output] }
         try send(["type": "session.update", "session": session])
     }
 
@@ -384,11 +408,22 @@ public final class RealtimeSession: AsyncSequence, @unchecked Sendable {
 
     private func updateRates(from event: RealtimeEvent) {
         guard let audio = Self.audioFormats(of: event) else { return }
+        let speech = Self.outputSpeech(of: event)
         stateLock.withLock {
             if let input = audio.inputRate, input > 0 { inputRate = input }
             if let output = audio.outputRate, output > 0 { outputRate = output }
             audioOutput = audio.outputRate != nil
+            voice = speech.voice
+            language = speech.language
         }
+    }
+
+    /// The voice and language of the spoken responses in a `session.created`
+    /// or `session.updated` event; nil for the model default (JSON null).
+    static func outputSpeech(of event: RealtimeEvent) -> (voice: String?, language: String?) {
+        let session = event.object?["session"] as? [String: Any]
+        let output = (session?["audio"] as? [String: Any])?["output"] as? [String: Any]
+        return (output?["voice"] as? String, output?["language"] as? String)
     }
 
     /// The audio rates of a `session.created` or `session.updated` event;
