@@ -1324,7 +1324,9 @@ bool server_addr_is_public(const std::string & addr) {
 
 std::string server_resolve_public_addr(const std::string & host, bool allow_private) {
     std::vector<std::string> addrs;
+#ifdef LLAMA_HTTPLIB
     httplib::hosted_at(host, addrs);
+#endif
     if (addrs.empty()) {
         throw std::invalid_argument("cannot resolve host: " + host);
     }

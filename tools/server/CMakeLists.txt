@@ -43,6 +43,10 @@ target_include_directories(${TARGET} PRIVATE ${PROJECT_SOURCE_DIR})
 target_link_libraries(${TARGET} PUBLIC llama-common mtmd ${CMAKE_THREAD_LIBS_INIT})
 target_link_libraries(${TARGET} PRIVATE vendor::hash)
 
+if (LLAMA_HTTPLIB)
+    target_compile_definitions(${TARGET} PRIVATE LLAMA_HTTPLIB)
+endif()
+
 # server-context is reused by non-server targets; skip the HTTP server targets when disabled
 if (NOT LLAMA_BUILD_SERVER)
     return()
