@@ -469,16 +469,23 @@ void llama_engine_stream_close(llama_engine_stream_t * stream);
 // (tools/server/README.md). Requires "engine_operations.speech_generation".
 // `request_json` is the /tts body: "input" (text, required), "voice" (one of
 // "model_capabilities.voices"), "lang", "speaker_ref_b64" (a WAV or MP3 voice
-// to clone, base64; not with "voice"), and the sampling fields "seed",
-// "temperature", "top_k", "top_p", "n_predict". The engine sets
-// "response_format" and "stream".
+// to clone, base64; not with "voice"), "speaker_ref_text" (transcript of
+// "speaker_ref_b64", used by some models), "cfg_scale" and "flow_steps" (only
+// for models that support them, others answer an invalid request), and the
+// sampling fields "seed", "temperature", "top_k", "top_p", "n_predict" (max
+// audio frames, default: the model limit). The engine sets "response_format"
+// and "stream".
 // Exclusive with a realtime session like a chat completion (LLAMA_ENGINE_ERR_BUSY).
 
-// Mono PCM audio, F32 samples in [-1, 1] at `sample_rate` Hz.
+// PCM audio, F32 samples in [-1, 1] at `sample_rate` Hz, channels interleaved.
+// `n_samples` counts the samples of all channels: a frame is `n_channels`
+// samples, so there are n_samples / n_channels frames. Most speech models are
+// mono (1); music models (e.g. YuE2, MiniMax Music 3) can be stereo (2).
 typedef struct {
     float   * samples;
     size_t    n_samples;
     int32_t   sample_rate;
+    int32_t   n_channels;
 } llama_engine_audio;
 
 // Frees the samples and resets `audio`. Safe on a zeroed struct.

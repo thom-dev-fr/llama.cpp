@@ -165,12 +165,48 @@ void run_chat_route_adapter_tests() {
         EXPECT(chat_route_adapter::make_speech_stream_handle("not json", error) == nullptr);
     }
 
-    CASE("PCM sample rate comes from the content type");
+    CASE("PCM format comes from the content type, mono without channels");
     {
-        EXPECT_EQ(chat_route_adapter::pcm_sample_rate("audio/pcm;rate=24000;encoding=float;bits=32"), 24000);
-        EXPECT_EQ(chat_route_adapter::pcm_sample_rate("audio/pcm;rate=16000"), 16000);
-        EXPECT_EQ(chat_route_adapter::pcm_sample_rate("audio/wav"), 0);
-        EXPECT_EQ(chat_route_adapter::pcm_sample_rate("audio/pcm;rate=-5"), 0);
-        EXPECT_EQ(chat_route_adapter::pcm_sample_rate(""), 0);
+        auto fmt = chat_route_adapter::parse_pcm_format("audio/pcm;rate=24000;encoding=float;bits=32");
+        EXPECT_EQ(fmt.sample_rate, 24000);
+        EXPECT_EQ(fmt.n_channels, 1);
+        fmt = chat_route_adapter::parse_pcm_format("audio/pcm;rate=44100;channels=2;encoding=float;bits=32");
+        EXPECT_EQ(fmt.sample_rate, 44100);
+        EXPECT_EQ(fmt.n_channels, 2);
+        fmt = chat_route_adapter::parse_pcm_format("audio/pcm; rate=16000");
+        EXPECT_EQ(fmt.sample_rate, 16000);
+        EXPECT(chat_route_adapter::parse_pcm_format("audio/pcm;rate=16000").valid());
+    }
+
+    CASE("PCM format without a valid rate or channel count is refused");
+    {
+        EXPECT(!chat_route_adapter::parse_pcm_format("audio/wav").valid());
+        EXPECT(!chat_route_adapter::parse_pcm_format("audio/wav;rate=24000").valid());
+        EXPECT(!chat_route_adapter::parse_pcm_format("audio/pcm;rate=-5").valid());
+        EXPECT(!chat_route_adapter::parse_pcm_format("audio/pcm;rate=24k").valid());
+        EXPECT(!chat_route_adapter::parse_pcm_format("audio/pcm;samplerate=24000").valid());
+        EXPECT(!chat_route_adapter::parse_pcm_format("audio/pcm;rate=24000;channels=0").valid());
+        EXPECT(!chat_route_adapter::parse_pcm_format("audio/pcm;rate=24000;channels=9").valid());
+        EXPECT(!chat_route_adapter::parse_pcm_format("audio/pcm;rate=24000;channels=two").valid());
+        EXPECT(!chat_route_adapter::parse_pcm_format("").valid());
+        EXPECT_EQ(chat_route_adapter::parse_pcm_format("audio/pcm;rate=24000;channels=0").sample_rate, 0);
+    }
+
+    CASE("PCM chunks are cut at whole frames, a split frame waits for the next chunk");
+    {
+        pcm_format mono;
+        mono.sample_rate = 24000;
+        mono.n_channels  = 1;
+        EXPECT_EQ(mono.whole_frames(10), (size_t) 8);
+        EXPECT_EQ(mono.whole_frames(3), (size_t) 0);
+
+        pcm_format stereo = mono;
+        stereo.n_channels = 2;
+        EXPECT_EQ(stereo.frame_size(), (size_t) 8);
+        EXPECT_EQ(stereo.whole_frames(12), (size_t) 8);
+        EXPECT_EQ(stereo.whole_frames(16), (size_t) 16);
+        EXPECT_EQ(stereo.whole_frames(7), (size_t) 0);
+
+        EXPECT_EQ(pcm_format{}.whole_frames(16), (size_t) 0);
     }
 }

@@ -203,7 +203,7 @@ static void test_speech_refused(llama_engine_t * engine) {
     llama_engine_audio audio;
     memset(&audio, 0xff, sizeof(audio));
     EXPECT(llama_engine_speech(engine, "{\"input\": \"hello\"}", &audio) != LLAMA_ENGINE_OK);
-    EXPECT(audio.samples == NULL && audio.n_samples == 0);
+    EXPECT(audio.samples == NULL && audio.n_samples == 0 && audio.n_channels == 0);
     EXPECT_STATUS(llama_engine_speech(engine, "[1]", &audio), LLAMA_ENGINE_ERR_INVALID_REQUEST);
     EXPECT_STATUS(llama_engine_speech(engine, NULL, &audio), LLAMA_ENGINE_ERR_INVALID_ARG);
     EXPECT_STATUS(llama_engine_speech(NULL, "{}", &audio), LLAMA_ENGINE_ERR_INVALID_ARG);

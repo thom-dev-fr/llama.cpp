@@ -8,7 +8,7 @@
 - Chat completions through OpenAI-compatible JSON requests.
 - Streaming chat completions with cancellation.
 - Realtime sessions (`/v1/realtime` protocol of llama-server) for voice conversation and live transcription models, over an in-memory connection.
-- Speech generation (`/tts` route of llama-server), blocking or streamed, as F32 PCM samples.
+- Speech generation (`/tts` route of llama-server), blocking or streamed, as F32 PCM samples with their rate and channel count (interleaved, mono or stereo).
 - Tokenize, detokenize, and input token counting helpers.
 - Lightweight GGUF capability and metadata probing.
 - Optional multimodal projector and MTP speculative decoding support.

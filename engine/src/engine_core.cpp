@@ -482,10 +482,10 @@ llama_engine_status engine_core::chat_completion_stream(const std::string & requ
 }
 
 llama_engine_status engine_core::speech(const std::string & request_json,
-                                        std::string & out_pcm, int32_t & out_sample_rate)
+                                        std::string & out_pcm, pcm_format & out_format)
 {
     out_pcm.clear();
-    out_sample_rate = 0;
+    out_format = {};
 
     active_request req_state;
     admitted_request admission;
@@ -501,7 +501,7 @@ llama_engine_status engine_core::speech(const std::string & request_json,
         request_json,
         req_state,
         out_pcm,
-        out_sample_rate,
+        out_format,
         [this](std::string msg) { set_error(std::move(msg)); });
 }
 

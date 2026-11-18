@@ -602,6 +602,10 @@ static bool valid_audio(const llama_engine_audio & a) {
     if (!a.samples || a.n_samples == 0 || a.sample_rate <= 0) {
         return false;
     }
+    // whole frames only, also across the chunks of a stream
+    if (a.n_channels <= 0 || a.n_samples % (size_t) a.n_channels != 0) {
+        return false;
+    }
     for (size_t i = 0; i < a.n_samples; i++) {
         if (!std::isfinite(a.samples[i]) || std::fabs(a.samples[i]) > 1.5f) {
             return false;
@@ -620,10 +624,13 @@ static void test_capi_speech(llama_engine_t * engine) {
     EXPECT(valid_audio(audio));
     // at least half a second of voice; the quality is checked by ear
     EXPECT(audio.n_samples >= (size_t) audio.sample_rate / 2);
+    // LFM3-Omni speaks in mono
+    EXPECT(audio.n_channels == 1);
     const int32_t rate = audio.sample_rate;
-    std::printf("  blocking: %zu samples at %d Hz\n", audio.n_samples, audio.sample_rate);
+    const int32_t n_channels = audio.n_channels;
+    std::printf("  blocking: %zu samples at %d Hz, %d channel(s)\n", audio.n_samples, audio.sample_rate, audio.n_channels);
     llama_engine_free_audio(&audio);
-    EXPECT(audio.samples == nullptr && audio.n_samples == 0);
+    EXPECT(audio.samples == nullptr && audio.n_samples == 0 && audio.n_channels == 0);
 
     EXPECT(llama_engine_speech(engine, "{\"input\": \"hi\", \"speaker_ref_b64\": \"%%%\"}", &audio) == LLAMA_ENGINE_ERR_INVALID_REQUEST);
     EXPECT(audio.samples == nullptr);
@@ -644,7 +651,7 @@ static void test_capi_speech(llama_engine_t * engine) {
                 EXPECT(chunk.samples == nullptr);
                 break;
             }
-            chunks_ok = chunks_ok && valid_audio(chunk) && chunk.sample_rate == rate;
+            chunks_ok = chunks_ok && valid_audio(chunk) && chunk.sample_rate == rate && chunk.n_channels == n_channels;
             n_chunks++;
             n_samples += chunk.n_samples;
             llama_engine_free_audio(&chunk);

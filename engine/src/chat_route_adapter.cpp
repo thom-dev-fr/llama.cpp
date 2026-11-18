@@ -396,13 +396,45 @@ static bool speech_body(const std::string & request_json, bool stream, std::stri
     return true;
 }
 
-int32_t chat_route_adapter::pcm_sample_rate(const std::string & content_type) {
-    const auto pos = content_type.find("rate=");
-    if (pos == std::string::npos) {
+// value of `key` in "type;key=value;...", empty if absent
+static std::string content_type_param(const std::string & content_type, const std::string & key) {
+    size_t pos = content_type.find(';');
+    while (pos != std::string::npos) {
+        const size_t start = content_type.find_first_not_of(' ', pos + 1);
+        const size_t end   = content_type.find(';', pos + 1);
+        if (start != std::string::npos && start < end) {
+            const std::string param = content_type.substr(start, end == std::string::npos ? std::string::npos : end - start);
+            if (param.size() > key.size() && param.compare(0, key.size(), key) == 0 && param[key.size()] == '=') {
+                return param.substr(key.size() + 1);
+            }
+        }
+        pos = end;
+    }
+    return "";
+}
+
+// positive integer up to `max`, 0 otherwise
+static int32_t parse_positive(const std::string & value, long max) {
+    if (value.empty()) {
         return 0;
     }
-    const long rate = std::strtol(content_type.c_str() + pos + std::strlen("rate="), nullptr, 10);
-    return rate > 0 && rate <= 1000000 ? (int32_t) rate : 0;
+    char * end = nullptr;
+    const long n = std::strtol(value.c_str(), &end, 10);
+    while (*end == ' ') {
+        end++;
+    }
+    return *end == '\0' && n > 0 && n <= max ? (int32_t) n : 0;
+}
+
+pcm_format chat_route_adapter::parse_pcm_format(const std::string & content_type) {
+    if (content_type.compare(0, std::strlen("audio/pcm"), "audio/pcm") != 0) {
+        return {};
+    }
+    const std::string channels = content_type_param(content_type, "channels");
+    pcm_format fmt;
+    fmt.sample_rate = parse_positive(content_type_param(content_type, "rate"), 1000000);
+    fmt.n_channels  = channels.empty() ? 1 : parse_positive(channels, 8);
+    return fmt.valid() ? fmt : pcm_format{};
 }
 
 llama_engine_status chat_route_adapter::speech(
@@ -410,11 +442,11 @@ llama_engine_status chat_route_adapter::speech(
     const std::string & request_json,
     active_request & request_state,
     std::string & out_pcm,
-    int32_t & out_sample_rate,
+    pcm_format & out_format,
     const set_error_fn & set_error)
 {
     out_pcm.clear();
-    out_sample_rate = 0;
+    out_format = {};
 
     std::string body;
     std::string error;
@@ -429,9 +461,10 @@ llama_engine_status chat_route_adapter::speech(
         out_pcm.clear();
         return st;
     }
-    out_sample_rate = pcm_sample_rate(content_type);
-    if (out_sample_rate == 0 || out_pcm.size() % sizeof(float) != 0) {
+    out_format = parse_pcm_format(content_type);
+    if (!out_format.valid() || out_pcm.size() % out_format.frame_size() != 0) {
         out_pcm.clear();
+        out_format = {};
         set_error("speech route returned no PCM audio");
         return LLAMA_ENGINE_ERR_INTERNAL;
     }

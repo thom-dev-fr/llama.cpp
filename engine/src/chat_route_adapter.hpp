@@ -32,6 +32,17 @@ struct stream_handle {
     std::string                             content_type;
 };
 
+// raw F32 LE PCM, channels interleaved
+struct pcm_format {
+    int32_t sample_rate = 0;
+    int32_t n_channels  = 0;
+
+    bool valid() const { return sample_rate > 0 && n_channels > 0; }
+    size_t frame_size() const { return (size_t) n_channels * sizeof(float); }
+    // bytes of the whole frames in the first `n_bytes`
+    size_t whole_frames(size_t n_bytes) const { return valid() ? n_bytes - n_bytes % frame_size() : 0; }
+};
+
 // Adapter from LlamaEngine's in-process chat interface to upstream
 // server_routes. It owns the details of synthetic server_http_req construction,
 // upstream SSE frame normalisation, OpenAI-compatible error payload mapping,
@@ -81,13 +92,13 @@ public:
 
     // Speech generation through the /tts route: `request_json` gets
     // "response_format": "pcm" (F32 LE samples) and "stream".
-    // `out_sample_rate` comes from the content type of the response.
+    // `out_format` comes from the content type of the response.
     static llama_engine_status speech(
         const std::shared_ptr<server_routes> & routes,
         const std::string & request_json,
         active_request & request_state,
         std::string & out_pcm,
-        int32_t & out_sample_rate,
+        pcm_format & out_format,
         const set_error_fn & set_error);
 
     // nullptr with `error` set when `request_json` is not a JSON object
@@ -102,8 +113,9 @@ public:
         stream_handle ** out_stream,
         const set_error_fn & set_error);
 
-    // the rate in "audio/pcm;rate=24000;...", 0 if there is none
-    static int32_t pcm_sample_rate(const std::string & content_type);
+    // format of "audio/pcm;rate=24000;channels=2;...", 1 channel when "channels" is absent
+    // zeroed if the rate or the channel count is missing or invalid
+    static pcm_format parse_pcm_format(const std::string & content_type);
 
     static void stream_cancel(stream_handle * stream);
     static void stream_close(stream_handle * stream);

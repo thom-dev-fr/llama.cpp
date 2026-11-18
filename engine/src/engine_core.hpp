@@ -74,10 +74,10 @@ public:
     void                stream_close(stream_handle * stream);
 
     // Speech generation through /tts, exclusive with a realtime session like
-    // chat completions. `out_pcm` holds F32 LE samples at `out_sample_rate`.
+    // chat completions. `out_pcm` holds F32 LE samples in `out_format`.
     llama_engine_status speech(const std::string & request_json,
-                               std::string & out_pcm, int32_t & out_sample_rate);
-    // the chunks of stream_next() are F32 LE samples at the rate of the stream
+                               std::string & out_pcm, pcm_format & out_format);
+    // the chunks of stream_next() are F32 LE samples in the format of the stream content type
     llama_engine_status speech_stream(const std::string & request_json,
                                       stream_handle ** out_stream);
 
