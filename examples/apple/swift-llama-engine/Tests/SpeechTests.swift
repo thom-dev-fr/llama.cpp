@@ -1,4 +1,5 @@
 import Foundation
+import LlamaEngineCore
 import Testing
 @testable import LlamaEngine
 
@@ -7,7 +8,8 @@ struct SpeechRequestTests {
         #expect(try SpeechRequest(input: "Hello").json() == #"{"input":"Hello"}"#)
 
         let full = SpeechRequest(input: "Bonjour", voice: "alice", language: "French",
-                                 speakerReference: Data([1, 2, 3]), seed: 7, temperature: 0.5, maxTokens: 300)
+                                 speakerReference: Data([1, 2, 3]), speakerReferenceText: "Salut",
+                                 seed: 7, temperature: 0.5, maxTokens: 300, cfgScale: 1.5, flowSteps: 16)
         let body = try #require(try JSONSerialization.jsonObject(with: Data(full.json().utf8)) as? [String: Any])
         #expect(body["input"] as? String == "Bonjour")
         #expect(body["voice"] as? String == "alice")
@@ -16,9 +18,39 @@ struct SpeechRequestTests {
         #expect(body["seed"] as? Int == 7)
         #expect(body["temperature"] as? Double == 0.5)
         #expect(body["n_predict"] as? Int == 300)
+        #expect(body["speaker_ref_text"] as? String == "Salut")
+        #expect(body["cfg_scale"] as? Double == 1.5)
+        #expect(body["flow_steps"] as? Int == 16)
         // the engine sets them
         #expect(body["response_format"] == nil)
         #expect(body["stream"] == nil)
+    }
+}
+
+struct SpeechAudioTests {
+    private static func cAudio(_ samples: [Float], rate: Int32, channels: Int32) -> llama_engine_audio {
+        let buffer = malloc(samples.count * MemoryLayout<Float>.stride)!.assumingMemoryBound(to: Float.self)
+        buffer.initialize(from: samples, count: samples.count)
+        return llama_engine_audio(samples: buffer, n_samples: samples.count, sample_rate: rate, n_channels: channels)
+    }
+
+    @Test func takesInterleavedStereo() {
+        var audio = Self.cAudio([0.1, -0.1, 0.2, -0.2, 0.3, -0.3], rate: 44_100, channels: 2)
+        let taken = SpeechAudio(taking: &audio)
+        #expect(taken.channelCount == 2)
+        #expect(taken.frameCount == 3)
+        #expect(taken.samples == [0.1, -0.1, 0.2, -0.2, 0.3, -0.3])
+        #expect(taken.sampleRate == 44_100)
+        #expect(audio.samples == nil && audio.n_samples == 0)
+    }
+
+    @Test func treatsAZeroedStructAsMono() {
+        var empty = llama_engine_audio()
+        let taken = SpeechAudio(taking: &empty)
+        #expect(taken.samples.isEmpty)
+        #expect(taken.channelCount == 1)
+        #expect(taken.frameCount == 0)
+        #expect(SpeechAudio(samples: [0, 0], sampleRate: 24_000).channelCount == 1)
     }
 }
 
@@ -33,6 +65,7 @@ extension RealtimeSessionModelTests {
         let request = SpeechRequest(input: "Hello, this is a short test of the speech output.", seed: 42)
         let audio = try await engine.generateSpeech(request)
         #expect(audio.sampleRate == 24_000)
+        #expect(audio.channelCount == 1)
         // at least half a second of voice; the quality is checked by ear
         #expect(Double(audio.samples.count) >= audio.sampleRate / 2)
         #expect(audio.samples.allSatisfy { $0.isFinite && abs($0) <= 1.5 })

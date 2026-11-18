@@ -192,6 +192,14 @@ public final class RealtimeSession: AsyncSequence, @unchecked Sendable {
     /// refused with an `error` event. Both are ignored by a session without
     /// ``supportsAudioOutput``.
     ///
+    /// `transcriptionLanguage` and `transcriptionPrompt` set the
+    /// transcription of a ``RealtimeSessionIntent/transcription`` session
+    /// (or of a model that can only transcribe), like the `language` and
+    /// `prompt` of `/v1/audio/transcriptions`. The prompt replaces the
+    /// default instruction ("Transcribe audio to text"), e.g. to give names
+    /// or terms. Both can change between utterances; an empty string selects
+    /// the default.
+    ///
     /// Throws ``LlamaError/invalidArgument(_:)`` if the parameters of a tool
     /// are not a JSON object.
     public func updateSession(instructions: String? = nil,
@@ -200,7 +208,26 @@ public final class RealtimeSession: AsyncSequence, @unchecked Sendable {
                               tools: [RealtimeTool]? = nil,
                               toolChoice: RealtimeToolChoice? = nil,
                               voice: String? = nil,
-                              language: String? = nil) throws {
+                              language: String? = nil,
+                              transcriptionLanguage: String? = nil,
+                              transcriptionPrompt: String? = nil) throws {
+        try send(Self.sessionUpdate(instructions: instructions, outputModalities: outputModalities,
+                                    maxOutputTokens: maxOutputTokens, tools: tools, toolChoice: toolChoice,
+                                    voice: voice, language: language,
+                                    transcriptionLanguage: transcriptionLanguage,
+                                    transcriptionPrompt: transcriptionPrompt))
+    }
+
+    /// The `session.update` event of ``updateSession(instructions:outputModalities:maxOutputTokens:tools:toolChoice:voice:language:transcriptionLanguage:transcriptionPrompt:)``.
+    static func sessionUpdate(instructions: String?,
+                              outputModalities: [RealtimeModality]?,
+                              maxOutputTokens: Int?,
+                              tools: [RealtimeTool]?,
+                              toolChoice: RealtimeToolChoice?,
+                              voice: String?,
+                              language: String?,
+                              transcriptionLanguage: String?,
+                              transcriptionPrompt: String?) throws -> [String: Any] {
         var session: [String: Any] = [:]
         if let instructions { session["instructions"] = instructions }
         if let outputModalities { session["output_modalities"] = outputModalities.map(\.rawValue) }
@@ -210,8 +237,14 @@ public final class RealtimeSession: AsyncSequence, @unchecked Sendable {
         var output: [String: Any] = [:]
         if let voice { output["voice"] = voice }
         if let language { output["language"] = language }
-        if !output.isEmpty { session["audio"] = ["output": output] }
-        try send(["type": "session.update", "session": session])
+        var transcription: [String: Any] = [:]
+        if let transcriptionLanguage { transcription["language"] = transcriptionLanguage }
+        if let transcriptionPrompt { transcription["prompt"] = transcriptionPrompt }
+        var audio: [String: Any] = [:]
+        if !output.isEmpty { audio["output"] = output }
+        if !transcription.isEmpty { audio["input"] = ["transcription": transcription] }
+        if !audio.isEmpty { session["audio"] = audio }
+        return ["type": "session.update", "session": session]
     }
 
     /// Appends audio of the user turn, resampled to ``inputSampleRate``.

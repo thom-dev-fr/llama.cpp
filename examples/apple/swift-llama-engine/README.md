@@ -186,6 +186,7 @@ session.close()
 - Events are read on the session's own thread, one per `next()`, so a slow consumer does not grow memory: past 8 MiB of unread events the session ends with an `output_queue_full` error. The base64 audio of `response.output_audio.delta` is decoded on that thread (`event.audio`), unknown events keep their raw `json`.
 - `supportsAudioOutput` is true when `session.created` announces an audio output (`outputSampleRate`, 24 kHz for LFM3-Omni). Ask for a spoken answer with `createResponse(outputModalities: [.text, .audio])`: the text comes as `textDelta`, the voice as `audio`. `maxOutputTokens` counts the audio steps too, and `response.done` comes before the voice has been played.
 - Voice and language of the spoken answers: `updateSession(voice:language:)` before the first audio or message, an empty string for the model default; `outputVoice` and `outputLanguage` give what the session uses. LFM3-Omni has no predefined voice (`voices` is empty): its template takes `"female"` or `"male"` and ignores other names.
+- Transcription: `updateSession(transcriptionLanguage:transcriptionPrompt:)` sets the language and replaces the default instruction ("Transcribe audio to text"), e.g. to give names or terms. Both can change between utterances, an empty string selects the default. They apply to a `.transcription` session or a model that can only transcribe.
 - Tools: pass `RealtimeTool`s and a `RealtimeToolChoice` to `updateSession` before the first audio or message. A call comes as `event.functionCall` once its arguments are complete; send its result with `sendFunctionCallOutput(callID:output:)`, then `createResponse()`. A call is always text, even when the response asked for `[.text, .audio]`; LFM3-Omni needs "Respond with function calls, and interleaved text and audio." in the instructions to call tools.
 - `cancelResponse()` stops the response and keeps the conversation; `close()` ends the session. Cancelling the iterating task closes it too.
 - Pause, unload and the end of the engine end the session with a last `error` event (`code == "session_terminated"`); the `RealtimeSession` stays safe to use after that.
@@ -207,7 +208,8 @@ for try await chunk in try await engine.speechStream(request) {
 ```
 
 - `voice` is one of `runtimeModelCapabilities.voices` (`"female"` or `"male"` for LFM3-Omni, which lists none); `speakerReference` is a WAV or MP3 clip to clone instead, when `audioSpeakerReference` is true.
-- The audio is mono Float PCM at the model rate (24 kHz for LFM3-Omni). The stream opens once the first audio is ready; `cancel()` stops it.
+- `speakerReferenceText` is the transcript of `speakerReference`, used by some models (Fish Audio S2 Pro, Qwen3-TTS) to clone the voice more closely. `cfgScale` and `flowSteps` only work with the models that support them (YuE2, MiniMax Music 3), the others refuse the request. `maxTokens` limits the audio frames, nil for the model limit.
+- The audio is Float PCM at the model rate (24 kHz for LFM3-Omni), channels interleaved: `channelCount` is 1 for speech models, 2 for stereo music models, and `frameCount` is `samples.count / channelCount`. The stream opens once the first audio is ready; `cancel()` stops it.
 - Like a chat completion, it throws `LlamaError.busy` while a realtime session is open.
 
 ## Foundation Models adapters

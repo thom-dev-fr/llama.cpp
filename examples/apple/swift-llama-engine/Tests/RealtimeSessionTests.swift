@@ -125,6 +125,25 @@ struct RealtimeEventTests {
         #expect(RealtimeSession.outputSpeech(of: textOnly).voice == nil)
     }
 
+    @Test func buildsTheTranscriptionOfASessionUpdate() throws {
+        let both = try RealtimeSession.sessionUpdate(instructions: nil, outputModalities: nil, maxOutputTokens: nil,
+                                                     tools: nil, toolChoice: nil, voice: "alice", language: nil,
+                                                     transcriptionLanguage: "fr", transcriptionPrompt: "Names: Llama, GGUF.")
+        #expect(both["type"] as? String == "session.update")
+        let audio = try #require((both["session"] as? [String: Any])?["audio"] as? [String: Any])
+        let transcription = try #require((audio["input"] as? [String: Any])?["transcription"] as? [String: Any])
+        #expect(transcription["language"] as? String == "fr")
+        #expect(transcription["prompt"] as? String == "Names: Llama, GGUF.")
+        #expect((audio["output"] as? [String: Any])?["voice"] as? String == "alice")
+
+        let none = try RealtimeSession.sessionUpdate(instructions: "Hi", outputModalities: nil, maxOutputTokens: nil,
+                                                     tools: nil, toolChoice: nil, voice: nil, language: nil,
+                                                     transcriptionLanguage: nil, transcriptionPrompt: nil)
+        let session = try #require(none["session"] as? [String: Any])
+        #expect(session["audio"] == nil)
+        #expect(session["instructions"] as? String == "Hi")
+    }
+
     @Test func toleratesInvalidJSON() {
         let e = RealtimeEvent(json: "{not json")
         #expect(e.type == "")
