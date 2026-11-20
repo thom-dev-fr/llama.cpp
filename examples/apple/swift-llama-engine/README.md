@@ -162,7 +162,7 @@ Notes:
 
 ## Realtime sessions
 
-Models with an audio stream encoder (e.g. `LiquidAI/LFM3-Omni-2B-GGUF`) run the `/v1/realtime` protocol of llama-server in-process, without a socket. Check `engineOperations.realtime` after loading: it needs `idlePauseSeconds: -1`. `runtimeModelCapabilities.realtimeConversation` tells a voice conversation model from a live transcription one.
+Models with an audio stream encoder (e.g. `LiquidAI/LFM3-Omni-2B-GGUF`) run the `/v1/realtime` protocol of llama-server in-process, without a socket. Check `engineOperations.realtime` after loading. With `idlePauseSeconds` set, an open session keeps the model loaded and opening one wakes a sleeping model. `runtimeModelCapabilities.realtimeConversation` tells a voice conversation model from a live transcription one.
 
 ```swift
 let session = try await engine.openRealtimeSession()

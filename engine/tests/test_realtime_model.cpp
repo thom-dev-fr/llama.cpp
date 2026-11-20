@@ -14,6 +14,7 @@
 #include "server-context.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <condition_variable>
 #include <cstdio>
@@ -760,15 +761,39 @@ static void test_capi_destroy(const llama_engine_config & cfg) {
 }
 
 static void test_capi_idle_sleep(llama_engine_config cfg) {
-    std::printf("C API: no realtime with the idle sleep on\n");
-    cfg.idle_pause_seconds = 600;
+    std::printf("C API: realtime with the idle sleep on, the session keeps the server awake\n");
+    cfg.idle_pause_seconds = 1;
     llama_engine_t * engine = llama_engine_create();
     EXPECT(llama_engine_load(engine, &cfg) == LLAMA_ENGINE_OK);
-    EXPECT(caps_contain(engine, "\"realtime\":false"));
+    EXPECT(caps_contain(engine, "\"realtime\":true"));
     EXPECT(caps_contain(engine, "\"realtime_conversation\":true"));
+
+    // past the idle timeout: the open wakes the sleeping server
+    std::this_thread::sleep_for(std::chrono::milliseconds(2500));
     llama_engine_realtime_t * rt = nullptr;
-    EXPECT(llama_engine_realtime_open(engine, nullptr, &rt) == LLAMA_ENGINE_ERR_INVALID_REQUEST);
-    EXPECT(rt == nullptr);
+    EXPECT(llama_engine_realtime_open(engine, nullptr, &rt) == LLAMA_ENGINE_OK);
+    if (rt) {
+        capi_reader reader(rt);
+        EXPECT(reader.wait_for("session.created"));
+
+        // idle past the timeout while the session is open: it must not sleep under it
+        std::this_thread::sleep_for(std::chrono::milliseconds(2500));
+        EXPECT(llama_engine_realtime_send(rt, "{\"type\": \"conversation.item.create\", \"item\": {\"type\": \"message\", "
+            "\"role\": \"user\", \"content\": [{\"type\": \"input_text\", \"text\": \"Say OK.\"}]}}") == LLAMA_ENGINE_OK);
+        EXPECT(llama_engine_realtime_send(rt, k_response_create) == LLAMA_ENGINE_OK);
+        EXPECT(reader.wait_for("response.done"));
+        EXPECT(reader.last_error_code().empty());
+
+        llama_engine_realtime_close(rt);
+        reader.wait_done();
+    }
+    llama_engine_realtime_free(rt);
+
+    // after the session, the server sleeps again and a chat wakes it
+    std::this_thread::sleep_for(std::chrono::milliseconds(2500));
+    char * out = nullptr;
+    EXPECT(llama_engine_chat_completion(engine, k_chat_request, &out) == LLAMA_ENGINE_OK);
+    llama_engine_free_string(out);
     llama_engine_destroy(engine);
 }
 

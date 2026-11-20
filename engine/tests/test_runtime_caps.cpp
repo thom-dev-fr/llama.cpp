@@ -179,11 +179,6 @@ static void test_runtime_sections_audio_models() {
     doc = runtime_doc(conv);
     EXPECT(doc.at("model_capabilities").at("realtime_conversation").get<bool>());
     EXPECT(doc.at("engine_operations").at("realtime").get<bool>());
-
-    conv.idle_sleep = true;
-    doc = runtime_doc(conv);
-    EXPECT(doc.at("model_capabilities").at("realtime_conversation").get<bool>());
-    EXPECT(!doc.at("engine_operations").at("realtime").get<bool>());
 }
 
 void run_runtime_caps_tests() {

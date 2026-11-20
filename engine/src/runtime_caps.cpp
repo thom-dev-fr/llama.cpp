@@ -57,8 +57,7 @@ json runtime_caps::engine_operations_section(const runtime_flags & f) {
         { "video_input",            f.cap_chat && f.inp_video },
         { "speech_generation",      f.cap_tts               },
         { "transcription",          false                   },
-        // the idle sleep can free the context under an open session
-        { "realtime",               f.audio_stream && !f.idle_sleep },
+        { "realtime",               f.audio_stream          },
     };
 }
 

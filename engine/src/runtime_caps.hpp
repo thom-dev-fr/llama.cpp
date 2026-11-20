@@ -26,7 +26,6 @@ struct runtime_caps {
         bool cap_tts              = false;
         bool audio_stream         = false;
         bool audio_gen_spk_ref    = false;
-        bool idle_sleep           = false; // idle_pause_seconds >= 0
         std::vector<std::string> output_modalities;
         std::vector<std::string> voices;
     };

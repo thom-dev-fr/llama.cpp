@@ -171,7 +171,6 @@ llama_engine_status engine_core::load_from_params_locked(std::unique_lock<std::m
         flags.cap_tts           = meta->has_cap_tts;
         flags.audio_stream      = meta->has_audio_stream;
         flags.audio_gen_spk_ref = meta->has_audio_gen_spk_ref;
-        flags.idle_sleep        = last_params->sleep_idle_seconds >= 0;
         flags.output_modalities = meta->model_output_modalities;
         flags.voices            = meta->tts_voices;
         caps_json = runtime_caps::runtime_document(runtime_caps::chat_template_section(
@@ -580,10 +579,8 @@ llama_engine_status engine_core::realtime_open(const std::string & config_json,
     std::unique_lock<std::mutex> lock(mtx);
     auto st = admit_ready_locked(lock, /*uses_slot=*/true);
     if (st != LLAMA_ENGINE_OK) return st;
-    if (last_params->sleep_idle_seconds >= 0) {
-        set_error("realtime sessions need idle_pause_seconds = -1");
-        return LLAMA_ENGINE_ERR_INVALID_REQUEST;
-    }
+    // ws_realtime holds create_response() for the whole session: the idle sleep
+    // waits for it to close, and a sleeping server wakes up when it opens
     if (!meta->has_audio_stream) {
         set_error("the loaded model does not support realtime sessions");
         return LLAMA_ENGINE_ERR_INVALID_REQUEST;

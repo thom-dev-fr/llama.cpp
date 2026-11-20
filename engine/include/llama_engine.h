@@ -312,7 +312,7 @@ bool llama_engine_supports_architecture(const char * architecture);
 //       "image_input", "audio_input", "video_input",  // as chat completion content
 //       "speech_generation",  // llama_engine_speech(), llama_engine_speech_stream()
 //       "transcription",  // false: not exposed yet
-//       "realtime"  // llama_engine_realtime_open(); false with idle_pause_seconds >= 0
+//       "realtime"  // llama_engine_realtime_open()
 //     }
 // A capability of the model does not mean the engine exposes it: check
 // "engine_operations" before offering a feature. "audio_stream" alone means
@@ -519,8 +519,9 @@ llama_engine_status llama_engine_speech_stream_next(
 
 // Realtime session: the /v1/realtime websocket protocol of llama-server
 // (tools/server/README.md), over an in-memory connection, without any socket.
-// Requires "engine_operations.realtime" (a model with "audio_stream", and
-// idle_pause_seconds = -1). Models with "realtime_conversation" hold a voice
+// Requires "engine_operations.realtime" (a model with "audio_stream"). With
+// idle_pause_seconds >= 0, an open session keeps the model loaded and opening
+// one wakes a sleeping model. Models with "realtime_conversation" hold a voice
 // conversation; `config_json` {"intent": "transcription"} opens a live
 // transcription session instead, like ?intent=transcription. NULL or "{}" for
 // the default.

@@ -357,7 +357,8 @@ public final class LlamaEngine: @unchecked Sendable {
     /// Opens a realtime session, see ``RealtimeSession``.
     ///
     /// Check ``EngineOperations/realtime`` first: it needs a model with an
-    /// audio stream encoder and ``ModelConfig/idlePauseSeconds`` set to -1.
+    /// audio stream encoder. With ``ModelConfig/idlePauseSeconds`` set, an
+    /// open session keeps the model loaded.
     /// One session runs at a time and chat completions wait for it to close:
     /// both throw ``LlamaError/busy(_:)`` meanwhile. A paused engine is
     /// resumed first.
