@@ -144,6 +144,12 @@ struct RealtimeEventTests {
         #expect(session["instructions"] as? String == "Hi")
     }
 
+    @Test func endsTheInputOfALiveTranscriptionWithAFinalCommit() {
+        #expect(RealtimeSession.commitEvent(final: false)["final"] == nil)
+        #expect(RealtimeSession.commitEvent(final: true)["final"] as? Bool == true)
+        #expect(RealtimeSession.commitEvent(final: true)["type"] as? String == "input_audio_buffer.commit")
+    }
+
     @Test func toleratesInvalidJSON() {
         let e = RealtimeEvent(json: "{not json")
         #expect(e.type == "")

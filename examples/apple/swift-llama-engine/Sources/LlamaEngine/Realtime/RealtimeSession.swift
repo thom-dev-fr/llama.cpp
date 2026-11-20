@@ -197,8 +197,10 @@ public final class RealtimeSession: AsyncSequence, @unchecked Sendable {
     /// (or of a model that can only transcribe), like the `language` and
     /// `prompt` of `/v1/audio/transcriptions`. The prompt replaces the
     /// default instruction ("Transcribe audio to text"), e.g. to give names
-    /// or terms. Both can change between utterances; an empty string selects
-    /// the default.
+    /// or terms. The prompt can change between utterances; the language of
+    /// some models (LFM3) is fixed by the first audio. An empty string
+    /// selects the default. A live transcription (a model with an `asr`
+    /// template) ignores both.
     ///
     /// Throws ``LlamaError/invalidArgument(_:)`` if the parameters of a tool
     /// are not a JSON object.
@@ -265,13 +267,23 @@ public final class RealtimeSession: AsyncSequence, @unchecked Sendable {
     }
 
     /// Ends the audio of the user turn.
-    public func commitAudio() throws {
+    ///
+    /// In a live transcription (a model whose text comes while it listens),
+    /// a commit flushes the words held back by the delay of the model and
+    /// starts a new item; `final` ends the input instead, the last item is
+    /// completed once the audio is decoded.
+    public func commitAudio(final: Bool = false) throws {
         try sendLock.withLock {
             if let resampler {
                 try appendLocked(try resampler.flush())
             }
-            try sendLocked(Self.json(["type": "input_audio_buffer.commit"]))
+            try sendLocked(Self.json(Self.commitEvent(final: final)))
         }
+    }
+
+    /// The `input_audio_buffer.commit` event of ``commitAudio(final:)``.
+    static func commitEvent(final: Bool) -> [String: Any] {
+        final ? ["type": "input_audio_buffer.commit", "final": true] : ["type": "input_audio_buffer.commit"]
     }
 
     /// Drops the audio appended since the last commit.

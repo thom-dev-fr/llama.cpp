@@ -438,6 +438,42 @@ static void test_live_asr(server_routes & routes, const std::string & pcm) {
     print_types("live", s);
 }
 
+// opt-in (LLAMA_ENGINE_TEST_LIVE_PACED=1): the audio goes in at its real pace, like a microphone,
+// each delta is printed with its time, to see how far the text lags behind the audio
+static void test_live_asr_paced(server_routes & routes, const std::string & pcm) {
+    std::printf("live transcription at the pace of the audio (%.1f s)\n", pcm.size() / 32000.0);
+    session s(routes, "transcription");
+    json ev;
+    EXPECT(s.until("session.created", ev));
+    if (ev.at("session").value("type", std::string()) != "transcription") {
+        std::printf("  no live transcription for this model\n");
+        return;
+    }
+    const auto t0 = std::chrono::steady_clock::now();
+    const auto elapsed = [&t0]() {
+        return std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    };
+    std::thread sender([&]() {
+        const size_t chunk = 3200; // 100 ms at 16 kHz
+        for (size_t i = 0; i < pcm.size(); i += chunk) {
+            // a chunk is sent once it has been "recorded"
+            std::this_thread::sleep_until(t0 + std::chrono::milliseconds((i + chunk) / 32));
+            const json append = {{"type", "input_audio_buffer.append"}, {"audio", base64::encode(pcm.substr(i, chunk))}};
+            if (s.conn.push(append.dump()) != realtime_conn::push_status::ok) {
+                return;
+            }
+        }
+        s.conn.push(json({{"type", "input_audio_buffer.commit"}, {"final", true}}).dump());
+    });
+    EXPECT(s.until("conversation.item.input_audio_transcription.completed", ev, [&](const json & e) {
+        if (e.value("type", std::string()) == "conversation.item.input_audio_transcription.delta") {
+            std::printf("  %6.2f s  %s\n", elapsed(), e.at("delta").dump().c_str());
+        }
+    }));
+    sender.join();
+    std::printf("  completed at %.2f s: %s\n", elapsed(), ev.value("transcript", std::string()).c_str());
+}
+
 static void test_close_during_response(server_routes & routes) {
     std::printf("close during a response: the worker ends, the slot is free again\n");
     {
@@ -797,7 +833,7 @@ static void test_capi_idle_sleep(llama_engine_config cfg) {
     llama_engine_destroy(engine);
 }
 
-static void run_routes_tests(const llama_engine_config & cfg, const std::string & pcm) {
+static void run_routes_tests(const llama_engine_config & cfg, const std::string & pcm, bool live_paced_only) {
     common_params params = llama_engine::params_translator::translate(cfg);
 
     server_context ctx;
@@ -809,6 +845,13 @@ static void run_routes_tests(const llama_engine_config & cfg, const std::string 
     }
     routes.update_meta(ctx);
     std::thread loop([&ctx]() { ctx.start_loop(); });
+
+    if (live_paced_only) {
+        test_live_asr_paced(routes, pcm);
+        ctx.terminate();
+        loop.join();
+        return;
+    }
 
     test_conversation(routes, pcm);
     test_clear_audio(routes, pcm);
@@ -844,13 +887,18 @@ int main(int argc, char ** argv) {
     std::memset(&cfg, 0, sizeof(cfg));
     cfg.model_path          = argv[1];
     cfg.mtmd_projector_path = argv[2];
-    cfg.context_size        = 4096;
+    cfg.context_size        = std::getenv("LLAMA_ENGINE_TEST_CTX") ? std::atoi(std::getenv("LLAMA_ENGINE_TEST_CTX")) : 4096;
     cfg.gpu_layers          = argc > 4 ? std::atoi(argv[4]) : -1;
     cfg.parallel_slots      = 1;
     cfg.kv_cache_type       = LLAMA_ENGINE_KV_F16;
     cfg.use_mmap            = true;
     cfg.idle_pause_seconds  = -1;
-    run_routes_tests(cfg, pcm);
+    if (std::getenv("LLAMA_ENGINE_TEST_LIVE_PACED")) {
+        run_routes_tests(cfg, pcm, /*live_paced_only=*/true);
+        std::printf("\n===== %d / %d passed =====\n", g_total - g_failures, g_total);
+        return g_failures == 0 ? 0 : 1;
+    }
+    run_routes_tests(cfg, pcm, /*live_paced_only=*/false);
 
     llama_engine_t * engine = llama_engine_create();
     EXPECT(llama_engine_load(engine, &cfg) == LLAMA_ENGINE_OK);
